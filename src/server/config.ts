@@ -1,7 +1,9 @@
 import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync } from "node:fs";
 import { env } from "node:process";
 import { homedir } from "node:os";
+import { isIP } from "node:net";
 import { join, resolve } from "node:path";
+import { domainToASCII } from "node:url";
 import process from "node:process";
 
 import * as z from "zod/v4";
@@ -12,9 +14,12 @@ import type { LogLevel } from "./logger";
 const TransportSchema = z.enum(["stdio", "http"]);
 const BrowserModeSchema = z.enum(["disabled", "connect", "launch", "managed"]);
 const ConfigPathSchema = z.string().trim().min(1).max(4_096);
-const DomainPatternSchema = z.string().trim().min(1).max(253);
+const DomainPatternSchema = z.string().trim().min(1).max(253).refine(isValidDomainPattern, "Domain patterns must be exact hostnames or *.-prefixed suffixes.");
 const HostPatternSchema = z.string().trim().min(1).max(2_048);
+const ViewportDimensionSchema = z.number().int().min(1).max(10_000);
+const BrowserViewportSchema = z.object({ width: ViewportDimensionSchema, height: ViewportDimensionSchema }).strict();
 const ConfigList = <T extends z.ZodType>(schema: T) => z.array(schema).max(128);
+const MAX_CONFIG_FILE_BYTES = 2_000_000;
 
 const RawConfigSchema = z
   .object({
@@ -39,6 +44,7 @@ const RawConfigSchema = z
         url: ConfigPathSchema.optional(),
         executablePath: ConfigPathSchema.optional(),
         headless: z.boolean().optional(),
+        viewport: BrowserViewportSchema.optional(),
         userDataDir: ConfigPathSchema.optional(),
         autoLaunch: z.boolean().optional(),
         actionTimeoutMs: z.number().int().min(100).max(120_000).optional(),
@@ -86,6 +92,7 @@ export interface ServerConfig {
     url?: string;
     executablePath?: string;
     headless: boolean;
+    viewport?: { width: number; height: number };
     userDataDir?: string;
     autoLaunch: boolean;
     actionTimeoutMs: number;
@@ -130,19 +137,44 @@ function parseInteger(value: string | undefined, fallback: number): number {
   return parsed;
 }
 
+function parseOptionalInteger(value: string | undefined, fallback: number | undefined): number | undefined {
+  if (value === undefined || value === "") {
+    return fallback;
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed)) {
+    throw new AppError("CONFIG_INVALID", `Invalid integer value '${value}'.`);
+  }
+  return parsed;
+}
+
+function resolveBrowserViewport(width: number | undefined, height: number | undefined): { width: number; height: number } | undefined {
+  if (width === undefined && height === undefined) {
+    return undefined;
+  }
+  if (width === undefined || height === undefined) {
+    throw new AppError("CONFIG_INVALID", "Browser viewport configuration requires both width and height.");
+  }
+  return { width, height };
+}
+
 function parseList(value: string | undefined, fallback: string[] = []): string[] {
   if (value === undefined || value.trim() === "") {
     return normalizeList(fallback);
   }
-  return normalizeList(value.split(","));
+  const items = value.split(",").map((item) => item.trim());
+  if (items.some((item) => item.length === 0)) {
+    throw new AppError("CONFIG_INVALID", "Configured comma-separated lists must not contain empty entries.");
+  }
+  return normalizeList(items);
 }
 
-function expandPath(value: string): string {
+function expandPath(value: string, homeDirectory = homedir()): string {
   const trimmed = value.trim();
   if (!trimmed || trimmed.includes("\0")) {
     throw new AppError("CONFIG_INVALID", "Configured paths must be non-empty and must not contain null bytes.");
   }
-  const expanded = trimmed === "~" ? homedir() : trimmed.startsWith("~/") ? join(homedir(), trimmed.slice(2)) : trimmed;
+  const expanded = trimmed === "~" ? homeDirectory : trimmed.startsWith("~/") ? join(homeDirectory, trimmed.slice(2)) : trimmed;
   return resolve(expanded);
 }
 
@@ -150,12 +182,35 @@ function normalizeList(values: readonly string[]): string[] {
   return [...new Set(values.map((item) => item.trim()).filter(Boolean))];
 }
 
+function isValidDomainPattern(value: string): boolean {
+  const trimmed = value.trim().replace(/^\.+|\.+$/g, "");
+  const wildcard = trimmed.startsWith("*.");
+  const base = wildcard ? trimmed.slice(2) : trimmed;
+  if (!base || (trimmed.includes("*") && !wildcard) || base.includes("..")) {
+    return false;
+  }
+  const bracketless = base.replace(/^\[|\]$/g, "");
+  if (isIP(bracketless) !== 0) {
+    return true;
+  }
+  let ascii: string;
+  try {
+    ascii = domainToASCII(base);
+  } catch {
+    return false;
+  }
+  if (!ascii || ascii.length > 253) {
+    return false;
+  }
+  return ascii.split(".").every((label) => label.length > 0 && label.length <= 63 && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i.test(label));
+}
+
 function trimOptional(value: string | undefined): string | undefined {
   return value?.trim();
 }
 
-function expandOptionalPath(value: string | undefined): string | undefined {
-  return value === undefined ? undefined : expandPath(value);
+function expandOptionalPath(value: string | undefined, homeDirectory = homedir()): string | undefined {
+  return value === undefined ? undefined : expandPath(value, homeDirectory);
 }
 
 function isErrorCode(error: unknown, code: string): boolean {
@@ -199,6 +254,9 @@ function readConfigFile(configPath: string, options: ReadConfigOptions = {}): Ra
       if ((mode & 0o077) !== 0) {
         throw new AppError("CONFIG_INSECURE", "Configuration files must use owner-only permissions (for example, chmod 600).");
       }
+    }
+    if (stats.size > MAX_CONFIG_FILE_BYTES) {
+      throw new AppError("CONFIG_INVALID", `Configuration files must be ${MAX_CONFIG_FILE_BYTES} bytes or smaller.`);
     }
     const parsed = JSON.parse(readFileSync(descriptor, "utf8")) as unknown;
     // The wizard intentionally preserves unrelated root sections so it can
@@ -274,7 +332,24 @@ function validateConfig(config: ServerConfig): ServerConfig {
   if (config.browser.maxHtmlChars < 1_000 || config.browser.maxHtmlChars > 500_000) {
     throw new AppError("CONFIG_INVALID", "Maximum HTML characters must be between 1000 and 500000.");
   }
+  validateBrowserEndpoint(config.browser.url, ["http:", "https:"], "Browser DevTools URL");
+  validateBrowserEndpoint(config.browser.wsEndpoint, ["ws:", "wss:"], "Browser WebSocket endpoint");
   return config;
+}
+
+function validateBrowserEndpoint(value: string | undefined, protocols: readonly string[], label: string): void {
+  if (value === undefined) {
+    return;
+  }
+  let endpoint: URL;
+  try {
+    endpoint = new URL(value);
+  } catch (error) {
+    throw new AppError("CONFIG_INVALID", `${label} must be a valid URL.`, { cause: error });
+  }
+  if (!protocols.includes(endpoint.protocol) || !endpoint.hostname || endpoint.hostname === "." || endpoint.hostname === ".." || endpoint.username || endpoint.password) {
+    throw new AppError("CONFIG_INVALID", `${label} must be an absolute ${protocols.join(" or ")} URL without credentials.`);
+  }
 }
 
 export function loadServerConfig(args: string[] = [], environment: NodeJS.ProcessEnv = env, homeDirectory = homedir()): ServerConfig {
@@ -293,17 +368,20 @@ export function loadServerConfig(args: string[] = [], environment: NodeJS.Proces
   const configPath = argValue("--config") ?? environment.SMOOTH_OPERATOR_CONFIG;
   const defaultConfigPath = join(homeDirectory, ".smooth-operator", "config.json");
   const fileConfig = configPath
-    ? readConfigFile(expandPath(configPath))
+    ? readConfigFile(expandPath(configPath, homeDirectory))
     : readConfigFile(defaultConfigPath, { allowMissing: true, allowUnknownRootKeys: true });
   const nestedHttp = fileConfig.http ?? {};
   const nestedBrowser = fileConfig.browser ?? {};
   const nestedSecurity = fileConfig.security ?? {};
+  const viewportWidth = parseOptionalInteger(environment.SMOOTH_OPERATOR_BROWSER_VIEWPORT_WIDTH, nestedBrowser.viewport?.width);
+  const viewportHeight = parseOptionalInteger(environment.SMOOTH_OPERATOR_BROWSER_VIEWPORT_HEIGHT, nestedBrowser.viewport?.height);
+  const viewport = resolveBrowserViewport(viewportWidth, viewportHeight);
 
-  const dataDir = expandPath(environment.SMOOTH_OPERATOR_DATA_DIR ?? fileConfig.dataDir ?? join(homeDirectory, ".smooth-operator"));
+  const dataDir = expandPath(environment.SMOOTH_OPERATOR_DATA_DIR ?? fileConfig.dataDir ?? join(homeDirectory, ".smooth-operator"), homeDirectory);
   const defaultBrowserDataDir = join(dataDir, "browser");
   const configuredRoots = parseList(environment.SMOOTH_OPERATOR_ALLOWED_FILE_ROOTS, nestedSecurity.allowedFileRoots ?? []);
   // Default to private data directory; explicit allowlist required for other roots.
-  const allowedFileRoots = (configuredRoots.length > 0 ? configuredRoots : [join(dataDir, "files"), join(dataDir, "downloads")]).map(expandPath);
+  const allowedFileRoots = (configuredRoots.length > 0 ? configuredRoots : [join(dataDir, "files"), join(dataDir, "downloads")]).map((path) => expandPath(path, homeDirectory));
 
   const config: ServerConfig = {
     transport: (argValue("--transport") ?? environment.SMOOTH_OPERATOR_TRANSPORT ?? fileConfig.transport ?? "stdio") as Transport,
@@ -321,12 +399,13 @@ export function loadServerConfig(args: string[] = [], environment: NodeJS.Proces
       mode: (environment.SMOOTH_OPERATOR_BROWSER_MODE ?? nestedBrowser.mode ?? "managed") as ServerConfig["browser"]["mode"],
       wsEndpoint: trimOptional(environment.SMOOTH_OPERATOR_BROWSER_WS_ENDPOINT ?? nestedBrowser.wsEndpoint),
       url: trimOptional(environment.SMOOTH_OPERATOR_BROWSER_URL ?? nestedBrowser.url) ?? "http://127.0.0.1:9222",
-      executablePath: expandOptionalPath(environment.SMOOTH_OPERATOR_BROWSER_EXECUTABLE ?? nestedBrowser.executablePath),
+      executablePath: expandOptionalPath(environment.SMOOTH_OPERATOR_BROWSER_EXECUTABLE ?? nestedBrowser.executablePath, homeDirectory),
       headless: parseBoolean(environment.SMOOTH_OPERATOR_BROWSER_HEADLESS, nestedBrowser.headless ?? false),
+      ...(viewport ? { viewport } : {}),
       // Managed and launch modes get one private, persistent profile by default. This is
       // an internal server profile, not a user-selectable capability profile;
       // an explicit path remains available for isolated harness runs.
-      userDataDir: expandOptionalPath(environment.SMOOTH_OPERATOR_BROWSER_USER_DATA_DIR ?? nestedBrowser.userDataDir) ?? defaultBrowserDataDir,
+      userDataDir: expandOptionalPath(environment.SMOOTH_OPERATOR_BROWSER_USER_DATA_DIR ?? nestedBrowser.userDataDir, homeDirectory) ?? defaultBrowserDataDir,
       autoLaunch: parseBoolean(environment.SMOOTH_OPERATOR_BROWSER_AUTO_LAUNCH, nestedBrowser.autoLaunch ?? false),
       actionTimeoutMs: parseInteger(environment.SMOOTH_OPERATOR_BROWSER_TIMEOUT_MS, nestedBrowser.actionTimeoutMs ?? 15_000),
       connectTimeoutMs: parseInteger(environment.SMOOTH_OPERATOR_BROWSER_CONNECT_TIMEOUT_MS, nestedBrowser.connectTimeoutMs ?? 30_000),

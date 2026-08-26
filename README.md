@@ -53,6 +53,20 @@ Talk to your harness normally. It will call `browser_navigate` → `browser_snap
 - Safe — domain policy, bounded outputs, JS off by default (`SMOOTH_OPERATOR_ALLOW_EVAL`)
 - Works — stdio default, HTTP optional
 
-Details: [AGENTS.md](AGENTS.md) · [MCP guide](docs/mcp-server.md) · [harnesses](docs/harnesses.md)
+## Benchmarks
 
-ChatGPT developer-mode connections use the private [Secure MCP Tunnel](docs/mcp-server.md#chatgpt-and-openai-connections) route or a separately secured HTTPS deployment.
+| Benchmark | Metric | SmoothOperator | Browser Use MCP |
+| --- | --- | ---: | ---: |
+| Live Web (8 sites, 32 episodes) | URL success | **32/32** | 23/32 |
+| Live Web | Page-text quality | **26/32** | 21/32 |
+| Live Web | Combined success | **26/32** | 18/32 |
+| Live Web | Task latency mean / p95 | **1,357.697 / 2,957.241 ms** | 4,603.811 / 30,780.107 ms |
+| Live Web | Navigation p95 | **2,130.255 ms** | 4,320.076 ms |
+| Live Web | Click p95 | 919.812 ms | **142.231 ms** |
+| Live Web | MCP call p95 | **942.979 ms** | 2,095.407 ms |
+| Live Web | Trace errors | **0** | 10 |
+| MiniWoB++ 0.14.3 (125 tasks) | Reward = 1 | **124/125** | 89/125 |
+| MiniWoB++ | Attempts | **125** | 125 |
+| MiniWoB++ | MCP errors | **0** | 29 |
+| MiniWoB++ | Transport errors | **0** | **0** |
+| MiniWoB++ | Timeouts | **0** | **0** |

@@ -107,6 +107,18 @@ describe("harness installer", () => {
     }
   });
 
+  it("rejects an oversized configuration before parsing or backing it up", async () => {
+    const directory = await makeDirectory("smooth-operator-installer-large-");
+    const configPath = join(directory, "config.json");
+    try {
+      await writeFile(configPath, "x".repeat(2_000_001));
+      await expect(installHarness("claude-desktop", configOptions(configPath))).rejects.toThrow(/2000000 bytes or smaller/);
+      expect(await readdir(directory)).toEqual(["config.json"]);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("fails closed for a conflicting existing server and preserves unrelated data", async () => {
     const directory = await makeDirectory("smooth-operator-installer-conflict-");
     const configPath = join(directory, "config.json");

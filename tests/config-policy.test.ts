@@ -41,6 +41,8 @@ describe("configuration", () => {
       SMOOTH_OPERATOR_BROWSER_CDP_TIMEOUT_MS: "25000",
       SMOOTH_OPERATOR_MAX_SCREENSHOT_BYTES: "4000000",
       SMOOTH_OPERATOR_MAX_HTML_CHARS: "120000",
+      SMOOTH_OPERATOR_BROWSER_VIEWPORT_WIDTH: "1280",
+      SMOOTH_OPERATOR_BROWSER_VIEWPORT_HEIGHT: "720",
       SMOOTH_OPERATOR_BROWSER_EXECUTABLE: "/usr/bin/chromium",
     });
     expect("profile" in config.browser).toBe(false);
@@ -49,6 +51,18 @@ describe("configuration", () => {
     expect(config.browser.cdpTimeoutMs).toBe(25_000);
     expect(config.browser.maxScreenshotBytes).toBe(4_000_000);
     expect(config.browser.maxHtmlChars).toBe(120_000);
+    expect(config.browser.viewport).toEqual({ width: 1_280, height: 720 });
+  });
+
+  it("expands tilde paths against the supplied home directory", () => {
+    const config = loadTestConfig([], {
+      SMOOTH_OPERATOR_DATA_DIR: "~/smooth-data",
+      SMOOTH_OPERATOR_BROWSER_USER_DATA_DIR: "~/browser-profile",
+      SMOOTH_OPERATOR_ALLOWED_FILE_ROOTS: "~/files",
+    });
+    expect(config.dataDir).toBe(join(TEST_HOME, "smooth-data"));
+    expect(config.browser.userDataDir).toBe(join(TEST_HOME, "browser-profile"));
+    expect(config.security.allowedFileRoots).toEqual([join(TEST_HOME, "files")]);
   });
 
   it("uses managed, headed browser control by default while respecting explicit settings", () => {
@@ -69,7 +83,7 @@ describe("configuration", () => {
     try {
       await mkdir(configDirectory, { recursive: true });
       await writeFile(configPath, JSON.stringify({
-        browser: { mode: "disabled", headless: true },
+        browser: { mode: "disabled", headless: true, viewport: { width: 1024, height: 768 } },
         security: { allowedDomains: ["example.com"], allowEval: false },
         dataDir: join(home, "runtime"),
         harness: { name: "unrelated" },
@@ -77,7 +91,7 @@ describe("configuration", () => {
       await chmod(configPath, 0o600);
 
       const config = loadServerConfig([], {}, home);
-      expect(config.browser).toMatchObject({ mode: "disabled", headless: true });
+      expect(config.browser).toMatchObject({ mode: "disabled", headless: true, viewport: { width: 1024, height: 768 } });
       expect(config.security.allowedDomains).toEqual(["example.com"]);
       expect(config.dataDir).toBe(join(home, "runtime"));
     } finally {
@@ -88,6 +102,27 @@ describe("configuration", () => {
   it("accepts managed mode without an executable until browser use", () => {
     expect(loadTestConfig([], { SMOOTH_OPERATOR_BROWSER_MODE: "managed" }).browser.mode).toBe("managed");
     expect(loadTestConfig([], { SMOOTH_OPERATOR_BROWSER_AUTO_LAUNCH: "true" }).browser.mode).toBe("managed");
+  });
+
+  it("leaves the browser viewport undefined unless explicitly configured", () => {
+    expect(loadTestConfig([], {}).browser.viewport).toBeUndefined();
+    expect(loadTestConfig([], {
+      SMOOTH_OPERATOR_BROWSER_VIEWPORT_WIDTH: "1366",
+      SMOOTH_OPERATOR_BROWSER_VIEWPORT_HEIGHT: "768",
+    }).browser.viewport).toEqual({ width: 1_366, height: 768 });
+  });
+
+  it("requires paired, bounded browser viewport dimensions", () => {
+    expect(() => loadTestConfig([], { SMOOTH_OPERATOR_BROWSER_VIEWPORT_WIDTH: "1280" })).toThrowError(/requires both width and height/);
+    expect(() => loadTestConfig([], { SMOOTH_OPERATOR_BROWSER_VIEWPORT_HEIGHT: "720" })).toThrowError(/requires both width and height/);
+    expect(() => loadTestConfig([], {
+      SMOOTH_OPERATOR_BROWSER_VIEWPORT_WIDTH: "0",
+      SMOOTH_OPERATOR_BROWSER_VIEWPORT_HEIGHT: "720",
+    })).toThrowError(/Configuration failed validation/);
+    expect(() => loadTestConfig([], {
+      SMOOTH_OPERATOR_BROWSER_VIEWPORT_WIDTH: "10001",
+      SMOOTH_OPERATOR_BROWSER_VIEWPORT_HEIGHT: "720",
+    })).toThrowError(/Configuration failed validation/);
   });
 
   it("requires an executable for explicit launch and connect auto-launch", () => {
@@ -158,6 +193,18 @@ describe("configuration", () => {
     })).toThrowError(/printable ASCII/);
   });
 
+  it("rejects malformed comma-separated configuration lists", () => {
+    expect(() => loadTestConfig([], { SMOOTH_OPERATOR_ALLOWED_DOMAINS: "," })).toThrowError(/empty entries/);
+    expect(() => loadTestConfig([], { SMOOTH_OPERATOR_ALLOWED_DOMAINS: "example.com,,other.example" })).toThrowError(/empty entries/);
+    expect(() => loadTestConfig([], { SMOOTH_OPERATOR_BLOCKED_DOMAINS: "example.*" })).toThrowError(/Configuration failed validation/);
+  });
+
+  it("rejects malformed browser endpoints during configuration load", () => {
+    expect(() => loadTestConfig([], { SMOOTH_OPERATOR_BROWSER_URL: "not-an-endpoint" })).toThrowError(/DevTools URL/);
+    expect(() => loadTestConfig([], { SMOOTH_OPERATOR_BROWSER_URL: "file:///tmp/devtools" })).toThrowError(/absolute http: or https:/);
+    expect(() => loadTestConfig([], { SMOOTH_OPERATOR_BROWSER_WS_ENDPOINT: "http://127.0.0.1:9222" })).toThrowError(/WebSocket endpoint/);
+  });
+
   it("rejects group-readable JSON configuration", async () => {
     if (process.platform === "win32") {
       return;
@@ -168,6 +215,18 @@ describe("configuration", () => {
     await chmod(path, 0o644);
     expect(() => loadTestConfig(["--config", path], {})).toThrowError(/chmod 600/);
     await rm(directory, { recursive: true, force: true });
+  });
+
+  it("rejects oversized JSON configuration before parsing", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "smooth-operator-config-large-"));
+    const path = join(directory, "config.json");
+    try {
+      await writeFile(path, "x".repeat(2_000_001));
+      await chmod(path, 0o600);
+      expect(() => loadTestConfig(["--config", path], {})).toThrowError(/2000000 bytes or smaller/);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it("does not initialize runtime data through a symlink", async () => {
@@ -215,6 +274,23 @@ describe("security policy", () => {
     expect(() => policy.assertNavigationAllowed("http://[::ffff:127.0.0.1]")).toThrowError(/Private-network/);
     expect(() => policy.assertNavigationAllowed("https://other.example")).toThrowError(/allowlist/);
     expect(policy.assertNavigationAllowed("https://example.com/path").hostname).toBe("example.com");
+  });
+
+  it("rejects URL hosts that normalize to an empty hostname", () => {
+    const policy = new SecurityPolicy(testConfig());
+    for (const rawUrl of ["http://.", "http://..", "http://%2e"]) {
+      expect(() => policy.assertNavigationAllowed(rawUrl)).toThrowError(/host is invalid/i);
+    }
+  });
+
+  it("fails closed when a programmatic blocklist contains an invalid pattern", () => {
+    const policy = new SecurityPolicy(testConfig({ security: { ...testConfig().security, blockedDomains: ["example.*"] } }));
+    expect(() => policy.assertNavigationAllowed("https://example.com")).toThrowError(/blocked-domain patterns are invalid/);
+  });
+
+  it("turns malformed programmatic blocklist values into policy errors", () => {
+    const policy = new SecurityPolicy(testConfig({ security: { ...testConfig().security, blockedDomains: [42 as unknown as string] } }));
+    expect(() => policy.assertNavigationAllowed("https://example.com")).toThrowError(/blocked-domain patterns are invalid/);
   });
 
   it("applies the same private-network policy to resolved literal targets", async () => {
@@ -272,6 +348,25 @@ describe("security policy", () => {
     dnsLookup.mockReset();
   });
 
+  it("times out hung DNS lookups and allows a later retry", async () => {
+    vi.useFakeTimers();
+    try {
+      dnsLookup.mockReset();
+      dnsLookup.mockImplementationOnce(() => new Promise(() => undefined));
+      const policy = new SecurityPolicy(testConfig());
+      const pending = policy.assertNavigationAllowedAsync("https://hung-dns.example");
+      const expectedTimeout = expect(pending).rejects.toMatchObject({ code: "DNS_RESOLUTION_FAILED" });
+      await vi.advanceTimersByTimeAsync(10_000);
+      await expectedTimeout;
+
+      dnsLookup.mockResolvedValueOnce([{ address: "93.184.216.34" }]);
+      await expect(policy.assertNavigationAllowedAsync("https://hung-dns.example")).resolves.toBeInstanceOf(URL);
+    } finally {
+      dnsLookup.mockReset();
+      vi.useRealTimers();
+    }
+  });
+
   it("fails closed when any DNS answer is private or malformed", async () => {
     dnsLookup.mockReset();
     dnsLookup.mockResolvedValueOnce([{ address: "93.184.216.34" }, { address: "10.0.0.4" }]);
@@ -294,6 +389,8 @@ describe("security policy", () => {
     const policyV6 = new SecurityPolicy(testConfig());
     expect(() => policyV6.assertNavigationAllowed("http://[64:ff9b::127.0.0.1]")).toThrowError(/Private-network/);
     expect(() => policyV6.assertNavigationAllowed("http://[2001:0:abcd:dcba::1]")).toThrowError(/Private-network/);
+    expect(() => policyV6.assertNavigationAllowed("http://[2001:0:abcd:dcba::f5ff:fffe]")).toThrowError(/Private-network/);
+    expect(() => policyV6.assertNavigationAllowed("http://[2002:7f00:1::1]")).toThrowError(/Private-network/);
     expect(() => policyV6.assertNavigationAllowed("http://[64:ff9b::9.9.9.9]")).not.toThrow();
   });
 

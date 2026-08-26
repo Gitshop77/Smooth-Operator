@@ -13,6 +13,7 @@ import { AppError } from "./errors";
 const execFileAsync = promisify(execFile);
 const INSTALL_COMMAND_TIMEOUT_MS = 30_000;
 const MAX_INSTALL_MESSAGE_BYTES = 2_000;
+const MAX_INSTALL_CONFIG_BYTES = 2_000_000;
 const JSON_BACKUP_LIMIT = 1_000;
 const SUPPORTED_HARNESSES = ["claude-code", "opencode", "copilot", "codex", "gemini", "vscode", "cursor", "windsurf", "claude-desktop"] as const;
 
@@ -330,6 +331,9 @@ async function readConfigFile(path: string): Promise<ReviewedConfigFile | undefi
     if (!info.isFile()) {
       throw new AppError("INSTALL_CONFIG_FAILED", `The configuration file '${path}' must be a regular file.`);
     }
+    if (info.size > MAX_INSTALL_CONFIG_BYTES) {
+      throw new AppError("INSTALL_CONFIG_FAILED", `The configuration file '${path}' must be ${MAX_INSTALL_CONFIG_BYTES} bytes or smaller.`);
+    }
     const bytes = await handle.readFile();
     return { bytes, handle };
   } catch (error) {
@@ -493,7 +497,7 @@ function sameOpenCodeEntry(value: Record<string, unknown>, desired: Record<strin
       : value.enabled === undefined || value.enabled === true);
 }
 
-async function ensureSecureDirectory(path: string): Promise<void> {
+export async function ensureSecureDirectory(path: string): Promise<void> {
   const absolute = resolve(path);
   // macOS exposes /var (and sometimes /tmp) through system aliases. Check all
   // components while allowing only those known OS aliases; a user-controlled

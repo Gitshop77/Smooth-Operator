@@ -37,6 +37,7 @@ Environment:
   SMOOTH_OPERATOR_BROWSER_WS_ENDPOINT=ws://...
   SMOOTH_OPERATOR_BROWSER_URL=http://127.0.0.1:9222
   SMOOTH_OPERATOR_BROWSER_EXECUTABLE=/path/to/chrome
+  SMOOTH_OPERATOR_BROWSER_VIEWPORT_WIDTH=1280 and SMOOTH_OPERATOR_BROWSER_VIEWPORT_HEIGHT=720
   SMOOTH_OPERATOR_BROWSER_CONNECT_TIMEOUT_MS=30000
   SMOOTH_OPERATOR_BROWSER_CDP_TIMEOUT_MS=30000
   SMOOTH_OPERATOR_ALLOWED_DOMAINS=example.com,*.example.org
@@ -137,10 +138,16 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     return;
   }
 
-  const handle = serveStdio(() => createMcpServer(runtime), {
-    legacy: "serve",
-    onerror: (error) => runtime.logger.error("MCP stdio error", safeErrorDiagnostic(error)),
-  });
+  let handle: ReturnType<typeof serveStdio>;
+  try {
+    handle = serveStdio(() => createMcpServer(runtime), {
+      legacy: "serve",
+      onerror: (error) => runtime.logger.error("MCP stdio error", safeErrorDiagnostic(error)),
+    });
+  } catch (error) {
+    await shutdown("STDIO_STARTUP_FAILED");
+    throw error;
+  }
   let closePromise: Promise<void> | undefined;
   const close = async (reason: string): Promise<void> => {
     if (!closePromise) {
@@ -190,6 +197,8 @@ async function serveHttp(runtime: ServerRuntime, shutdown: (reason: string) => P
   let accepting = true;
 
   const server = createServer((request, response) => {
+    response.on("error", (error: unknown) => runtime.logger.error("MCP HTTP response error", safeErrorDiagnostic(error)));
+    request.on("error", (error: unknown) => runtime.logger.error("MCP HTTP request error", safeErrorDiagnostic(error)));
     if (!accepting) {
       response.writeHead(503, { "content-type": "application/json", "retry-after": "1" });
       response.end(JSON.stringify({ error: "server_shutting_down" }));
@@ -250,20 +259,30 @@ async function serveHttp(runtime: ServerRuntime, shutdown: (reason: string) => P
     streamPool.add(pending);
     void pending.catch((error: unknown) => {
       runtime.logger.error("MCP HTTP request failed", safeErrorDiagnostic(error));
-      if (!response.headersSent) {
-        const normalized = asAppError(error);
-        const status = normalized.status >= 400 && normalized.status <= 599 ? normalized.status : 500;
-        if (status === 408 || status === 413 || status === 499) {
-          response.setHeader("connection", "close");
-          response.once("finish", () => request.destroy());
+      try {
+        // A disconnected client can make the adapter reject after it has
+        // already torn down the response. Error reporting must not attempt a
+        // second write and turn a handled request failure into an uncaught
+        // ServerResponse exception.
+        if (response.destroyed || response.writableEnded) {
+          return;
         }
-        response.writeHead(status, { "content-type": "application/json" });
-      }
-      if (!response.writableEnded) {
         const normalized = asAppError(error);
         const status = normalized.status >= 400 && normalized.status <= 599 ? normalized.status : 500;
-        const code = status === 413 ? "request_too_large" : status === 499 ? "request_aborted" : status === 503 ? "server_busy" : "internal_error";
+          if (!response.headersSent) {
+            if (status === 408 || status === 413 || status === 499) {
+              response.setHeader("connection", "close");
+              closeIncompleteRequestAfterResponse(request, response);
+            }
+          response.writeHead(status, { "content-type": "application/json" });
+        }
+        if (response.writableEnded || response.destroyed) {
+          return;
+        }
+        const code = status === 408 ? "request_timeout" : status === 413 ? "request_too_large" : status === 499 ? "request_aborted" : status === 503 ? "server_busy" : "internal_error";
         response.end(JSON.stringify({ error: code }));
+      } catch (responseError) {
+        runtime.logger.error("MCP HTTP error response failed", safeErrorDiagnostic(responseError));
       }
     }).finally(() => {
       streamPool.delete(pending);
@@ -346,6 +365,15 @@ function setCorsHeaders(request: IncomingMessage, response: import("node:http").
   response.setHeader("vary", "Origin");
 }
 
+function closeIncompleteRequestAfterResponse(request: IncomingMessage, response: import("node:http").ServerResponse): void {
+  const closeRequest = (): void => {
+    if (!request.complete) {
+      request.destroy();
+    }
+  };
+  response.once("finish", closeRequest);
+}
+
 async function dispatchHttpRequest(
   request: IncomingMessage,
   response: import("node:http").ServerResponse,
@@ -362,14 +390,12 @@ async function dispatchHttpRequest(
     // wait for a sender that may trickle an arbitrarily large body before
     // releasing the bounded request slot.  Once the 413 response is flushed,
     // close this invalid request's connection rather than attempting reuse.
-    response.once("finish", () => {
-      if (!request.complete) {
-        request.destroy();
-      }
-    });
+    closeIncompleteRequestAfterResponse(request, response);
     throw new AppError("HTTP_BODY_TOO_LARGE", `HTTP request body exceeds the ${maxBodyBytes}-byte limit.`, { status: 413 });
   }
-  if (!request.method || !["POST", "PUT", "PATCH"].includes(request.method)) {
+  const method = request.method?.toUpperCase();
+  const hasDeclaredBody = contentLength > 0 || request.headers["transfer-encoding"] !== undefined;
+  if ((method === "GET" || method === "HEAD") && !hasDeclaredBody) {
     await nodeHandler(request, response);
     return;
   }

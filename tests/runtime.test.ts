@@ -64,6 +64,9 @@ describe("runtime lifecycle", () => {
       // owns the profile lease; only its browser operations conflict.
       second = await ServerRuntime.create(config);
       await expect(second.run({ action: "navigate", url: "https://example.test/" } as never)).rejects.toMatchObject({ code: "BROWSER_PROFILE_IN_USE" });
+      const cancelled = new AbortController();
+      cancelled.abort();
+      await expect(second.listTabs(cancelled.signal)).rejects.toMatchObject({ code: "CANCELLED" });
       // Once the owner releases, the survivor can acquire the lease lazily.
       await first.close();
       const lease = second as unknown as { ensureBrowserProfileLease(): Promise<void> };
@@ -73,6 +76,67 @@ describe("runtime lifecycle", () => {
       await second?.close();
     }
     await expect(access(join(profile, ".smooth-operator-profile.lock"))).rejects.toMatchObject({ code: "ENOENT" });
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("serializes lazy profile acquisition for concurrent requests", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "smooth-operator-runtime-lazy-lock-"));
+    const profile = join(directory, "browser");
+    const base = testConfig();
+    const config = testConfig({
+      dataDir: directory,
+      browser: { ...base.browser, mode: "launch", executablePath: "/usr/bin/chromium", userDataDir: profile },
+    });
+    const owner = await ServerRuntime.create(config);
+    const waiting = await ServerRuntime.create(config);
+    try {
+      await owner.close();
+      const internal = waiting as unknown as { ensureBrowserProfileLease(): Promise<void> };
+      await expect(Promise.all([internal.ensureBrowserProfileLease(), internal.ensureBrowserProfileLease()])).resolves.toEqual([undefined, undefined]);
+      await expect(access(join(profile, ".smooth-operator-profile.lock"))).resolves.toBeUndefined();
+    } finally {
+      await owner.close().catch(() => undefined);
+      await waiting.close().catch(() => undefined);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps a shared profile acquisition after one waiter cancels", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "smooth-operator-runtime-cancel-lock-"));
+    const profile = join(directory, "browser");
+    const base = testConfig();
+    const config = testConfig({
+      dataDir: directory,
+      browser: { ...base.browser, mode: "launch", executablePath: "/usr/bin/chromium", userDataDir: profile },
+    });
+    const owner = await ServerRuntime.create(config);
+    const waiting = await ServerRuntime.create(config);
+    try {
+      let release!: () => void;
+      const pending = new Promise<void>((resolve) => { release = resolve; });
+      const internal = waiting as unknown as { ensureBrowserProfileLease(signal?: AbortSignal): Promise<void>; profileLeasePromise?: Promise<void> };
+      internal.profileLeasePromise = pending;
+      const cancelled = new AbortController();
+      cancelled.abort();
+
+      await expect(internal.ensureBrowserProfileLease(cancelled.signal)).rejects.toMatchObject({ code: "CANCELLED" });
+      expect(internal.profileLeasePromise).toBe(pending);
+      release();
+      await expect(internal.ensureBrowserProfileLease()).resolves.toBeUndefined();
+    } finally {
+      await owner.close();
+      await waiting.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects new work after shutdown begins", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "smooth-operator-runtime-closed-"));
+    const runtime = await ServerRuntime.create(testConfig({ dataDir: directory }));
+    await runtime.close();
+    await expect(runtime.run({ action: "list_tabs" } as never)).rejects.toMatchObject({ code: "SERVER_CLOSING", retryable: true });
+    await expect(runtime.webSearch("closed", {})).rejects.toMatchObject({ code: "SERVER_CLOSING", retryable: true });
+    expect(() => runtime.listSessions()).toThrowError(/shutting down/i);
     await rm(directory, { recursive: true, force: true });
   });
 

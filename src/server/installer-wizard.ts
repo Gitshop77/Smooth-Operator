@@ -50,6 +50,7 @@ interface PersonalChromeOptions {
 
 const PROBE_INTERVAL_MS = 300;
 const DEFAULT_PROBE_ATTEMPTS = 33;
+const MAX_WIZARD_CONFIG_BYTES = 2_000_000;
 const HARNESS_MENU = [
   { id: "opencode", label: "OpenCode", description: "Configures ~/.config/opencode/opencode.json" },
   { id: "claude-code", label: "Claude Code", description: "Runs `claude mcp add` for your user scope" },
@@ -407,10 +408,10 @@ async function defaultProbe(url: string, timeoutMs: number): Promise<ProbeResult
 
 export async function persistWizardConfig(choices: WizardChoices, homeDir: string): Promise<void> {
   const { join, dirname, resolve } = await import("node:path");
-  const { mkdir, chmod, lstat, readFile, writeFile, rename } = await import("node:fs/promises");
+  const { chmod, lstat, readFile, writeFile, rename } = await import("node:fs/promises");
   const configPath = resolve(join(homeDir, ".smooth-operator/config.json"));
-  await mkdir(dirname(configPath), { recursive: true, mode: 0o700 });
-  await chmod(dirname(configPath), 0o700).catch(() => {});
+  const { ensureSecureDirectory } = await import("./installer.js");
+  await ensureSecureDirectory(dirname(configPath));
   try {
     const stats = await lstat(configPath);
     if (stats.isSymbolicLink()) {
@@ -425,6 +426,11 @@ export async function persistWizardConfig(choices: WizardChoices, homeDir: strin
   // unrelated user settings (and unknown sections) survive the wizard.
   let previous: Record<string, unknown> = {};
   try {
+    const stats = await lstat(configPath);
+    if (stats.size > MAX_WIZARD_CONFIG_BYTES) {
+      const { AppError } = await import("./errors.js");
+      throw new AppError("INSTALL_CONFIG_FAILED", `Config must be ${MAX_WIZARD_CONFIG_BYTES} bytes or smaller`);
+    }
     const raw = await readFile(configPath, "utf8");
     const { parseJsonc } = await import("./installer.js");
     const parsed: unknown = parseJsonc(raw, configPath);
@@ -470,6 +476,11 @@ export async function persistWizardConfig(choices: WizardChoices, homeDir: strin
   await chmod(tmpPath, 0o600);
   // backup if exists
   try {
+    const stats = await lstat(configPath);
+    if (stats.size > MAX_WIZARD_CONFIG_BYTES) {
+      const { AppError } = await import("./errors.js");
+      throw new AppError("INSTALL_CONFIG_FAILED", `Config must be ${MAX_WIZARD_CONFIG_BYTES} bytes or smaller`);
+    }
     const existing = await readFile(configPath);
     const bak = `${configPath}.bak`;
     try {

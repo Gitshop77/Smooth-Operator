@@ -18,6 +18,8 @@ export class ServerRuntime {
   readonly browser: BrowserService;
   readonly research: ResearchService;
   private closePromise?: Promise<void>;
+  private profileLeasePromise?: Promise<void>;
+  private closing = false;
 
   private constructor(readonly config: ServerConfig, private browserProfileLease?: BrowserProfileLease) {
     this.logger = new Logger(config.logLevel, { component: "smooth-operator" });
@@ -38,20 +40,52 @@ export class ServerRuntime {
    * managed browser. Acquisition is lazy so concurrent harness sessions stay
    * connected while idle; only genuinely simultaneous browsing conflicts,
    * and that surfaces as a retryable tool error instead of a dead server. */
-  private async ensureBrowserProfileLease(): Promise<void> {
+  private async ensureBrowserProfileLease(signal?: AbortSignal): Promise<void> {
+    this.assertOpen();
+    if (signal?.aborted) {
+      throw new AppError("CANCELLED", "The browser action was cancelled.");
+    }
     if (!this.profileLeaseRequired || this.browserProfileLease || !this.config.browser.userDataDir) {
       return;
     }
-    try {
-      await ensurePrivateDirectory(this.config.browser.userDataDir);
-      this.browserProfileLease = await acquireBrowserProfileLease(this.config.browser.userDataDir);
-      this.logger.info("Acquired browser profile lease on demand");
-    } catch (error) {
-      if (error instanceof AppError && (error.code === "BROWSER_PROFILE_IN_USE" || error.code === "BROWSER_PROFILE_LOCK_FAILED")) {
-        throw new AppError("BROWSER_PROFILE_IN_USE", "Another SmoothOperator session currently owns the managed browser profile. Retry when that session closes, or switch one of them to connect mode.", { retryable: true });
-      }
-      throw error;
+    if (!this.profileLeasePromise) {
+      const acquisition = (async () => {
+        try {
+          await ensurePrivateDirectory(this.config.browser.userDataDir!);
+          const lease = await acquireBrowserProfileLease(this.config.browser.userDataDir!);
+          if (this.closing) {
+            await lease.release();
+            throw new AppError("SERVER_CLOSING", "The browser runtime is shutting down.", { retryable: true });
+          }
+          this.browserProfileLease = lease;
+          this.logger.info("Acquired browser profile lease on demand");
+        } catch (error) {
+          if (error instanceof AppError && (error.code === "BROWSER_PROFILE_IN_USE" || error.code === "BROWSER_PROFILE_LOCK_FAILED")) {
+            throw new AppError("BROWSER_PROFILE_IN_USE", "Another SmoothOperator session currently owns the managed browser profile. Retry when that session closes, or switch one of them to connect mode.", { retryable: true });
+          }
+          throw error;
+        }
+      })();
+      this.profileLeasePromise = acquisition;
+      // A caller may stop waiting without cancelling the filesystem work.
+      // Keep the shared promise installed until that work settles so a second
+      // request cannot start a concurrent profile-lock acquisition.
+      void acquisition.then(
+        () => {
+          if (this.profileLeasePromise === acquisition) {
+            this.profileLeasePromise = undefined;
+          }
+        },
+        () => {
+          if (this.profileLeasePromise === acquisition) {
+            this.profileLeasePromise = undefined;
+          }
+        },
+      );
     }
+    const pending = this.profileLeasePromise;
+    await awaitWithAbort(pending, signal);
+    this.assertOpen();
   }
 
   static async create(config: ServerConfig): Promise<ServerRuntime> {
@@ -94,6 +128,7 @@ export class ServerRuntime {
 
   async close(): Promise<void> {
     if (!this.closePromise) {
+      this.closing = true;
       this.closePromise = (async () => {
         const browserClose = await runShutdownPhase("browser close", () => this.browser.shutdownOutcome(), RUNTIME_SHUTDOWN_TIMEOUT_MS, this.logger);
         const browserOutcome = browserClose.value as { succeeded?: unknown } | undefined;
@@ -112,30 +147,36 @@ export class ServerRuntime {
   }
 
   async run(action: BrowserAction, signal?: AbortSignal): Promise<unknown> {
-    await this.ensureBrowserProfileLease();
+    await this.ensureBrowserProfileLease(signal);
+    this.assertOpen();
     return this.browser.execute(action, signal);
   }
 
   async runBatch(actions: BrowserAction[], options: { confirmDestructive?: boolean; includeSnapshot?: boolean } = {}, signal?: AbortSignal): Promise<unknown> {
-    await this.ensureBrowserProfileLease();
+    await this.ensureBrowserProfileLease(signal);
+    this.assertOpen();
     return this.browser.executeBatch(actions, options, signal);
   }
 
   async snapshot(options: NonNullable<Parameters<BrowserService["snapshot"]>[0]>, signal?: AbortSignal): Promise<PageSnapshot> {
-    await this.ensureBrowserProfileLease();
+    await this.ensureBrowserProfileLease(signal);
+    this.assertOpen();
     return this.browser.snapshot({ ...options, signal });
   }
 
   async listTabs(signal?: AbortSignal): Promise<unknown> {
-    await this.ensureBrowserProfileLease();
+    await this.ensureBrowserProfileLease(signal);
+    this.assertOpen();
     return this.browser.listTabs(signal);
   }
 
   listSessions(): unknown {
+    this.assertOpen();
     return [this.browser.sessionSummary()];
   }
 
   async browserDoctor(): Promise<Record<string, unknown>> {
+    this.assertOpen();
     return this.browser.doctor();
   }
 
@@ -143,12 +184,20 @@ export class ServerRuntime {
     if (signal?.aborted) {
       throw new AppError("CANCELLED", "The browser action was cancelled.");
     }
-    await this.ensureBrowserProfileLease();
+    await this.ensureBrowserProfileLease(signal);
+    this.assertOpen();
     return awaitWithAbort(this.browser.closeSession(sessionId), signal);
   }
 
   async webSearch(query: string, options: Omit<ResearchRequest, "query">, signal?: AbortSignal): Promise<unknown> {
+    this.assertOpen();
     return this.research.research(query, options, signal);
+  }
+
+  private assertOpen(): void {
+    if (this.closing) {
+      throw new AppError("SERVER_CLOSING", "The MCP runtime is shutting down.", { retryable: true });
+    }
   }
 
   publicCapabilities(): Record<string, unknown> {
@@ -445,6 +494,10 @@ async function awaitWithAbort<T>(promise: Promise<T>, signal?: AbortSignal): Pro
       rejectPromise(new AppError("CANCELLED", "The browser action was cancelled."));
     };
     signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
     promise.then((value) => {
       signal.removeEventListener("abort", onAbort);
       resolvePromise(value);

@@ -130,6 +130,86 @@ describe("browser service", () => {
     await service.close();
   });
 
+  it("runs read-only operations concurrently while keeping exclusive work behind them", async () => {
+    const service = new BrowserService(testConfig(), new SecurityPolicy(testConfig()), new Logger("error", {}, () => undefined));
+    const internal = service as unknown as {
+      withOperationLock<T>(signal: AbortSignal | undefined, operation: (signal: AbortSignal) => Promise<T>, queueTimeoutMs?: number, operationTimeoutMs?: number, mode?: "exclusive" | "read"): Promise<T>;
+    };
+    let activeReads = 0;
+    let maximumReads = 0;
+    let startedReads = 0;
+    let resolveReadsStarted!: () => void;
+    const readsStarted = new Promise<void>((resolve) => { resolveReadsStarted = resolve; });
+    let releaseReads!: () => void;
+    const readGate = new Promise<void>((resolve) => { releaseReads = resolve; });
+    const read = async (): Promise<string> => {
+      activeReads += 1;
+      maximumReads = Math.max(maximumReads, activeReads);
+      startedReads += 1;
+      if (startedReads === 2) resolveReadsStarted();
+      await readGate;
+      activeReads -= 1;
+      return "read";
+    };
+    const firstRead = internal.withOperationLock(undefined, read, 500, undefined, "read");
+    const secondRead = internal.withOperationLock(undefined, read, 500, undefined, "read");
+    await readsStarted;
+    expect(maximumReads).toBe(2);
+
+    let exclusiveFinished = false;
+    const exclusive = internal.withOperationLock(undefined, async () => {
+      exclusiveFinished = true;
+      expect(activeReads).toBe(0);
+      return "exclusive";
+    });
+    await Promise.resolve();
+    expect(exclusiveFinished).toBe(false);
+    releaseReads();
+    await expect(firstRead).resolves.toBe("read");
+    await expect(secondRead).resolves.toBe("read");
+    await expect(exclusive).resolves.toBe("exclusive");
+    await service.close();
+  });
+
+  it("caps concurrent read evaluations before they reach Chromium", async () => {
+    const service = new BrowserService(testConfig(), new SecurityPolicy(testConfig()), new Logger("error", {}, () => undefined));
+    const internal = service as unknown as {
+      withOperationLock<T>(signal: AbortSignal | undefined, operation: (signal: AbortSignal) => Promise<T>, queueTimeoutMs?: number, operationTimeoutMs?: number, mode?: "exclusive" | "read"): Promise<T>;
+    };
+    let active = 0;
+    let maximum = 0;
+    let started = 0;
+    let release!: () => void;
+    let resolveEight!: () => void;
+    const eightStarted = new Promise<void>((resolve) => { resolveEight = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const read = internal.withOperationLock(undefined, async () => {
+      active += 1;
+      maximum = Math.max(maximum, active);
+      started += 1;
+      if (started === 8) resolveEight();
+      await gate;
+      active -= 1;
+      return "read";
+    }, 1_000, undefined, "read");
+    const reads = [read, ...Array.from({ length: 15 }, () => internal.withOperationLock(undefined, async () => {
+      active += 1;
+      maximum = Math.max(maximum, active);
+      started += 1;
+      if (started === 8) resolveEight();
+      await gate;
+      active -= 1;
+      return "read";
+    }, 1_000, undefined, "read"))];
+
+    await eightStarted;
+    expect(maximum).toBe(8);
+    release();
+    await expect(Promise.all(reads)).resolves.toEqual(Array.from({ length: 16 }, () => "read"));
+    expect(maximum).toBe(8);
+    await service.close();
+  });
+
   it("bounds a request waiting behind an active operation", async () => {
     const config = testConfig({ browser: { ...testConfig().browser, actionTimeoutMs: 100 } });
     const service = new BrowserService(config, new SecurityPolicy(config), new Logger("error", {}, () => undefined));
@@ -207,6 +287,45 @@ describe("browser service", () => {
     await internal.sendKeys(page, ["END", "CTRL+END", "+"]);
 
     expect(events).toEqual(["press:End", "down:Control", "press:End", "up:Control", "press:+"]);
+    await service.close();
+  });
+
+  it("releases attempted keyboard modifiers when key-down fails", async () => {
+    const service = new BrowserService(testConfig(), new SecurityPolicy(testConfig()), new Logger("error", {}, () => undefined));
+    const events: string[] = [];
+    const internal = service as unknown as {
+      sendKeys(page: { keyboard: { down(key: string): Promise<void>; press(key: string): Promise<void>; up(key: string): Promise<void> } }, keys: string[], signal?: AbortSignal): Promise<void>;
+    };
+    const page = {
+      keyboard: {
+        down: async (key: string) => { events.push(`down:${key}`); throw new Error("key-down failed"); },
+        press: async (key: string) => { events.push(`press:${key}`); },
+        up: async (key: string) => { events.push(`up:${key}`); },
+      },
+    };
+
+    await expect(internal.sendKeys(page, ["CTRL+A"])).rejects.toThrow("key-down failed");
+    expect(events).toEqual(["down:Control", "up:Control"]);
+    await service.close();
+  });
+
+  it("releases keyboard modifiers when cancellation arrives during a compound key", async () => {
+    const service = new BrowserService(testConfig(), new SecurityPolicy(testConfig()), new Logger("error", {}, () => undefined));
+    const controller = new AbortController();
+    const events: string[] = [];
+    const internal = service as unknown as {
+      sendKeys(page: { keyboard: { down(key: string): Promise<void>; press(key: string): Promise<void>; up(key: string): Promise<void> } }, keys: string[], signal?: AbortSignal): Promise<void>;
+    };
+    const page = {
+      keyboard: {
+        down: async (key: string) => { events.push(`down:${key}`); },
+        press: async (key: string) => { events.push(`press:${key}`); controller.abort(); },
+        up: async (key: string) => { events.push(`up:${key}`); },
+      },
+    };
+
+    await expect(internal.sendKeys(page, ["CTRL+END"], controller.signal)).rejects.toMatchObject({ code: "CANCELLED" });
+    expect(events).toEqual(["down:Control", "press:End", "up:Control"]);
     await service.close();
   });
 
@@ -570,6 +689,28 @@ describe("browser service", () => {
     await service.close();
   });
 
+  it("does not create a replacement tab for an explicit id when the browser has no pages", async () => {
+    const config = testConfig({ browser: { ...testConfig().browser, mode: "connect", url: "http://127.0.0.1:9222" } });
+    const service = new BrowserService(config, new SecurityPolicy(config), new Logger("error", {}, () => undefined));
+    const newPage = vi.fn(async () => { throw new Error("newPage must not run for an explicit missing id"); });
+    const browser = {
+      pages: async () => [],
+      newPage,
+      close: async () => undefined,
+    } as unknown as Browser;
+    const internal = service as unknown as {
+      browser: Browser | undefined;
+      ownsBrowser: boolean;
+      pageState(pageId?: string, signal?: AbortSignal): Promise<unknown>;
+    };
+    internal.browser = browser;
+    internal.ownsBrowser = true;
+
+    await expect(internal.pageState("missing-page")).rejects.toMatchObject({ code: "TAB_NOT_FOUND" });
+    expect(newPage).not.toHaveBeenCalled();
+    await service.close();
+  });
+
   it("contains a target preparation error before browser setup starts", async () => {
     const config = testConfig();
     const service = new BrowserService(config, new SecurityPolicy(config), new Logger("error", {}, () => undefined));
@@ -594,6 +735,36 @@ describe("browser service", () => {
       dismiss: async () => undefined,
     };
     const internal = service as unknown as {
+      stateFor(page: unknown): { id: string; dialogs: Array<{ dialog: unknown; type: string; text: string }>; snapshotId?: string; refs: Map<string, unknown> };
+      currentPageId: string | undefined;
+    };
+    const state = internal.stateFor(page);
+    state.snapshotId = "before-dialog";
+    state.refs.set("e1", {});
+    state.dialogs.push({ dialog, type: "alert", text: "hello" });
+    internal.currentPageId = state.id;
+
+    await expect(service.execute({ action: "alert_accept" } as BrowserAction)).resolves.toMatchObject({ resolved: true, accepted: true });
+    expect(accepted).toBe(true);
+    expect(state.dialogs).toHaveLength(0);
+    expect(state.snapshotId).toBeUndefined();
+    expect(state.refs).toHaveLength(0);
+    await service.close();
+  });
+
+  it("honors action deadlines while a dialog command is still settling", async () => {
+    const service = new BrowserService(testConfig(), new SecurityPolicy(testConfig()), new Logger("error", {}, () => undefined));
+    const page = new EventEmitter() as EventEmitter & { isClosed(): boolean };
+    page.isClosed = () => false;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const dialog = {
+      type: () => "alert",
+      message: () => "hello",
+      accept: async () => gate,
+      dismiss: async () => undefined,
+    };
+    const internal = service as unknown as {
       stateFor(page: unknown): { id: string; dialogs: Array<{ dialog: unknown; type: string; text: string }> };
       currentPageId: string | undefined;
     };
@@ -601,9 +772,9 @@ describe("browser service", () => {
     state.dialogs.push({ dialog, type: "alert", text: "hello" });
     internal.currentPageId = state.id;
 
-    await expect(service.execute({ action: "alert_accept" } as BrowserAction)).resolves.toMatchObject({ resolved: true, accepted: true });
-    expect(accepted).toBe(true);
-    expect(state.dialogs).toHaveLength(0);
+    const resolving = service.execute({ action: "alert_accept", timeoutMs: 100 } as BrowserAction);
+    await expect(resolving).rejects.toMatchObject({ code: "BROWSER_TIMEOUT", retryable: true });
+    release();
     await service.close();
   });
 
@@ -619,6 +790,8 @@ describe("browser service", () => {
     };
     const state = internal.stateFor(page);
     const frame = {
+      $eval: async () => ({ tag: "button", type: "", role: "", label: "", href: undefined, rect: { x: 0, y: 0, width: 20, height: 20 } }),
+      $: async () => ({ scrollIntoView: async () => undefined, dispose: async () => undefined }),
       click: async () => {
         page.emit("dialog", dialog);
         controller.abort();
@@ -667,6 +840,50 @@ describe("browser service", () => {
     await expect(resolving).rejects.toMatchObject({ code: "CANCELLED" });
     releaseAccept();
     await resolving.catch(() => undefined);
+  });
+
+  it("keeps a cancelled dialog resolution serialized until Chromium settles", async () => {
+    const service = new BrowserService(testConfig(), new SecurityPolicy(testConfig()), new Logger("error", {}, () => undefined));
+    const page = new EventEmitter() as EventEmitter & { isClosed(): boolean };
+    page.isClosed = () => false;
+    let releaseFirst!: () => void;
+    let firstStarted!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const started = new Promise<void>((resolve) => {
+      firstStarted = resolve;
+    });
+    const firstDialog = {
+      accept: async () => { firstStarted(); await firstGate; },
+      dismiss: async () => undefined,
+    };
+    const secondDialog = {
+      accept: vi.fn(async () => undefined),
+      dismiss: async () => undefined,
+    };
+    const internal = service as unknown as {
+      stateFor(page: unknown): { dialogs: Array<{ dialog: unknown; type: string; text: string }> };
+      resolveDialog(state: unknown, accept: boolean, text?: string, signal?: AbortSignal): Promise<unknown>;
+    };
+    const state = internal.stateFor(page);
+    state.dialogs.push({ dialog: firstDialog, type: "alert", text: "first" });
+    const controller = new AbortController();
+    const resolving = internal.resolveDialog(state, true, undefined, controller.signal);
+    await started;
+    controller.abort();
+    await expect(resolving).rejects.toMatchObject({ code: "CANCELLED" });
+    expect(state.dialogs).toHaveLength(1);
+
+    state.dialogs.push({ dialog: secondDialog, type: "alert", text: "second" });
+    const nextResolution = internal.resolveDialog(state, true);
+    await Promise.resolve();
+    expect(secondDialog.accept).not.toHaveBeenCalled();
+    releaseFirst();
+    await expect(nextResolution).resolves.toMatchObject({ resolved: true, accepted: true });
+    expect(secondDialog.accept).toHaveBeenCalledTimes(1);
+    expect(state.dialogs).toHaveLength(0);
+    await service.close();
   });
 
   it("skips a frame that detaches during frame metadata collection", async () => {
@@ -726,6 +943,164 @@ describe("browser service", () => {
     await service.close();
   });
 
+  it("releases the pointer and disposes the handle when mouse-down fails", async () => {
+    const config = testConfig({ browser: { ...testConfig().browser, mode: "connect", url: "http://127.0.0.1:9222" } });
+    const service = new BrowserService(config, new SecurityPolicy(config), new Logger("error", {}, () => undefined));
+    let released = 0;
+    let disposed = 0;
+    const page = new EventEmitter() as EventEmitter & { isClosed(): boolean; url(): string; mouse: { move(x: number, y: number): Promise<void>; down(options: { button: string }): Promise<void>; up(options: { button: string }): Promise<void> } };
+    page.isClosed = () => false;
+    page.url = () => "about:blank";
+    page.mouse = {
+      move: async () => undefined,
+      down: async () => { throw new Error("mouse-down failed"); },
+      up: async () => { released += 1; },
+    };
+    const handle = {
+      clickablePoint: async () => ({ x: 10, y: 20 }),
+      boundingBox: async () => { throw new Error("boundingBox should not be used when clickablePoint is available"); },
+      dispose: async () => { disposed += 1; },
+    };
+    const frame = { $: async () => handle };
+    const internal = service as unknown as {
+      stateFor(page: unknown): unknown;
+      executeOnPage(action: BrowserAction, signal?: AbortSignal): Promise<unknown>;
+      pageState(pageId?: string, signal?: AbortSignal): Promise<unknown>;
+      assertCurrentPageAllowed(page: unknown): Promise<void>;
+      assertSnapshotForAction(state: unknown, action: BrowserAction): void;
+      frameFor(state: unknown, frameId?: string): Promise<unknown>;
+      selectorFor(state: unknown, target: string, frameId?: string): Promise<string>;
+    };
+    const state = internal.stateFor(page);
+    internal.pageState = async () => state;
+    internal.assertCurrentPageAllowed = async () => undefined;
+    internal.assertSnapshotForAction = () => undefined;
+    internal.frameFor = async () => frame;
+    internal.selectorFor = async () => "#hold";
+
+    await expect(internal.executeOnPage({ action: "press_and_hold", target: "#hold", durationMs: 0 } as BrowserAction)).rejects.toThrow("mouse-down failed");
+    expect(released).toBe(1);
+    expect(disposed).toBe(1);
+    await service.close();
+  });
+
+  it("scrolls a hold target into view and releases the pointer on cancellation", async () => {
+    const service = new BrowserService(testConfig(), new SecurityPolicy(testConfig()), new Logger("error", {}, () => undefined));
+    const controller = new AbortController();
+    const events: string[] = [];
+    const page = new EventEmitter() as EventEmitter & { isClosed(): boolean; url(): string; mouse: { move(x: number, y: number): Promise<void>; down(options: unknown): Promise<void>; up(options: unknown): Promise<void> } };
+    page.isClosed = () => false;
+    page.url = () => "about:blank";
+    page.mouse = {
+      move: async () => { events.push("move"); },
+      down: async () => { events.push("down"); controller.abort(); },
+      up: async () => { events.push("up"); },
+    };
+    const handle = {
+      scrollIntoView: vi.fn(async () => { events.push("scroll"); }),
+      clickablePoint: vi.fn(async () => ({ x: 5, y: 5 })),
+      dispose: vi.fn(async () => { events.push("dispose"); }),
+    };
+    const frame = { $: async () => handle };
+    const internal = service as unknown as {
+      stateFor(page: unknown): unknown;
+      executeOnPage(action: BrowserAction, signal?: AbortSignal): Promise<unknown>;
+      pageState(pageId?: string, signal?: AbortSignal): Promise<unknown>;
+      assertCurrentPageAllowed(page: unknown): Promise<void>;
+      assertSnapshotForAction(state: unknown, action: BrowserAction): void;
+      frameFor(state: unknown, frameId?: string): Promise<unknown>;
+      selectorFor(state: unknown, target: string, frameId?: string): Promise<string>;
+    };
+    const state = internal.stateFor(page);
+    internal.pageState = async () => state;
+    internal.assertCurrentPageAllowed = async () => undefined;
+    internal.assertSnapshotForAction = () => undefined;
+    internal.frameFor = async () => frame;
+    internal.selectorFor = async () => "#hold";
+
+    await expect(internal.executeOnPage({ action: "press_and_hold", target: "#hold", durationMs: 1_000 } as BrowserAction, controller.signal)).rejects.toMatchObject({ code: "CANCELLED" });
+    expect(handle.scrollIntoView).toHaveBeenCalledTimes(1);
+    expect(events).toEqual(["scroll", "move", "down", "up", "dispose"]);
+    await service.close();
+  });
+
+  it("moves a held pointer through an interpolated drag destination", async () => {
+    const service = new BrowserService(testConfig(), new SecurityPolicy(testConfig()), new Logger("error", {}, () => undefined));
+    const moves: Array<{ x: number; y: number; steps?: number }> = [];
+    const page = new EventEmitter() as EventEmitter & { isClosed(): boolean; url(): string; viewport(): { width: number; height: number }; mouse: { move(x: number, y: number, options?: { steps?: number }): Promise<void>; down(options: unknown): Promise<void>; up(options: unknown): Promise<void> } };
+    page.isClosed = () => false;
+    page.url = () => "about:blank";
+    page.viewport = () => ({ width: 100, height: 100 });
+    page.mouse = {
+      move: async (x: number, y: number, options?: { steps?: number }) => { moves.push({ x, y, steps: options?.steps }); },
+      down: async () => undefined,
+      up: async () => undefined,
+    };
+    const handle = {
+      clickablePoint: async () => ({ x: 5, y: 5 }),
+      dispose: vi.fn(async () => undefined),
+    };
+    const frame = { $: async () => handle };
+    const internal = service as unknown as {
+      stateFor(page: unknown): unknown;
+      executeOnPage(action: BrowserAction, signal?: AbortSignal): Promise<unknown>;
+      pageState(pageId?: string, signal?: AbortSignal): Promise<unknown>;
+      assertCurrentPageAllowed(page: unknown): Promise<void>;
+      assertSnapshotForAction(state: unknown, action: BrowserAction): void;
+      frameFor(state: unknown, frameId?: string): Promise<unknown>;
+      selectorFor(state: unknown, target: string, frameId?: string): Promise<string>;
+    };
+    const state = internal.stateFor(page);
+    internal.pageState = async () => state;
+    internal.assertCurrentPageAllowed = async () => undefined;
+    internal.assertSnapshotForAction = () => undefined;
+    internal.frameFor = async () => frame;
+    internal.selectorFor = async () => "#drag";
+
+    await expect(internal.executeOnPage({ action: "press_and_hold", target: "#drag", durationMs: 0, endCoordinateX: 80, endCoordinateY: 70 } as BrowserAction)).resolves.toMatchObject({ draggedTo: { x: 80, y: 70 } });
+    expect(moves[0]).toMatchObject({ x: 5, y: 5 });
+    expect(moves.at(-1)).toMatchObject({ x: 80, y: 70 });
+    expect((moves.at(-1)?.steps ?? 0)).toBeGreaterThan(1);
+    expect(handle.dispose).toHaveBeenCalledTimes(1);
+    await service.close();
+  });
+
+  it("moves a held pointer through an explicit bounded path", async () => {
+    const service = new BrowserService(testConfig(), new SecurityPolicy(testConfig()), new Logger("error", {}, () => undefined));
+    const moves: Array<{ x: number; y: number }> = [];
+    const page = new EventEmitter() as EventEmitter & { isClosed(): boolean; url(): string; viewport(): { width: number; height: number }; mouse: { move(x: number, y: number, options?: unknown): Promise<void>; down(options: unknown): Promise<void>; up(options: unknown): Promise<void> } };
+    page.isClosed = () => false;
+    page.url = () => "about:blank";
+    page.viewport = () => ({ width: 100, height: 100 });
+    page.mouse = {
+      move: async (x: number, y: number) => { moves.push({ x, y }); },
+      down: async () => undefined,
+      up: async () => undefined,
+    };
+    const handle = { clickablePoint: async () => ({ x: 5, y: 5 }), dispose: vi.fn(async () => undefined) };
+    const frame = { $: async () => handle };
+    const internal = service as unknown as {
+      stateFor(page: unknown): unknown;
+      executeOnPage(action: BrowserAction, signal?: AbortSignal): Promise<unknown>;
+      pageState(pageId?: string, signal?: AbortSignal): Promise<unknown>;
+      assertCurrentPageAllowed(page: unknown): Promise<void>;
+      assertSnapshotForAction(state: unknown, action: BrowserAction): void;
+      frameFor(state: unknown, frameId?: string): Promise<unknown>;
+      selectorFor(state: unknown, target: string, frameId?: string): Promise<string>;
+    };
+    const state = internal.stateFor(page);
+    internal.pageState = async () => state;
+    internal.assertCurrentPageAllowed = async () => undefined;
+    internal.assertSnapshotForAction = () => undefined;
+    internal.frameFor = async () => frame;
+    internal.selectorFor = async () => "#drag";
+
+    await expect(internal.executeOnPage({ action: "press_and_hold", target: "#drag", durationMs: 0, path: [{ x: 10, y: 10 }, { x: 20, y: 30 }, { x: 40, y: 50 }] } as BrowserAction)).resolves.toMatchObject({ draggedPath: 3 });
+    expect(moves).toEqual([{ x: 10, y: 10 }, { x: 20, y: 30 }, { x: 40, y: 50 }]);
+    expect(handle.dispose).toHaveBeenCalledTimes(1);
+    await service.close();
+  });
+
   it("stops input before typing when cancellation arrives after focus", async () => {
     const config = testConfig();
     const service = new BrowserService(config, new SecurityPolicy(config), new Logger("error", {}, () => undefined));
@@ -757,6 +1132,84 @@ describe("browser service", () => {
     await expect(internal.inputTarget(state, "#input", "hello", false, false, frame, controller.signal)).rejects.toMatchObject({ code: "CANCELLED" });
     expect(typed).toBe(false);
     expect(disposed).toBe(1);
+    await service.close();
+  });
+
+  it("sets canonical native date/time controls without Chromium segmented keyboard input", async () => {
+    const service = new BrowserService(testConfig(), new SecurityPolicy(testConfig()), new Logger("error", {}, () => undefined));
+    let inputType = "date";
+    let evaluateCalls = 0;
+    const setterValues: unknown[] = [];
+    const typed = vi.fn(async () => undefined);
+    const input = {
+      focus: async () => undefined,
+      evaluate: vi.fn(async (_callback: unknown, value?: unknown) => {
+        evaluateCalls += 1;
+        if (evaluateCalls === 1) {
+          return inputType;
+        }
+        if (evaluateCalls === 2) {
+          setterValues.push(value);
+          return undefined;
+        }
+        return setterValues.at(-1);
+      }),
+      dispose: async () => undefined,
+    };
+    const frame = { parentFrame: () => null, $: async () => input };
+    const state = {
+      page: {
+        keyboard: {
+          down: vi.fn(async () => undefined),
+          press: vi.fn(async () => undefined),
+          up: vi.fn(async () => undefined),
+          type: typed,
+        },
+      },
+    };
+    const internal = service as unknown as {
+      inputTarget(state: unknown, target: string, text: string, clear: boolean, verify: boolean, frame: unknown, signal?: AbortSignal): Promise<unknown>;
+      selectorFor(state: unknown, target: string, frameId?: string): Promise<string>;
+    };
+    internal.selectorFor = async () => "#temporal";
+
+    for (const [type, value] of [["date", "2024-12-20"], ["time", "23:59:58.123"], ["month", "2024-12"], ["week", "2024-W01"]] as const) {
+      inputType = type;
+      evaluateCalls = 0;
+      setterValues.length = 0;
+      await expect(internal.inputTarget(state, "#temporal", value, true, true, frame)).resolves.toEqual({ verified: true });
+      expect(setterValues).toEqual([value]);
+    }
+    expect(typed).not.toHaveBeenCalled();
+    expect(state.page.keyboard.down).not.toHaveBeenCalled();
+    expect(state.page.keyboard.press).not.toHaveBeenCalled();
+    expect(state.page.keyboard.up).not.toHaveBeenCalled();
+    await service.close();
+  });
+
+  it("does not use the native temporal setter for noncanonical values", async () => {
+    const service = new BrowserService(testConfig(), new SecurityPolicy(testConfig()), new Logger("error", {}, () => undefined));
+    const typed = vi.fn(async () => undefined);
+    let evaluateCalls = 0;
+    const input = {
+      focus: async () => undefined,
+      evaluate: vi.fn(async () => {
+        evaluateCalls += 1;
+        return "date";
+      }),
+      dispose: async () => undefined,
+    };
+    const frame = { parentFrame: () => null, $: async () => input };
+    const state = { page: { keyboard: { down: async () => undefined, press: async () => undefined, up: async () => undefined, type: typed } } };
+    const internal = service as unknown as {
+      inputTarget(state: unknown, target: string, text: string, clear: boolean, verify: boolean, frame: unknown, signal?: AbortSignal): Promise<unknown>;
+      selectorFor(state: unknown, target: string, frameId?: string): Promise<string>;
+    };
+    internal.selectorFor = async () => "#date";
+
+    await internal.inputTarget(state, "#date", "12/20/2024", true, false, frame);
+    expect(evaluateCalls).toBe(2);
+    expect(typed).toHaveBeenCalledWith("12/20/2024");
     await service.close();
   });
 
@@ -960,6 +1413,252 @@ describe("browser service", () => {
     await service.close();
   });
 
+  it("caches exact page policy admissions without skipping per-request guards", async () => {
+    const config = testConfig();
+    let currentUrl = "https://example.test/page";
+    const frame = {};
+    const policy = {
+      assertNavigationAllowed: vi.fn((url: string) => new URL(url)),
+      assertNavigationAllowedAsync: vi.fn(async (url: string) => new URL(url)),
+    } as unknown as SecurityPolicy;
+    const service = new BrowserService(config, policy, new Logger("error", {}, () => undefined));
+    const page = { url: () => currentUrl, mainFrame: () => frame };
+    const state = { id: "page-1", page, disposed: false, activeNavigationGeneration: 1, navigationError: undefined, policyVerifiedUrls: new Set<string>() };
+    const internal = service as unknown as {
+      assertCurrentPageAllowed(page: unknown, state: unknown): Promise<void>;
+      handleRequest(state: unknown, request: unknown): Promise<void>;
+      beginNavigation(state: unknown): number;
+    };
+
+    await internal.assertCurrentPageAllowed(page, state);
+    await internal.assertCurrentPageAllowed(page, state);
+    expect(policy.assertNavigationAllowedAsync).toHaveBeenCalledTimes(1);
+    expect(policy.assertNavigationAllowed).toHaveBeenCalledTimes(2);
+
+    currentUrl = "https://example.test/next";
+    await internal.assertCurrentPageAllowed(page, state);
+    expect(policy.assertNavigationAllowedAsync).toHaveBeenCalledTimes(2);
+
+    state.policyVerifiedUrls.add(new URL(currentUrl).toString());
+    const request = {
+      isInterceptResolutionHandled: () => false,
+      isNavigationRequest: () => true,
+      frame: () => frame,
+      url: () => "https://example.test/redirect",
+      continue: async () => undefined,
+      abort: async () => undefined,
+    };
+    await internal.handleRequest(state, request);
+    expect(state.policyVerifiedUrls.size).toBe(0);
+
+    state.policyVerifiedUrls.add(new URL(currentUrl).toString());
+    internal.beginNavigation(state);
+    expect(state.policyVerifiedUrls).toContain(new URL(currentUrl).toString());
+    await service.close();
+  });
+
+  it("normalizes browser visibility failures from click operations", async () => {
+    const service = new BrowserService(testConfig(), new SecurityPolicy(testConfig()), new Logger("error", {}, () => undefined));
+    const page = new EventEmitter() as EventEmitter & { mainFrame(): object; url(): string };
+    page.mainFrame = () => ({}) as object;
+    page.url = () => "about:blank";
+    const internal = service as unknown as {
+      runClickAndMonitor(page: unknown, trigger: () => Promise<void>, signal?: AbortSignal): Promise<void>;
+    };
+
+    await expect(internal.runClickAndMonitor(page, async () => {
+      throw new Error("Node is either not visible or not an HTMLElement");
+    })).rejects.toMatchObject({ code: "ELEMENT_NOT_VISIBLE", retryable: true });
+    expect(page.listenerCount("framenavigated")).toBe(0);
+    await service.close();
+  });
+
+  it("does not swallow non-timeout errors while waiting for document readiness", async () => {
+    const service = new BrowserService(testConfig(), new SecurityPolicy(testConfig()), new Logger("error", {}, () => undefined));
+    const internal = service as unknown as {
+      waitForDocumentReady(page: unknown, signal?: AbortSignal): Promise<void>;
+    };
+    const page = {
+      waitForFunction: async () => { throw new Error("Target closed during readiness check"); },
+    };
+
+    await expect(internal.waitForDocumentReady(page)).rejects.toThrow(/Target closed during readiness check/);
+    await service.close();
+  });
+
+  it("does not swallow non-timeout errors while waiting for popup readiness", async () => {
+    const service = new BrowserService(testConfig(), new SecurityPolicy(testConfig()), new Logger("error", {}, () => undefined));
+    const internal = service as unknown as {
+      waitForPageReady(page: unknown, signal?: AbortSignal): Promise<void>;
+    };
+    const page = {
+      waitForNetworkIdle: async () => { throw new Error("Target closed during popup readiness check"); },
+    };
+
+    await expect(internal.waitForPageReady(page)).rejects.toThrow(/Target closed during popup readiness check/);
+    await service.close();
+  });
+
+  it("invalidates snapshot references after evaluation and text-finding actions", async () => {
+    const service = new BrowserService(testConfig(), new SecurityPolicy(testConfig()), new Logger("error", {}, () => undefined));
+    const page = new EventEmitter() as EventEmitter & { isClosed(): boolean; url(): string };
+    page.isClosed = () => false;
+    page.url = () => "about:blank";
+    const internal = service as unknown as {
+      stateFor(page: unknown): { id: string; snapshotId?: string; refs: Map<string, unknown> };
+      executeUnlocked(action: BrowserAction, signal?: AbortSignal): Promise<unknown>;
+    };
+    const state = internal.stateFor(page);
+    internal.executeUnlocked = async (action) => ({ pageId: state.id, action: action.action });
+
+    for (const action of [
+      { action: "evaluate", code: "document.body.textContent = 'changed'" },
+      { action: "find_text", text: "changed" },
+    ] as BrowserAction[]) {
+      state.snapshotId = `snapshot-${action.action}`;
+      state.refs.set("e1", {});
+      await service.execute(action);
+      expect(state.snapshotId).toBeUndefined();
+      expect(state.refs).toHaveLength(0);
+    }
+    await service.close();
+  });
+
+  it("invalidates refs when a mutating action fails or is cancelled", async () => {
+    const service = new BrowserService(testConfig(), new SecurityPolicy(testConfig()), new Logger("error", {}, () => undefined));
+    const page = new EventEmitter() as EventEmitter & { isClosed(): boolean; url(): string };
+    page.isClosed = () => false;
+    page.url = () => "about:blank";
+    const controller = new AbortController();
+    const internal = service as unknown as {
+      stateFor(page: unknown): { id: string; snapshotId?: string; refs: Map<string, unknown> };
+      executeUnlocked(action: BrowserAction, signal?: AbortSignal): Promise<unknown>;
+      currentPageId: string | undefined;
+    };
+    const state = internal.stateFor(page);
+    internal.currentPageId = undefined;
+    internal.executeUnlocked = async () => {
+      controller.abort();
+      throw new AppError("CANCELLED", "cancelled after the page mutation started");
+    };
+    state.snapshotId = "before-mutation";
+    state.refs.set("e1", {});
+
+    await expect(service.execute({ action: "input", pageId: state.id.slice(-4), target: "#input", text: "changed" } as BrowserAction, controller.signal)).rejects.toMatchObject({ code: "CANCELLED" });
+    expect(state.snapshotId).toBeUndefined();
+    expect(state.refs).toHaveLength(0);
+    await service.close();
+  });
+
+  it("invalidates snapshot references when a mutating action is cancelled", async () => {
+    const service = new BrowserService(testConfig(), new SecurityPolicy(testConfig()), new Logger("error", {}, () => undefined));
+    const page = new EventEmitter() as EventEmitter & { isClosed(): boolean; url(): string };
+    page.isClosed = () => false;
+    page.url = () => "about:blank";
+    const internal = service as unknown as {
+      stateFor(page: unknown): { id: string; snapshotId?: string; refs: Map<string, unknown> };
+      currentPageId: string | undefined;
+      executeUnlocked(action: BrowserAction, signal?: AbortSignal): Promise<unknown>;
+    };
+    const state = internal.stateFor(page);
+    internal.currentPageId = state.id;
+    state.snapshotId = "before-cancel";
+    state.refs.set("e1", {});
+    internal.executeUnlocked = async () => {
+      throw new AppError("CANCELLED", "The browser action was cancelled.");
+    };
+
+    await expect(service.execute({ action: "input", target: "#moving", text: "changed" } as BrowserAction)).rejects.toMatchObject({ code: "CANCELLED" });
+    expect(state.snapshotId).toBeUndefined();
+    expect(state.refs).toHaveLength(0);
+    await service.close();
+  });
+
+  it("clicks the live selector after layout movement instead of a snapshot coordinate", async () => {
+    const service = new BrowserService(testConfig(), new SecurityPolicy(testConfig()), new Logger("error", {}, () => undefined));
+    const page = new EventEmitter() as EventEmitter & { isClosed(): boolean; url(): string; mainFrame(): unknown };
+    page.isClosed = () => false;
+    page.url = () => "about:blank";
+    let attempts = 0;
+    const scrollIntoView = vi.fn(async () => undefined);
+    const frame = {
+      $eval: async () => ({ tag: "button", type: "", role: "", label: "", href: undefined, rect: { x: 0, y: 0, width: 20, height: 20 } }),
+      $: async () => ({ scrollIntoView, dispose: async () => undefined }),
+      click: vi.fn(async () => {
+        attempts += 1;
+        if (attempts === 1) {
+          throw new Error("Node is either not visible or not an HTMLElement");
+        }
+      }),
+    };
+    page.mainFrame = () => frame;
+    const internal = service as unknown as {
+      stateFor(page: unknown): unknown;
+      clickElement(state: unknown, frame: unknown, selector: string, button: "left" | "middle" | "right", clickCount: number, signal?: AbortSignal): Promise<unknown>;
+    };
+    const state = internal.stateFor(page);
+
+    await expect(internal.clickElement(state, frame, "#animated", "left", 1)).resolves.toMatchObject({ navigated: false, urlChanged: false });
+    expect(frame.click).toHaveBeenCalledTimes(2);
+    expect(frame.click).toHaveBeenLastCalledWith("#animated", { button: "left", count: 1 });
+    expect(scrollIntoView).toHaveBeenCalledTimes(2);
+    await service.close();
+  });
+
+  it("keeps scroll-to-bottom lazy settling bounded", async () => {
+    const service = new BrowserService(testConfig(), new SecurityPolicy(testConfig()), new Logger("error", {}, () => undefined));
+    const waitForNetworkIdle = vi.fn(async () => undefined);
+    let evaluation = 0;
+    const page = {
+      url: () => "about:blank",
+      evaluate: vi.fn(async () => {
+        evaluation += 1;
+        if (evaluation === 1) return { x: 0, y: 0 };
+        if (evaluation === 2) return { height: 1_000, y: 0, viewport: 500 };
+        if (evaluation === 4 || evaluation === 5) return { height: 1_000, y: 500, viewport: 500 };
+        return undefined;
+      }),
+      waitForNetworkIdle,
+    };
+    const state = { id: "page-1", page, challengeActive: false };
+    const internal = service as unknown as {
+      executeOnPage(action: BrowserAction, signal?: AbortSignal): Promise<unknown>;
+      pageState(pageId?: string, signal?: AbortSignal): Promise<unknown>;
+      assertCurrentPageAllowed(page: unknown, state?: unknown): Promise<void>;
+      assertSnapshotForAction(state: unknown, action: BrowserAction): void;
+      frameFor(state: unknown, frameId?: string): Promise<unknown>;
+    };
+    internal.pageState = async () => state;
+    internal.assertCurrentPageAllowed = async () => undefined;
+    internal.assertSnapshotForAction = () => undefined;
+    internal.frameFor = async () => ({});
+
+    await expect(internal.executeOnPage({ action: "scroll_to_bottom", maxScrolls: 1 } as BrowserAction)).resolves.toMatchObject({ atBottom: true });
+    expect(waitForNetworkIdle).toHaveBeenCalledWith(expect.objectContaining({ idleTime: 100 }));
+    await service.close();
+  });
+
+  it("settles navigation in the selected child frame without waiting on the main frame", async () => {
+    const service = new BrowserService(testConfig(), new SecurityPolicy(testConfig()), new Logger("error", {}, () => undefined));
+    const page = new EventEmitter() as EventEmitter & { url(): string };
+    let currentUrl = "about:blank";
+    page.url = () => "https://example.test/host";
+    const frame = {
+      url: () => currentUrl,
+      waitForFunction: async () => undefined,
+    };
+    const internal = service as unknown as {
+      runClickAndMonitor(page: unknown, trigger: () => Promise<void>, signal?: AbortSignal, expectNavigation?: boolean, navigationFrame?: unknown): Promise<{ navigated: boolean; url: string }>;
+    };
+
+    const result = await internal.runClickAndMonitor(page, async () => {
+      currentUrl = "https://example.test/child-next";
+      page.emit("framenavigated", frame);
+    }, undefined, true, frame);
+    expect(result).toMatchObject({ navigated: true, url: "https://example.test/child-next" });
+    await service.close();
+  });
+
   it("normalizes a disposed page frame lookup into a retryable frame error", async () => {
     const service = new BrowserService(testConfig(), new SecurityPolicy(testConfig()), new Logger("error", {}, () => undefined));
     const page = new EventEmitter() as EventEmitter & { isClosed(): boolean; frames(): never };
@@ -1013,6 +1712,37 @@ describe("browser service", () => {
     await service.close();
   });
 
+  it("rejects a same-text replacement when stable element identity changes", async () => {
+    const service = new BrowserService(testConfig(), new SecurityPolicy(testConfig()), new Logger("error", {}, () => undefined));
+    const page = new EventEmitter() as EventEmitter & { isClosed(): boolean; url(): string };
+    page.isClosed = () => false;
+    page.url = () => "about:blank";
+    let id = "first";
+    const element = {
+      tagName: "BUTTON",
+      innerText: "Go",
+      textContent: "Go",
+      getAttribute: (name: string) => name === "id" ? id : null,
+      closest: () => null,
+    };
+    const frame = {
+      parentFrame: () => null,
+      $eval: async (_selector: string, callback: (target: unknown) => unknown) => callback(element),
+    };
+    const signature = (elementId: string): string => ["button", elementId, "", "", "", "", "", "", "", "Go", ""].join("\u001f");
+    const internal = service as unknown as {
+      stateFor(page: unknown): { snapshotId?: string; refs: Map<string, { selector: string; signature: string; snapshotId: string; frameId: string; index: number }> };
+      selectorFor(state: unknown, target: string, requestedFrameId?: string, resolvedFrame?: unknown): Promise<string>;
+    };
+    const state = internal.stateFor(page);
+    state.snapshotId = "snapshot";
+    state.refs.set("e1", { selector: "#target", signature: signature("first"), snapshotId: "snapshot", frameId: "main", index: 0 });
+    id = "replacement";
+
+    await expect(internal.selectorFor(state, "ref:e1", "main", frame)).rejects.toMatchObject({ code: "STALE_REFERENCE" });
+    await service.close();
+  });
+
   it("routes close_tab target to the requested tab instead of the current tab", async () => {
     const service = new BrowserService(testConfig(), new SecurityPolicy(testConfig()), new Logger("error", {}, () => undefined));
     let resolvedTarget = "";
@@ -1035,6 +1765,34 @@ describe("browser service", () => {
     await expect(internal.closeTabAction({ action: "close_tab", target: "page-target" } as BrowserAction)).resolves.toEqual({ closed: "page-target" });
     expect(resolvedTarget).toBe("page-target");
     expect(closed).toBe(1);
+    await service.close();
+  });
+
+  it("canonicalizes a short tab identifier when switching tabs", async () => {
+    const service = new BrowserService(testConfig(), new SecurityPolicy(testConfig()), new Logger("error", {}, () => undefined));
+    const currentPage = { url: () => "about:blank" };
+    const targetPage = { url: () => "about:blank", bringToFront: vi.fn(async () => undefined) };
+    const currentState = { id: "page-current", page: currentPage, challengeActive: false };
+    const targetState = { id: "page-target-full", page: targetPage, challengeActive: false };
+    const internal = service as unknown as {
+      pageState(pageId?: string, signal?: AbortSignal): Promise<unknown>;
+      assertCurrentPageAllowed(page: unknown, state?: unknown): Promise<void>;
+      assertSnapshotForAction(state: unknown, action: BrowserAction): void;
+      frameFor(state: unknown, frameId?: string): Promise<unknown>;
+      assertStateLive(state: unknown): void;
+      currentPageId: string | undefined;
+    };
+    internal.pageState = vi.fn()
+      .mockResolvedValueOnce(currentState)
+      .mockResolvedValueOnce(targetState);
+    internal.assertCurrentPageAllowed = async () => undefined;
+    internal.assertSnapshotForAction = () => undefined;
+    internal.frameFor = async () => ({ });
+    internal.assertStateLive = () => undefined;
+
+    await expect((service as unknown as { executeOnPage(action: BrowserAction, signal?: AbortSignal): Promise<unknown> }).executeOnPage({ action: "switch_tab", target: "full" } as BrowserAction)).resolves.toEqual({ pageId: "page-target-full" });
+    expect(internal.currentPageId).toBe("page-target-full");
+    expect(targetPage.bringToFront).toHaveBeenCalledTimes(1);
     await service.close();
   });
 
@@ -1068,7 +1826,7 @@ describe("browser service", () => {
   it("reports extraction truncation and scopes links to selector descendants", async () => {
     const service = new BrowserService(testConfig(), new SecurityPolicy(testConfig()), new Logger("error", {}, () => undefined));
     const anchor = { href: "https://example.test/child", textContent: "Child link", querySelectorAll: () => [] };
-    const container = { textContent: "x".repeat(120), querySelectorAll: () => [anchor] };
+    const container = { tagName: "DIV", textContent: "x".repeat(120), querySelectorAll: () => [anchor] };
     const frame = {
       parentFrame: () => null,
       $eval: async (_selector: string, callback: (element: unknown, limit: number) => unknown, limit?: number) => callback(container, limit ?? 100),
@@ -1093,6 +1851,35 @@ describe("browser service", () => {
     expect(result.truncated).toBe(true);
     expect(result.text).toContain("x".repeat(100));
     expect(result.links).toEqual([{ text: expect.stringContaining("Child link"), href: "https://example.test/child", untrustedUrl: expect.stringContaining("https://example.test/child") }]);
+    await service.close();
+  });
+
+  it("extracts bounded non-secret form values without exposing passwords", async () => {
+    const service = new BrowserService(testConfig(), new SecurityPolicy(testConfig()), new Logger("error", {}, () => undefined));
+    const textarea = { tagName: "TEXTAREA", textContent: "", value: "clipboard text" };
+    const password = { tagName: "INPUT", type: "password", textContent: "", value: "secret" };
+    const frame = {
+      parentFrame: () => null,
+      $eval: async (selector: string, callback: (element: unknown, limit: number) => unknown, limit?: number) => callback(selector === "#secret" ? password : textarea, limit ?? 100),
+    };
+    const page = { url: () => "about:blank" };
+    const state = { id: "page-1", page, challengeActive: false, domRevision: 1 };
+    const internal = service as unknown as {
+      executeOnPage(action: BrowserAction, signal?: AbortSignal): Promise<unknown>;
+      pageState(pageId?: string, signal?: AbortSignal): Promise<unknown>;
+      assertCurrentPageAllowed(page: unknown): Promise<void>;
+      assertSnapshotForAction(state: unknown, action: BrowserAction): void;
+      frameFor(state: unknown, frameId?: string): Promise<unknown>;
+      selectorFor(state: unknown, target: string, frameId?: string): Promise<string>;
+    };
+    internal.pageState = async () => state;
+    internal.assertCurrentPageAllowed = async () => undefined;
+    internal.assertSnapshotForAction = () => undefined;
+    internal.frameFor = async () => frame;
+    internal.selectorFor = async (_state, target) => target;
+
+    await expect(internal.executeOnPage({ action: "extract", selector: "#textarea" } as BrowserAction)).resolves.toMatchObject({ formValue: expect.stringContaining("clipboard text") });
+    await expect(internal.executeOnPage({ action: "extract", selector: "#secret" } as BrowserAction)).resolves.not.toHaveProperty("formValue");
     await service.close();
   });
 
@@ -1122,6 +1909,37 @@ describe("browser service", () => {
       $eval: async () => { throw Object.assign(new Error("Protocol error (Runtime.callFunctionOn): Target closed"), { name: "ProtocolError" }); },
     });
     await expect(internal.executeOnPage({ action: "extract", selector: "#missing" } as BrowserAction)).rejects.toThrow(/Protocol error/);
+    await service.close();
+  });
+
+  it("normalizes missing and invalid select selectors", async () => {
+    const config = testConfig();
+    const service = new BrowserService(config, new SecurityPolicy(config), new Logger("error", {}, () => undefined));
+    const page = { url: () => "about:blank" };
+    const state = { id: "page-1", page, challengeActive: false };
+    const internal = service as unknown as {
+      executeOnPage(action: BrowserAction, signal?: AbortSignal): Promise<unknown>;
+      pageState(pageId?: string, signal?: AbortSignal): Promise<unknown>;
+      assertCurrentPageAllowed(page: unknown): Promise<void>;
+      assertSnapshotForAction(state: unknown, action: BrowserAction): void;
+      frameFor(state: unknown, frameId?: string): Promise<unknown>;
+      selectorFor(state: unknown, target: string, frameId?: string): Promise<string>;
+    };
+    internal.pageState = async () => state;
+    internal.assertCurrentPageAllowed = async () => undefined;
+    internal.assertSnapshotForAction = () => undefined;
+    internal.selectorFor = async (_state, target) => target;
+    internal.frameFor = async () => ({
+      select: async (selector: string) => {
+        if (selector === "#missing") {
+          throw new Error('Error: failed to find element matching selector "#missing"');
+        }
+        throw new Error("Error: Failed to execute 'querySelector' on 'Document': '#[' is not a valid selector.");
+      },
+    });
+
+    await expect(internal.executeOnPage({ action: "select_dropdown", selector: "#missing", optionValue: "x" } as BrowserAction)).rejects.toMatchObject({ code: "ELEMENT_NOT_FOUND" });
+    await expect(internal.executeOnPage({ action: "select_dropdown", selector: "#[", optionValue: "x" } as BrowserAction)).rejects.toMatchObject({ code: "INVALID_SELECTOR" });
     await service.close();
   });
 
@@ -1188,6 +2006,38 @@ describe("browser service", () => {
     expect(calls.some((call) => call.method === "Fetch.failRequest")).toBe(true);
     expect(calls.some((call) => call.method === "Fetch.continueRequest")).toBe(false);
     await service.close();
+  });
+
+  it("preserves policy errors from blocked document target requests", async () => {
+    const config = testConfig({ browser: { ...testConfig().browser, mode: "connect", url: "http://127.0.0.1:9222" } });
+    const policy = {
+      assertNavigationAllowedAsync: async (url: string) => {
+        if (url.includes("blocked.example")) {
+          throw new AppError("DOMAIN_NOT_ALLOWED", "blocked by allowlist");
+        }
+        return new URL(url);
+      },
+    } as unknown as SecurityPolicy;
+    const guardedService = new BrowserService(config, policy, new Logger("error", {}, () => undefined));
+    const session = new EventEmitter() as EventEmitter & { id(): string; send: ReturnType<typeof vi.fn> };
+    session.id = () => "document-guard-session";
+    session.send = vi.fn(async () => ({}));
+    const internal = guardedService as unknown as {
+      guardTargetSession(session: unknown, targetInfo: unknown): Promise<void>;
+      takeTargetGuardNavigationError(page: unknown): AppError | undefined;
+    };
+    await internal.guardTargetSession(session, { targetId: "document-guard-target", type: "page", url: "about:blank" });
+    session.emit("Fetch.requestPaused", { resourceType: "Document", requestId: "document", request: { url: "https://blocked.example/redirect" } });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    const page = { target: () => ({ _targetId: "document-guard-target" }) };
+    expect(internal.takeTargetGuardNavigationError(page)).toMatchObject({ code: "DOMAIN_NOT_ALLOWED" });
+    expect(internal.takeTargetGuardNavigationError(page)).toBeUndefined();
+
+    session.emit("Fetch.requestPaused", { resourceType: "Image", requestId: "image", request: { url: "https://blocked.example/pixel.gif" } });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(internal.takeTargetGuardNavigationError(page)).toBeUndefined();
+    await guardedService.close();
   });
 
   it.each(["service_worker", "shared_worker"] as const)("keeps %s requests paused until policy checks complete", async (targetType) => {
@@ -1394,6 +2244,29 @@ describe("browser service", () => {
     await service.close();
   });
 
+  it("requests the accessibility tree for the selected frame", async () => {
+    const service = new BrowserService(testConfig(), new SecurityPolicy(testConfig()), new Logger("error", {}, () => undefined));
+    let params: unknown;
+    const page = {
+      createCDPSession: async () => ({
+        send: async (_method: string, requestParams: unknown) => {
+          params = requestParams;
+          return { nodes: [{ role: { value: "button" }, name: { value: "child" } }] };
+        },
+        detach: async () => undefined,
+      }),
+    };
+    const state = { id: "page-1", page, snapshotId: undefined as string | undefined };
+    const frame = { _id: "child-frame-id" };
+    const internal = service as unknown as {
+      accessibilitySnapshot(state: unknown, maxNodes: number, maxChars: number, interestingOnly: boolean, frame?: unknown): Promise<unknown>;
+    };
+
+    await internal.accessibilitySnapshot(state, 10, 1_000, true, frame);
+    expect(params).toEqual({ frameId: "child-frame-id" });
+    await service.close();
+  });
+
   it("clamps viewport screenshot clips to the document bounds", async () => {
     const service = new BrowserService(testConfig(), new SecurityPolicy(testConfig()), new Logger("error", {}, () => undefined));
     const internal = service as unknown as {
@@ -1571,6 +2444,41 @@ describe("browser service", () => {
       await rm(dataDir, { force: true });
       await rm(linkRoot, { recursive: true, force: true });
       await rm(physicalRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a PDF output path that would stage outside the allowed root", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "smooth-operator-pdf-root-test-"));
+    try {
+      const base = testConfig();
+      const config = testConfig({ dataDir, security: { ...base.security, allowedFileRoots: [dataDir] }, browser: { ...base.browser, mode: "connect" } });
+      const service = new BrowserService(config, new SecurityPolicy(config), new Logger("error", {}, () => undefined));
+      let pdfCalled = false;
+      const page = new EventEmitter() as EventEmitter & { isClosed(): boolean; url(): string; pdf(options: { path: string }): Promise<void> };
+      page.isClosed = () => false;
+      page.url = () => "about:blank";
+      page.pdf = async () => { pdfCalled = true; };
+      const internal = service as unknown as {
+        stateFor(page: unknown): { downloadConfigured: boolean; navigationGuardInstalled: boolean };
+        executeOnPage(action: BrowserAction, signal?: AbortSignal): Promise<unknown>;
+        pageState(pageId?: string, signal?: AbortSignal): Promise<unknown>;
+        assertCurrentPageAllowed(page: unknown): Promise<void>;
+        assertSnapshotForAction(state: unknown, action: BrowserAction): void;
+        frameFor(state: unknown, frameId?: string): Promise<unknown>;
+      };
+      const state = internal.stateFor(page);
+      state.downloadConfigured = true;
+      state.navigationGuardInstalled = true;
+      internal.pageState = async () => state;
+      internal.assertCurrentPageAllowed = async () => undefined;
+      internal.assertSnapshotForAction = () => undefined;
+      internal.frameFor = async () => ({ });
+
+      await expect(internal.executeOnPage({ action: "save_as_pdf", outputPath: dataDir } as BrowserAction)).rejects.toMatchObject({ code: "FILE_PATH_BLOCKED" });
+      expect(pdfCalled).toBe(false);
+      await service.close();
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
     }
   });
 

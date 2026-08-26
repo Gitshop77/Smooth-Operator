@@ -151,6 +151,15 @@ describe("MCP contracts", () => {
     expect(BrowserActionSchema.safeParse({ action: "input", index: 0 }).success).toBe(false);
     expect(BrowserActionSchema.safeParse({ action: "input", index: 0, text: "" }).success).toBe(true);
     expect(BrowserActionSchema.safeParse({ action: "send_keys", key: "Enter", keys: ["Escape"] }).success).toBe(false);
+    expect(BrowserActionSchema.safeParse({ action: "alert_send_keys" }).success).toBe(false);
+    expect(BrowserActionSchema.safeParse({ action: "alert_send_keys", text: "okay" }).success).toBe(true);
+    expect(BrowserActionSchema.safeParse({ action: "send_keys", keys: [" "] }).success).toBe(true);
+    expect(BrowserActionSchema.safeParse({ action: "press_and_hold", target: "#drag", endCoordinateX: 10 }).success).toBe(false);
+    expect(BrowserActionSchema.safeParse({ action: "press_and_hold", target: "#drag", endCoordinateX: 10, endCoordinateY: 20 }).success).toBe(true);
+    expect(BrowserActionSchema.safeParse({ action: "press_and_hold", selector: "#canvas", path: [{ x: 1, y: 1 }, { x: 2, y: 2 }] }).success).toBe(true);
+    expect(BrowserActionSchema.safeParse({ action: "press_and_hold", selector: "#canvas", path: [{ x: 1, y: 1 }, { x: 2, y: 2 }], endCoordinateX: 3, endCoordinateY: 3 }).success).toBe(false);
+    expect(BrowserActionInputSchema.safeParse({ action: "dialog", operation: "send_keys" }).success).toBe(false);
+    expect(BrowserActionInputSchema.safeParse({ action: "dialog", operation: "send_keys", text: "okay" }).success).toBe(true);
     expect(BrowserActionSchema.safeParse({ action: "find_elements", selector: "button", index: 0 }).success).toBe(false);
     expect(BrowserActionSchema.safeParse({ action: "run_script", script: "[]" }).success).toBe(true);
   });

@@ -23,6 +23,9 @@ export class ResearchService {
   ) {}
 
   async research(query: string, options: { maxResults?: number; maxChars?: number } = {}, signal?: AbortSignal): Promise<ResearchResult> {
+    if (typeof query !== "string") {
+      throw new AppError("RESEARCH_INVALID", "A non-empty research query is required.");
+    }
     const normalizedQuery = query.trim();
     if (!normalizedQuery) {
       throw new AppError("RESEARCH_INVALID", "A non-empty research query is required.");
@@ -33,10 +36,15 @@ export class ResearchService {
     const maxResults = boundedInteger(options.maxResults, 5, 1, 10);
     // maxChars is an aggregate budget for textual fields only.
     const maxChars = boundedInteger(options.maxChars, 20_000, 500, 50_000);
+    let encodedQuery: string;
+    try {
+      encodedQuery = encodeURIComponent(normalizedQuery);
+    } catch (error) {
+      throw new AppError("RESEARCH_INVALID", "Research queries must contain valid Unicode text.", { cause: error });
+    }
     if (signal?.aborted) {
       throw new AppError("CANCELLED", "The research request was cancelled.");
     }
-    const url = await this.policy.assertNavigationAllowedAsync(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(normalizedQuery)}`);
     const controller = new AbortController();
     let timedOut = false;
     const timeout = setTimeout(() => {
@@ -46,6 +54,13 @@ export class ResearchService {
     const abort = (): void => controller.abort();
     signal?.addEventListener("abort", abort, { once: true });
     try {
+      // Policy admission can perform DNS work before fetch starts. Race it
+      // against the same deadline as the outbound request so a resolver that
+      // never settles cannot hold the research call indefinitely.
+      const url = await awaitWithAbort(
+        this.policy.assertNavigationAllowedAsync(`https://html.duckduckgo.com/html/?q=${encodedQuery}`),
+        controller.signal,
+      );
       // The caller can abort while the asynchronous URL policy check is in
       // flight. Re-check after installing the listener so that this race
       // cannot start an outbound request after cancellation.
@@ -53,7 +68,10 @@ export class ResearchService {
         controller.abort();
         throw new AppError("CANCELLED", "The research request was cancelled.");
       }
-      const response = await fetch(url, { signal: controller.signal, redirect: "error", headers: { accept: "text/html" } });
+      const response = await awaitWithAbort(
+        fetch(url, { signal: controller.signal, redirect: "error", headers: { accept: "text/html" } }),
+        controller.signal,
+      );
       if (!response.ok) {
         throw new AppError("SEARCH_HTTP_ERROR", `Search request returned HTTP ${response.status}.`, { retryable: response.status >= 500 });
       }
@@ -61,7 +79,7 @@ export class ResearchService {
       if (Number.isFinite(declaredLength) && declaredLength > MAX_RESPONSE_BYTES) {
         throw new AppError("RESEARCH_RESPONSE_TOO_LARGE", "The search response exceeded the safety limit.");
       }
-      const html = await readBoundedResponseText(response, MAX_RESPONSE_BYTES);
+      const html = await readBoundedResponseText(response, MAX_RESPONSE_BYTES, controller.signal);
       // `redirect: error` keeps the fetch target bounded, while the response
       // URL still gives the parser the correct origin for protocol-relative
       // and relative result links in DuckDuckGo's HTML.
@@ -93,6 +111,36 @@ export class ResearchService {
   }
 }
 
+async function awaitWithAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) {
+    return promise;
+  }
+  if (signal.aborted) {
+    throw new Error("Operation aborted");
+  }
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const finish = (callback: () => void): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      callback();
+    };
+    const onAbort = (): void => finish(() => reject(new Error("Operation aborted")));
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    promise.then(
+      (value) => finish(() => resolve(value)),
+      (error: unknown) => finish(() => reject(error)),
+    );
+  });
+}
+
 function parseResults(html: string, maxResults: number, maxChars: number, baseUrl: string): Array<{ title: string; url: string; untrustedUrl: string; snippet: string }> {
   const results: Array<{ title: string; url: string; untrustedUrl: string; snippet: string }> = [];
   let textUsed = 0;
@@ -120,10 +168,13 @@ function parseResults(html: string, maxResults: number, maxChars: number, baseUr
     if (!url) {
       continue;
     }
-    const title = redactSecretPlaceholders(decodeEntities(stripTags(anchor.slice(tagEnd + 1, -4))).trim()).slice(0, 500);
-    const tail = html.slice(match.index + match[0].length, match.index + match[0].length + 3_000);
-    const snippetMatch = /class=["'][^"']*result__snippet[^"']*["'][^>]*>([\s\S]*?)<\/[^>]+>/i.exec(tail);
-    const snippet = snippetMatch ? redactSecretPlaceholders(decodeEntities(stripTags(snippetMatch[1])).trim()).slice(0, 4_000) : "";
+    const titleContent = anchor.slice(tagEnd + 1).replace(/<\/a>\s*$/i, "");
+    const title = redactSecretPlaceholders(decodeEntities(stripTags(titleContent)).trim()).slice(0, 500);
+    const tailWindow = html.slice(match.index + match[0].length, match.index + match[0].length + 3_000);
+    const nextResult = /<a\b[^>]*\bclass\s*=\s*(["'])[^"']*\bresult__a\b[^"']*\1/i.exec(tailWindow);
+    const tail = nextResult ? tailWindow.slice(0, nextResult.index) : tailWindow;
+    const snippetMatch = /\bclass\s*=\s*(["'])[^"']*\bresult__snippet\b[^"']*\1[^>]*>([\s\S]*?)<\/[^>]+>/i.exec(tail);
+    const snippet = snippetMatch ? redactSecretPlaceholders(decodeEntities(stripTags(snippetMatch[2])).trim()).slice(0, 4_000) : "";
     const remaining = maxChars - textUsed;
     if (remaining <= 0) {
       break;
@@ -213,7 +264,7 @@ function boundedInteger(value: number | undefined, fallback: number, minimum: nu
   return Math.min(Math.max(Math.trunc(value), minimum), maximum);
 }
 
-async function readBoundedResponseText(response: Response, maxBytes: number): Promise<string> {
+async function readBoundedResponseText(response: Response, maxBytes: number, signal?: AbortSignal): Promise<string> {
   if (!response.body) {
     // A network Response normally exposes a stream. Treat a body-less
     // response as empty instead of calling response.text(), whose fallback
@@ -223,21 +274,37 @@ async function readBoundedResponseText(response: Response, maxBytes: number): Pr
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
+  let cancelReader = false;
   try {
     while (true) {
-      const result = await reader.read();
+      const result = await awaitWithAbort(reader.read(), signal);
       if (result.done) {
         break;
       }
+      if (!(result.value instanceof Uint8Array)) {
+        cancelReader = true;
+        throw new AppError("RESEARCH_RESPONSE_INVALID", "The search response body was invalid.");
+      }
       total += result.value.byteLength;
       if (total > maxBytes) {
-        await reader.cancel();
+        cancelReader = true;
         throw new AppError("RESEARCH_RESPONSE_TOO_LARGE", "The search response exceeded the safety limit.");
       }
       chunks.push(result.value);
     }
+  } catch (error) {
+    cancelReader = true;
+    throw error;
   } finally {
-    reader.releaseLock();
+    if (cancelReader) {
+      void reader.cancel().catch(() => undefined);
+    }
+    try {
+      reader.releaseLock();
+    } catch {
+      // Preserve the original response/abort error if a non-cooperative body
+      // still has a pending read when its lock is released.
+    }
   }
   const bytes = new Uint8Array(total);
   let offset = 0;

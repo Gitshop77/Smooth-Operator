@@ -48,6 +48,7 @@ const CLOSED_WORLD_TOOLS = new Set(["server_health", "browser_doctor", "browser_
 describe("native MCP registry", () => {
   it("completes a real MCP handshake and exposes only native server capabilities", async () => {
     const runtime = await ServerRuntime.create(testConfig());
+    vi.spyOn(runtime, "webSearch").mockResolvedValue({ results: [] });
     const server = createMcpServer(runtime);
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: "test-client", version: "1.0.0" });
@@ -58,7 +59,7 @@ describe("native MCP registry", () => {
     const resourceTemplates = await client.listResourceTemplates();
     const prompts = await client.listPrompts();
 
-    expect(tools.tools).toHaveLength(59);
+    expect(tools.tools).toHaveLength(60);
     expect(resources.resources).toHaveLength(6);
     expect(resourceTemplates.resourceTemplates).toHaveLength(1);
     expect(prompts.prompts).toHaveLength(4);
@@ -125,6 +126,9 @@ describe("native MCP registry", () => {
     expect(hasRequiredBranch(toolByName.get("browser_switch_tab")?.inputSchema, "pageId")).toBe(true);
     expect(hasRequiredBranch(toolByName.get("browser_switch_tab")?.inputSchema, "tab_id")).toBe(true);
     expect(JSON.stringify(toolByName.get("browser_press_and_hold")?.inputSchema)).toContain("durationMs");
+    expect(toolByName.get("browser_press_and_hold")?.description).toContain("endCoordinateX");
+    expect(toolByName.get("browser_press_and_hold")?.description).toContain("path");
+    expect(toolByName.has("browser_move")).toBe(true);
     expect(toolByName.get("browser_get_state")?.annotations?.readOnlyHint).toBe(true);
     expect(toolByName.get("browser_get_state")?.annotations?.openWorldHint).toBe(true);
     expect(toolByName.get("browser_get_state")?.annotations?.idempotentHint).toBeUndefined();
@@ -163,12 +167,29 @@ describe("native MCP registry", () => {
     expect(JSON.stringify(denied)).toContain("EVALUATE_DISABLED");
     expect(denied.structuredContent).toMatchObject({ ok: false, error: { code: "EVALUATE_DISABLED", retryable: false } });
 
+    const missingDialogText = await client.callTool({ name: "browser_dialog", arguments: { operation: "send_keys" } });
+    expect(missingDialogText.isError).toBe(true);
+    expect(JSON.stringify(missingDialogText)).toContain("requires text");
+    const unexpectedDialogText = await client.callTool({ name: "browser_dialog", arguments: { operation: "get_text", text: "ignored" } });
+    expect(unexpectedDialogText.isError).toBe(true);
+    expect(JSON.stringify(unexpectedDialogText)).toContain("does not accept text");
+
     const invalidProgram = await client.callTool({ name: "browser_exec", arguments: { code: "not-json" } });
     expect(invalidProgram.isError).toBe(true);
     expect(JSON.stringify(invalidProgram)).toContain("JSON array");
     const arbitraryProgram = await client.callTool({ name: "browser_exec", arguments: { code: "print('not allowed')" } });
     expect(arbitraryProgram.isError).toBe(true);
     expect(JSON.stringify(arbitraryProgram)).toContain("JSON array");
+    for (const arguments_ of [
+      { operation: "send_keys" },
+      { operation: "get_text", text: "unexpected" },
+      { operation: "accept", text: "unexpected" },
+      { operation: "dismiss", text: "unexpected" },
+    ]) {
+      const invalidDialog = await client.callTool({ name: "browser_dialog", arguments: arguments_ });
+      expect(invalidDialog.isError).toBe(true);
+      expect(JSON.stringify(invalidDialog)).toContain("Dialog");
+    }
     const unconfirmedEvaluationPlan = await client.callTool({ name: "browser_batch", arguments: { actions: [{ action: "evaluate", code: "1 + 1" }] } });
     expect(unconfirmedEvaluationPlan.isError).toBe(true);
     expect(JSON.stringify(unconfirmedEvaluationPlan)).toContain("confirmDestructive");
@@ -200,16 +221,28 @@ describe("native MCP registry", () => {
       ["browser_dropdown_options", { selector: "select" }], ["browser_page_next", {}], ["browser_search_page", { query: "x" }],
       ["browser_find_elements", { selector: "button" }], ["browser_interactive", {}], ["browser_computed_style", { selector: "body" }],
       ["browser_frames", {}], ["browser_accessibility_snapshot", {}],
-      ["browser_page_info", {}], ["browser_hover", { target: "#x" }], ["browser_press_and_hold", { target: "#x" }],
+      ["browser_page_info", {}], ["browser_hover", { target: "#x" }], ["browser_move", { coordinateX: 1, coordinateY: 1 }], ["browser_press_and_hold", { target: "#x" }],
       ["browser_press_and_hold", { target: "#x", durationMs: 10 }],
       ["browser_challenge", {}], ["browser_evaluate", { code: "1 + 1" }],
       ["browser_wait_for_human", { timeoutMs: 500 }],
       ["browser_exec", { code: JSON.stringify([{ action: "wait", milliseconds: 0 }]) }],
       ["browser_batch", { actions: [{ action: "wait", milliseconds: 0 }] }],
       ["browser_dialog", { operation: "get_text" }], ["browser_cookies", { operation: "get" }], ["browser_storage", { operation: "get" }],
+      ["web_search", { query: "MCP", maxResults: 1, maxChars: 500 }],
     ];
     for (const [name, arguments_] of calls) {
       await expect(client.callTool({ name, arguments: arguments_ })).resolves.toBeDefined();
+    }
+    const exercisedToolNames = new Set(calls.map(([name]) => name));
+    exercisedToolNames.add("server_health");
+    expect([...toolNames].filter((name) => !exercisedToolNames.has(name)), "every registered tool must have a protocol call").toEqual([]);
+
+    // Every discovered tool also receives a schema-invalid call. This keeps
+    // the coverage matrix tied to tools/list instead of silently drifting as
+    // tools are added or renamed.
+    for (const name of toolNames) {
+      const invalid = await client.callTool({ name, arguments: { __smooth_operator_invalid_field__: "invalid" } });
+      expect(invalid.isError, `${name} must reject an unknown input field`).toBe(true);
     }
 
     for (const uri of [
@@ -221,6 +254,7 @@ describe("native MCP registry", () => {
     ]) {
       await expect(client.readResource({ uri })).rejects.toBeDefined();
     }
+    await expect(client.readResource({ uri: `smooth-operator://browser/page/${"x".repeat(201)}` })).rejects.toBeDefined();
     await expect(client.getPrompt({ name: "browser-workflow", arguments: { task: "inspect" } })).resolves.toBeDefined();
     await expect(client.getPrompt({ name: "extract-page", arguments: { question: "what?" } })).resolves.toBeDefined();
     await expect(client.getPrompt({ name: "research-question", arguments: { question: "what?" } })).resolves.toBeDefined();

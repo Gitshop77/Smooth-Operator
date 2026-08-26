@@ -7,25 +7,38 @@ import { join } from "node:path";
 import { describe, expect, it, afterAll, beforeAll } from "vitest";
 
 import { BrowserService } from "@/server/browser/service";
+import { findChromeExecutable } from "@/server/browser/discovery";
 import { Logger } from "@/server/logger";
 import { SecurityPolicy } from "@/server/policy";
 import { ServerRuntime } from "@/server/runtime";
 
 import { testConfig } from "./helpers";
 
-const executablePath = process.env.SMOOTH_OPERATOR_TEST_BROWSER_EXECUTABLE;
-const describeLive = executablePath ? describe : describe.skip;
+const executablePath = process.env.SMOOTH_OPERATOR_TEST_BROWSER_EXECUTABLE ?? findChromeExecutable()?.path;
 
-describeLive("live browser contract", () => {
+describe("live browser contract", () => {
   let fixture: Server;
   let baseUrl = "";
   let dataDir = "";
   let service: BrowserService;
 
   beforeAll(async () => {
+    if (!executablePath) {
+      throw new Error("No executable Chrome/Chromium installation was found. Install Chrome or set SMOOTH_OPERATOR_TEST_BROWSER_EXECUTABLE.");
+    }
     fixture = createServer((request, response) => {
       if (request.url === "/frame") {
         response.end("<!doctype html><button id=frame-button>Frame action</button>");
+        return;
+      }
+      if (request.url === "/scroll-container") {
+        response.end(`<!doctype html><title>Scroll container</title>
+          <textarea id="scrollbox" style="width:150px;height:95px;">${"scroll line ".repeat(600)}</textarea>`);
+        return;
+      }
+      if (request.url === "/svg") {
+        response.end(`<!doctype html><p id="status">ready</p>
+          <svg width="160" height="80"><rect id="color-rect" x="4" y="4" width="40" height="40" fill="#ff0000" data-color="#ff0000" data-index="3" data-sides="left,right" data-result="win" data-key="shape" data-secret="do-not-return" aria-label="color target" onclick="document.querySelector('#status').textContent='rect-clicked'"></rect><text x="60" y="40" font-size="24" onclick="document.querySelector('#status').textContent='svg-clicked'">1</text></svg>`);
         return;
       }
       if (request.url === "/download") {
@@ -47,6 +60,8 @@ describeLive("live browser contract", () => {
         <button id=action-button onclick="document.querySelector('#status').textContent='clicked'">Action</button>
         <button id=alert-button onclick="alert('hello from fixture')">Alert</button>
         <input id=input value="" />
+        <input id=date-input type=date onchange="document.querySelector('#date-status').textContent=this.value" />
+        <p id=date-status></p>
         <p id=status>ready</p>
         <a id=popup href="/popup" target="_blank">Open popup</a>
         <a id=download href="/download">Download</a>
@@ -98,6 +113,8 @@ describeLive("live browser contract", () => {
     const freshInput = clickedWithSnapshot.snapshot?.interactive?.find((item) => item.selector === "#input");
     const inputResult = await service.execute({ action: "input", target: `ref:${freshInput?.ref}`, snapshotId: clickedWithSnapshot.snapshot?.snapshotId, text: "hello", verify: true });
     expect(inputResult).toMatchObject({ verified: true });
+    expect(await service.execute({ action: "input", target: "#date-input", text: "2024-12-20", verify: true })).toMatchObject({ verified: true });
+    expect(await service.execute({ action: "extract", selector: "#date-status" })).toMatchObject({ text: expect.stringContaining("2024-12-20") });
     expect(await service.execute({ action: "find_elements", selector: "pierce/#shadow-button" })).toEqual(expect.arrayContaining([expect.objectContaining({ tag: "button" })]));
     await service.execute({ action: "click", target: "pierce/#shadow-button" });
     await service.execute({ action: "click", target: "#alert-button" });
@@ -112,6 +129,25 @@ describeLive("live browser contract", () => {
 
     const ax = await service.execute({ action: "accessibility_snapshot", maxNodes: 100 });
     expect(ax).toMatchObject({ pageId: snapshot.pageId, nodes: expect.any(Array) });
+    const childAx = await service.execute({ action: "accessibility_snapshot", frameId: childFrameId, maxNodes: 100 }) as { nodes?: unknown[] };
+    expect(JSON.stringify(childAx.nodes)).toContain("Frame action");
+    await service.execute({ action: "navigate", url: `${baseUrl}/scroll-container` });
+    await service.execute({ action: "click", target: "#scrollbox" });
+    const focusedScroll = await service.execute({ action: "scroll", direction: "down", amount: 500 }) as { container?: string; y?: number };
+    expect(focusedScroll).toMatchObject({ container: "element" });
+    expect(focusedScroll.y).toBeGreaterThan(0);
+    await service.execute({ action: "navigate", url: `${baseUrl}/svg` });
+    const foundColorElements = await service.execute({ action: "find_elements", selector: "#color-rect" }) as Array<{ selector?: string; rect?: { width?: number; height?: number }; attributes?: Record<string, string> }>;
+    expect(foundColorElements).toHaveLength(1);
+    expect(foundColorElements[0]).toMatchObject({ selector: expect.stringContaining("#color-rect"), rect: { width: expect.any(Number), height: expect.any(Number) }, attributes: expect.objectContaining({ "data-color": expect.stringContaining("#ff0000"), "data-index": expect.stringContaining("3"), "data-sides": expect.stringContaining("left,right"), "data-result": expect.stringContaining("win"), "data-key": expect.stringContaining("shape"), "aria-label": expect.stringContaining("color target") }) });
+    expect(foundColorElements[0]?.rect?.width).toBeGreaterThan(0);
+    expect(foundColorElements[0]?.rect?.height).toBeGreaterThan(0);
+    expect(foundColorElements[0]?.attributes).not.toHaveProperty("data-secret");
+    expect(foundColorElements[0]?.attributes).not.toHaveProperty("onclick");
+    expect(foundColorElements[0]?.attributes).toHaveProperty("fill");
+    await service.execute({ action: "click", target: "1" });
+    expect(await service.execute({ action: "extract", selector: "#status" })).toMatchObject({ text: expect.stringContaining("svg-clicked") });
+    await service.execute({ action: "navigate", url: baseUrl });
     const jpeg = await service.execute({ action: "screenshot", format: "jpeg", quality: 60, maxBytes: 2_000_000 });
     expect(jpeg).toMatchObject({ mimeType: "image/jpeg", screenshotBase64: expect.any(String) });
     const scaled = await service.execute({ action: "screenshot", format: "png", maxDimension: 200, maxBytes: 2_000_000 }) as { screenshotBase64?: string };

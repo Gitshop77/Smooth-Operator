@@ -143,44 +143,6 @@ application token, Host/Origin allowlists, or request-size limit. Allowed host
 and origin values are hostnames without a scheme; browser preflight requests
 are answered only after the same Host and Origin checks.
 
-### ChatGPT and OpenAI connections
-
-For private developer-mode use, the safest OpenAI-compatible route is Secure
-MCP Tunnel. It keeps this server on the local machine and forwards requests
-over an outbound connection; it can launch this server over stdio, so no public
-HTTP listener or public browser profile is required.
-
-Create a tunnel in OpenAI Platform, install the separately distributed
-`tunnel-client`, and run a profile like this (replace the placeholders with
-your tunnel identity and local executable):
-
-```sh
-export CONTROL_PLANE_API_KEY="sk-..."
-
-tunnel-client init \
-  --sample sample_mcp_stdio_local \
-  --profile smooth-operator \
-  --tunnel-id tunnel_... \
-  --mcp-command "smooth-operator --transport stdio"
-
-tunnel-client doctor --profile smooth-operator --explain
-tunnel-client run --profile smooth-operator
-```
-
-Then enable Developer mode in ChatGPT, create a developer-mode app, choose
-`Tunnel`, and select the associated tunnel. Tunnel and ChatGPT workspace
-permissions are separate; the tunnel must be associated with the target
-workspace. This path is for private testing and use, not public plugin
-submission.
-
-For public distribution, deploy a stable HTTPS `/mcp` endpoint and put an
-OAuth 2.1-compatible identity provider in front of authenticated tools. The
-local bearer token is intended for this server's controlled HTTP mode; it is
-not a substitute for a public OAuth authorization server. See the official
-[OpenAI MCP quickstart](https://developers.openai.com/plugins/build/app-quickstart),
-[authentication guide](https://developers.openai.com/plugins/build/auth), and
-[Secure MCP Tunnel guide](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels).
-
 ## Browser lifecycle
 
 The server manages one headed, persistent private agent-Chrome session by
@@ -207,8 +169,10 @@ SmoothOperator process using the same private profile is rejected by the profile
 `SMOOTH_OPERATOR_BROWSER_AUTO_LAUNCH` is retained for backward compatibility but is
 ignored in managed mode.
 
-Browser actions share a bounded operation queue and deadline. Browser startup
-uses one in-flight connection promise, so concurrent callers wait for the same
+Browser actions share a bounded operation queue and deadline. Independent
+read-only observations may run concurrently; navigation, mutation, snapshot,
+and session-control operations remain exclusive. Browser startup uses one
+in-flight connection promise, so concurrent callers wait for the same
 reattach/launch attempt instead of starting duplicate processes. Newly
 auto-attached top-level targets are held at the CDP boundary until the
 navigation policy guard is installed; targets whose attachment ownership

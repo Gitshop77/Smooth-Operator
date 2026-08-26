@@ -1,6 +1,9 @@
 import * as z from "zod/v4";
 
 const BoundedString = (max: number) => z.string().trim().min(1).max(max);
+// Keyboard input is the one bounded string that must preserve leading,
+// trailing, and whitespace-only values: a literal " " is a valid key event.
+const KeyboardString = (max: number) => z.string().min(1).max(max);
 export const MCP_PAGE_TEXT_MAX_CHARS = 8_000;
 const isHttpUrl = (value: string): boolean => {
   try {
@@ -67,6 +70,7 @@ const BrowserActionNames = [
   "evaluate",
   "run_script",
   "hover",
+  "move",
   "press_and_hold",
   "alert_accept",
   "alert_dismiss",
@@ -85,6 +89,10 @@ const BrowserActionNames = [
 ] as const;
 
 const ActionNameSchema = z.enum(BrowserActionNames);
+const PointerPathSchema = z.array(z.object({
+  x: z.number().finite().min(0).max(100_000),
+  y: z.number().finite().min(0).max(100_000),
+}).strict()).min(2).max(256).optional();
 export type ActionName = z.infer<typeof ActionNameSchema>;
 
 const BrowserActionFieldsSchema = z.object({
@@ -104,8 +112,17 @@ const BrowserActionFieldsSchema = z.object({
   coordinateY: z.number().finite().min(0).max(100_000).optional(),
   coordinate_x: z.number().finite().min(0).max(100_000).optional(),
   coordinate_y: z.number().finite().min(0).max(100_000).optional(),
-  key: BoundedString(100).optional(),
-  keys: z.array(BoundedString(100)).min(1).max(32).optional(),
+  startCoordinateX: z.number().finite().min(0).max(100_000).optional(),
+  startCoordinateY: z.number().finite().min(0).max(100_000).optional(),
+  start_coordinate_x: z.number().finite().min(0).max(100_000).optional(),
+  start_coordinate_y: z.number().finite().min(0).max(100_000).optional(),
+  path: PointerPathSchema,
+  endCoordinateX: z.number().finite().min(0).max(100_000).optional(),
+  endCoordinateY: z.number().finite().min(0).max(100_000).optional(),
+  end_coordinate_x: z.number().finite().min(0).max(100_000).optional(),
+  end_coordinate_y: z.number().finite().min(0).max(100_000).optional(),
+  key: KeyboardString(100).optional(),
+  keys: z.array(KeyboardString(100)).min(1).max(32).optional(),
   direction: z.enum(["up", "down", "left", "right"]).optional(),
   amount: z.number().finite().min(1).max(100_000).optional(),
   offset: z.number().int().min(0).max(1_000_000).optional(),
@@ -138,6 +155,7 @@ const BrowserActionFieldsSchema = z.object({
   max_dim: z.number().int().min(100).max(20_000).optional(),
   max_bytes: z.number().int().min(100_000).max(20_000_000).optional(),
   button: z.enum(["left", "middle", "right"]).optional(),
+  pointerType: z.enum(["mouse", "touch"]).optional(),
   clickCount: z.number().int().min(1).max(3).optional(),
   clear: z.boolean().optional(),
   append: z.boolean().optional(),
@@ -145,6 +163,7 @@ const BrowserActionFieldsSchema = z.object({
   durationMs: z.number().int().min(0).max(30_000).optional(),
   pollMs: z.number().int().min(250).max(10_000).optional(),
   optionValue: BoundedString(2_000).optional(),
+  optionValues: z.array(BoundedString(2_000)).min(1).max(200).optional(),
   cookieName: BoundedString(256).optional(),
   cookieValue: z.string().max(20_000).optional(),
   cookieDomain: BoundedString(512).optional(),
@@ -170,6 +189,31 @@ export const BrowserActionSchema = BrowserActionFieldsSchema.extend({ action: Ac
   }
   if (input.coordinateY !== undefined && input.coordinate_y !== undefined) {
     context.addIssue({ code: "custom", message: "Provide coordinateY or coordinate_y, not both." });
+  }
+  if (input.endCoordinateX !== undefined && input.end_coordinate_x !== undefined) {
+    context.addIssue({ code: "custom", message: "Provide endCoordinateX or end_coordinate_x, not both." });
+  }
+  if (input.endCoordinateY !== undefined && input.end_coordinate_y !== undefined) {
+    context.addIssue({ code: "custom", message: "Provide endCoordinateY or end_coordinate_y, not both." });
+  }
+  if (input.startCoordinateX !== undefined && input.start_coordinate_x !== undefined) {
+    context.addIssue({ code: "custom", message: "Provide startCoordinateX or start_coordinate_x, not both." });
+  }
+  if (input.startCoordinateY !== undefined && input.start_coordinate_y !== undefined) {
+    context.addIssue({ code: "custom", message: "Provide startCoordinateY or start_coordinate_y, not both." });
+  }
+  const hasEndX = input.endCoordinateX !== undefined || input.end_coordinate_x !== undefined;
+  const hasEndY = input.endCoordinateY !== undefined || input.end_coordinate_y !== undefined;
+  if (hasEndX !== hasEndY) {
+    context.addIssue({ code: "custom", message: "endCoordinateX and endCoordinateY must be provided together." });
+  }
+  const hasStartX = input.startCoordinateX !== undefined || input.start_coordinate_x !== undefined;
+  const hasStartY = input.startCoordinateY !== undefined || input.start_coordinate_y !== undefined;
+  if (hasStartX !== hasStartY) {
+    context.addIssue({ code: "custom", message: "startCoordinateX and startCoordinateY must be provided together." });
+  }
+  if (input.path !== undefined && (hasStartX || hasEndX)) {
+    context.addIssue({ code: "custom", message: "Provide path or start/end coordinates, not both." });
   }
   if (input.newTab !== undefined && input.new_tab !== undefined) {
     context.addIssue({ code: "custom", message: "Provide newTab or new_tab, not both." });
@@ -213,6 +257,9 @@ export const BrowserActionSchema = BrowserActionFieldsSchema.extend({ action: Ac
   if (input.optionValue !== undefined && input.value !== undefined && input.action === "select_dropdown") {
     context.addIssue({ code: "custom", message: "Provide optionValue or value, not both." });
   }
+  if (input.optionValue !== undefined && input.optionValues !== undefined && input.action === "select_dropdown") {
+    context.addIssue({ code: "custom", message: "Provide optionValue or optionValues, not both." });
+  }
   if (input.cookieValue !== undefined && input.value !== undefined && input.action === "set_cookie") {
     context.addIssue({ code: "custom", message: "Provide cookieValue or value, not both." });
   }
@@ -239,6 +286,16 @@ export const BrowserActionSchema = BrowserActionFieldsSchema.extend({ action: Ac
       context.addIssue({ code: "custom", message: "Provide either target/index or coordinates, not both." });
     }
   }
+  if (input.action === "move") {
+    const hasX = input.coordinateX !== undefined || input.coordinate_x !== undefined;
+    const hasY = input.coordinateY !== undefined || input.coordinate_y !== undefined;
+    if (!hasX || !hasY) {
+      context.addIssue({ code: "custom", message: "Move requires coordinateX and coordinateY." });
+    }
+    if (targetForms > 0) {
+      context.addIssue({ code: "custom", message: "Move accepts coordinates only." });
+    }
+  }
 
   const requireOne = (values: unknown[], message: string): void => {
     if (!values.some((value) => value !== undefined && value !== null)) {
@@ -255,10 +312,13 @@ export const BrowserActionSchema = BrowserActionFieldsSchema.extend({ action: Ac
       break;
     case "select_dropdown":
       requireOne([input.target, input.ref, input.selector, input.index], "Select requires target, ref, selector, or index.");
-      requireOne([input.optionValue, input.value], "Select requires optionValue.");
+      requireOne([input.optionValue, input.optionValues, input.value], "Select requires optionValue or optionValues.");
       break;
     case "send_keys":
       requireOne([input.key, input.keys], "Keyboard input requires key or keys.");
+      break;
+    case "alert_send_keys":
+      requireOne([input.text, input.value], "Dialog send_keys requires text.");
       break;
     case "switch_tab":
     case "close_tab":
@@ -450,6 +510,7 @@ const ClickFieldsSchema = z.object({
   coordinate_x: z.number().finite().min(0).max(100_000).optional(),
   coordinate_y: z.number().finite().min(0).max(100_000).optional(),
   button: z.enum(["left", "middle", "right"]).optional(),
+  pointerType: z.enum(["mouse", "touch"]).optional(),
   clickCount: z.number().int().min(1).max(3).optional(),
   waitUntil: z.enum(["load", "domcontentloaded", "networkidle0", "networkidle2"]).optional(),
   timeoutMs: z.number().int().min(100).max(120_000).optional(),
@@ -552,8 +613,8 @@ export const WaitRequestSchema = z.object({ milliseconds: z.number().int().min(0
 export const WaitForTextRequestSchema = z.object({ text: BoundedString(20_000), timeoutMs: z.number().int().min(100).max(120_000).optional(), ...PageInput }).strict();
 export const WaitForUrlRequestSchema = z.object({ url: BoundedString(8_000), timeoutMs: z.number().int().min(100).max(120_000).optional(), ...PageInput }).strict();
 export const WaitForHumanRequestSchema = z.object({ timeoutMs: z.number().int().min(500).max(600_000).optional(), pollMs: z.number().int().min(250).max(10_000).optional(), ...PageInput }).strict();
-export const KeyRequestSchema = z.object({ keys: z.array(BoundedString(100)).min(1).max(32), ...PageInput }).strict();
-export const ScrollRequestSchema = z.object({ direction: z.enum(["up", "down", "left", "right"]).default("down"), amount: z.number().finite().min(1).max(100_000).default(600), ...PageInput }).strict();
+export const KeyRequestSchema = z.object({ keys: z.array(KeyboardString(100)).min(1).max(32), ...PageInput }).strict();
+export const ScrollRequestSchema = z.object({ selector: BoundedString(2_000).optional(), direction: z.enum(["up", "down", "left", "right"]).default("down"), amount: z.number().finite().min(1).max(100_000).default(600), ...PageInput }).strict();
 export const ScrollToBottomRequestSchema = z.object({ maxScrolls: z.number().int().min(1).max(50).optional(), timeoutMs: z.number().int().min(100).max(120_000).optional(), restoreTop: z.boolean().optional(), ...PageInput }).strict();
 export const ExtractRequestSchema = z.object({ selector: BoundedString(2_000).optional(), query: BoundedString(4_000).optional(), includeLinks: z.boolean().optional(), offset: z.number().int().min(0).max(1_000_000).optional(), maxChars: z.number().int().min(100).max(8_000).optional(), ...PageInput }).strict().superRefine((input, context) => {
   if (input.selector !== undefined && input.query !== undefined) {
@@ -587,7 +648,14 @@ export const EvaluateRequestSchema = z.object({
   }
 });
 export const NetworkLogRequestSchema = z.object({ operation: z.enum(["enable", "disable", "read", "clear", "read_and_clear"]), ...PageInput }).strict();
-export const DialogRequestSchema = z.object({ operation: z.enum(["get_text", "accept", "dismiss", "send_keys"]), text: z.string().max(20_000).optional(), ...PageInput }).strict();
+export const DialogRequestSchema = z.object({ operation: z.enum(["get_text", "accept", "dismiss", "send_keys"]), text: z.string().max(20_000).optional(), ...PageInput }).strict().superRefine((input, context) => {
+  if (input.operation === "send_keys" && input.text === undefined) {
+    context.addIssue({ code: "custom", message: "Dialog send_keys requires text." });
+  }
+  if (input.operation !== "send_keys" && input.text !== undefined) {
+    context.addIssue({ code: "custom", message: `Dialog ${input.operation} does not accept text.` });
+  }
+});
 export const CookieRequestSchema = z.object({
   operation: z.enum(["get", "set", "delete"]),
   name: BoundedString(256).optional(),

@@ -58,7 +58,14 @@ const NetworkIdleSchema = z.object({
   timeoutMs: z.number().int().min(100).max(120_000).optional(),
   pageId: z.string().trim().min(1).max(200).optional(),
 }).strict();
-const SelectRequestSchema = SelectorRequestSchema.extend({ optionValue: z.string().trim().min(1).max(2_000) });
+const SelectRequestSchema = SelectorRequestSchema.extend({
+  optionValue: z.string().trim().min(1).max(2_000).optional(),
+  optionValues: z.array(z.string().trim().min(1).max(2_000)).min(1).max(200).optional(),
+}).superRefine((input, context) => {
+  if ((input.optionValue === undefined) === (input.optionValues === undefined)) {
+    context.addIssue({ code: "custom", message: "Provide exactly one of optionValue or optionValues." });
+  }
+});
 const TabFieldsSchema = z.object({ pageId: z.string().trim().min(1).max(200).optional(), tab_id: z.string().trim().min(1).max(200).optional() }).strict();
 const TabFormSchema = z.union([
   TabFieldsSchema.extend({ pageId: z.string().trim().min(1).max(200) }),
@@ -93,18 +100,79 @@ const AccessibilityRequestSchema = z.object({
 }).strict();
 const HoldRequestSchema = z.object({
   target: z.string().trim().min(1).max(2_000).optional(),
+  ref: z.string().trim().min(1).max(200).regex(/^(?:ref:)?e[1-9]\d*$/, "ref must be an element reference such as e5.").optional(),
+  selector: z.string().trim().min(1).max(2_000).optional(),
   index: z.number().int().min(0).max(1_000).optional(),
   pageId: z.string().trim().min(1).max(200).optional(),
   snapshotId: z.string().trim().min(1).max(200).optional(),
   frameId: z.string().trim().min(1).max(200).optional(),
   button: z.enum(["left", "middle", "right"]).optional(),
   durationMs: z.number().int().min(0).max(30_000).optional(),
+  startCoordinateX: z.number().finite().min(0).max(100_000).optional(),
+  startCoordinateY: z.number().finite().min(0).max(100_000).optional(),
+  start_coordinate_x: z.number().finite().min(0).max(100_000).optional(),
+  start_coordinate_y: z.number().finite().min(0).max(100_000).optional(),
+  path: z.array(z.object({
+    x: z.number().finite().min(0).max(100_000),
+    y: z.number().finite().min(0).max(100_000),
+  }).strict()).min(2).max(256).optional(),
+  endCoordinateX: z.number().finite().min(0).max(100_000).optional(),
+  endCoordinateY: z.number().finite().min(0).max(100_000).optional(),
+  end_coordinate_x: z.number().finite().min(0).max(100_000).optional(),
+  end_coordinate_y: z.number().finite().min(0).max(100_000).optional(),
 }).strict().superRefine((input, context) => {
-  if (input.target !== undefined && input.index !== undefined) {
-    context.addIssue({ code: "custom", message: "Provide target or index, not both." });
+  const targetFields = [input.target, input.ref, input.selector, input.index].filter((value) => value !== undefined);
+  if (targetFields.length !== 1) {
+    context.addIssue({ code: "custom", message: "Provide exactly one of target, ref, selector, or index." });
   }
-  if (input.target === undefined && input.index === undefined) {
-    context.addIssue({ code: "custom", message: "Provide target or index." });
+  if (input.endCoordinateX !== undefined && input.end_coordinate_x !== undefined) {
+    context.addIssue({ code: "custom", message: "Provide endCoordinateX or end_coordinate_x, not both." });
+  }
+  if (input.endCoordinateY !== undefined && input.end_coordinate_y !== undefined) {
+    context.addIssue({ code: "custom", message: "Provide endCoordinateY or end_coordinate_y, not both." });
+  }
+  if (input.startCoordinateX !== undefined && input.start_coordinate_x !== undefined) {
+    context.addIssue({ code: "custom", message: "Provide startCoordinateX or start_coordinate_x, not both." });
+  }
+  if (input.startCoordinateY !== undefined && input.start_coordinate_y !== undefined) {
+    context.addIssue({ code: "custom", message: "Provide startCoordinateY or start_coordinate_y, not both." });
+  }
+  const hasEndX = input.endCoordinateX !== undefined || input.end_coordinate_x !== undefined;
+  const hasEndY = input.endCoordinateY !== undefined || input.end_coordinate_y !== undefined;
+  if (hasEndX !== hasEndY) {
+    context.addIssue({ code: "custom", message: "endCoordinateX and endCoordinateY must be provided together." });
+  }
+  const hasStartX = input.startCoordinateX !== undefined || input.start_coordinate_x !== undefined;
+  const hasStartY = input.startCoordinateY !== undefined || input.start_coordinate_y !== undefined;
+  if (hasStartX !== hasStartY) {
+    context.addIssue({ code: "custom", message: "startCoordinateX and startCoordinateY must be provided together." });
+  }
+  if (input.path !== undefined && (hasStartX || hasStartY || hasEndX || hasEndY)) {
+    context.addIssue({ code: "custom", message: "Provide path or start/end coordinates, not both." });
+  }
+});
+const MoveRequestSchema = z.object({
+  coordinateX: z.number().finite().min(0).max(100_000).optional(),
+  coordinateY: z.number().finite().min(0).max(100_000).optional(),
+  coordinate_x: z.number().finite().min(0).max(100_000).optional(),
+  coordinate_y: z.number().finite().min(0).max(100_000).optional(),
+  pageId: z.string().trim().min(1).max(200).optional(),
+  frameId: z.string().trim().min(1).max(200).optional(),
+}).strict().superRefine((input, context) => {
+  if ((input.coordinateX === undefined) !== (input.coordinateY === undefined)) {
+    context.addIssue({ code: "custom", message: "coordinateX and coordinateY must be provided together." });
+  }
+  if ((input.coordinate_x === undefined) !== (input.coordinate_y === undefined)) {
+    context.addIssue({ code: "custom", message: "coordinate_x and coordinate_y must be provided together." });
+  }
+  if (input.coordinateX !== undefined && input.coordinate_x !== undefined) {
+    context.addIssue({ code: "custom", message: "Provide coordinateX or coordinate_x, not both." });
+  }
+  if (input.coordinateY !== undefined && input.coordinate_y !== undefined) {
+    context.addIssue({ code: "custom", message: "Provide coordinateY or coordinate_y, not both." });
+  }
+  if (input.coordinateX === undefined && input.coordinate_x === undefined) {
+    context.addIssue({ code: "custom", message: "Move requires coordinateX and coordinateY." });
   }
 });
 const BrowserExecCodeSchema = z.string().trim().min(1).max(80_000).superRefine((code, context) => {
@@ -293,8 +361,8 @@ function registerBrowserTools(server: McpServer, runtime: ServerRuntime): void {
     return { ...fields, target: fields.target ?? ref, coordinateX: fields.coordinateX ?? coordinate_x, coordinateY: fields.coordinateY ?? coordinate_y, newTab: fields.newTab ?? new_tab };
   });
   registerAction(server, runtime, "browser_input", "Enter text", "Replace the current value and type text into an input or textarea. Accepts a current snapshot ref, CSS selector, or index. Set includeSnapshot=true for one trailing snapshot.", InputRequestSchema, "input");
-  registerAction(server, runtime, "browser_select", "Select an option", "Select an option in a native HTML select element. Set includeSnapshot=true for one trailing snapshot.", SelectRequestSchema, "select_dropdown");
-  registerAction(server, runtime, "browser_scroll", "Scroll the page", "Scroll the current page by a bounded amount. Set includeSnapshot=true for one trailing snapshot.", ScrollRequestSchema, "scroll");
+  registerAction(server, runtime, "browser_select", "Select an option", "Select one or more options in a native HTML select element. Use optionValues for a multi-select. Set includeSnapshot=true for one trailing snapshot.", SelectRequestSchema, "select_dropdown");
+  registerAction(server, runtime, "browser_scroll", "Scroll the page or element", "Scroll the current page, or the nearest scrollable ancestor of selector, by a bounded amount. Set includeSnapshot=true for one trailing snapshot.", ScrollRequestSchema, "scroll");
   registerAction(server, runtime, "browser_scroll_to_bottom", "Scroll to the bottom", "Scroll repeatedly to the document bottom, allowing bounded lazy-loaded content to settle.", ScrollToBottomRequestSchema, "scroll_to_bottom");
   registerAction(server, runtime, "browser_key", "Send keyboard keys", "Send bounded keyboard keys or modifier combinations to the current page. Set includeSnapshot=true for one trailing snapshot.", KeyRequestSchema, "send_keys");
   registerAction(server, runtime, "browser_switch_tab", "Switch browser tab", "Make a connected tab the active target.", TabRequestSchema, "switch_tab", (input) => ({ pageId: input.pageId ?? input.tab_id }));
@@ -342,7 +410,8 @@ function registerBrowserTools(server: McpServer, runtime: ServerRuntime): void {
   registerAction(server, runtime, "browser_computed_style", "Read computed style", "Read a small safe subset of computed style for an element.", SelectorRequestSchema, "get_computed_style");
   registerAction(server, runtime, "browser_page_info", "Read page information", "Read URL, title, viewport, and document dimensions.", EmptyInputSchema, "get_page_info");
   registerAction(server, runtime, "browser_hover", "Hover an element", "Move the pointer over a CSS selector or snapshot ref.", TargetRequestSchema, "hover");
-  registerAction(server, runtime, "browser_press_and_hold", "Press and hold", "Press a mouse button on an element for a bounded duration.", HoldRequestSchema, "press_and_hold");
+  registerAction(server, runtime, "browser_move", "Move the pointer", "Move the pointer to bounded top-level viewport coordinates without clicking. Use this to inspect hover-driven UI before choosing a click point.", MoveRequestSchema, "move", (input) => ({ ...input, coordinateX: input.coordinateX ?? input.coordinate_x, coordinateY: input.coordinateY ?? input.coordinate_y }));
+  registerAction(server, runtime, "browser_press_and_hold", "Press and hold or drag", "Press a mouse button on an element for a bounded duration. Optional startCoordinateX/startCoordinateY and endCoordinateX/endCoordinateY drag with interpolated mouse events; path supplies a bounded explicit pointer path for drawing or selection gestures.", HoldRequestSchema, "press_and_hold");
   registerAction(server, runtime, "browser_challenge", "Detect a web challenge", "Detect common CAPTCHA and anti-bot challenge markers without attempting to bypass them.", EmptyInputSchema, "detect_challenge");
   registerAction(server, runtime, "browser_wait_for_human", "Wait for human takeover", "Wait for a user to complete a visible challenge or sign-in step in the browser. This tool never solves or bypasses challenges.", WaitForHumanRequestSchema, "wait_for_human");
 
@@ -551,8 +620,16 @@ function registerResources(server: McpServer, runtime: ServerRuntime): void {
     "browser-page",
     pageTemplate,
     { title: "Browser page snapshot", description: "A bounded snapshot for a specific connected tab.", mimeType: "application/json" },
-    async (uri, variables, ctx) => safeResourceRead(async () => jsonResource(uri.href, boundMcpOutput(await runtime.snapshot({ pageId: String(variables.pageId), maxChars: MCP_PAGE_TEXT_MAX_CHARS }, ctx.mcpReq.signal))), runtime),
+    async (uri, variables, ctx) => safeResourceRead(async () => jsonResource(uri.href, boundMcpOutput(await runtime.snapshot({ pageId: resourcePageId(variables), maxChars: MCP_PAGE_TEXT_MAX_CHARS }, ctx.mcpReq.signal))), runtime),
   );
+}
+
+function resourcePageId(variables: Record<string, string | string[]>): string {
+  const value = variables.pageId;
+  if (typeof value !== "string" || value.trim().length === 0 || value.trim().length > 200) {
+    throw new AppError("INVALID_ARGUMENT", "The page resource ID must be a non-empty string of at most 200 characters.");
+  }
+  return value.trim();
 }
 
 function registerPrompts(server: McpServer): void {

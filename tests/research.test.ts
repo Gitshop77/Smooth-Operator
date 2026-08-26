@@ -47,6 +47,23 @@ describe("research service", () => {
     vi.unstubAllGlobals();
   });
 
+  it("keeps snippets associated with their own result and tolerates HTML attribute spacing", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      [
+        '<a class="result__a" href="https://example.com/one">One</a>',
+        '<a href="https://example.com/two" class = "result__a">Two</a>',
+        '<div class = "result__snippet">Second result</div>',
+      ].join(""),
+      { status: 200 },
+    )));
+    const service = new ResearchService(researchPolicy(), new Logger("error", {}, () => undefined));
+    const result = await service.research("association", { maxResults: 2, maxChars: 500 });
+    expect(result.results).toHaveLength(2);
+    expect(result.results[0]?.snippet).not.toContain("Second result");
+    expect(result.results[1]?.snippet).toContain("Second result");
+    vi.unstubAllGlobals();
+  });
+
   it("fails closed on non-success responses", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response("no", { status: 503 })));
     const service = new ResearchService(researchPolicy(), new Logger("error", {}, () => undefined));
@@ -117,6 +134,27 @@ describe("research service", () => {
     vi.unstubAllGlobals();
   });
 
+  it("returns a stable error for non-string direct-service queries", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const service = new ResearchService(researchPolicy(), new Logger("error", {}, () => undefined));
+    await expect(service.research(undefined as unknown as string)).rejects.toMatchObject({ code: "RESEARCH_INVALID" });
+    expect(fetchMock).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it("rejects malformed Unicode queries before policy or fetch", async () => {
+    const policy = new SecurityPolicy(testConfig());
+    const policyCheck = vi.spyOn(policy, "assertNavigationAllowedAsync");
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const service = new ResearchService(policy, new Logger("error", {}, () => undefined));
+    await expect(service.research("\ud800")).rejects.toMatchObject({ code: "RESEARCH_INVALID" });
+    expect(policyCheck).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
   it("does not return credentials or raw secret query values from result links", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(
       '<a class="result__a" href="https://user:pass@example.com/a?token=secret">Example</a>',
@@ -170,6 +208,47 @@ describe("research service", () => {
     await expect(service.research("cancelled", {}, controller.signal)).rejects.toThrow(/cancelled/i);
     expect(fetchMock).not.toHaveBeenCalled();
     vi.unstubAllGlobals();
+  });
+
+  it("times out when policy admission never settles", async () => {
+    vi.useFakeTimers();
+    try {
+      const policy = new SecurityPolicy(testConfig());
+      vi.spyOn(policy, "assertNavigationAllowedAsync").mockImplementation(() => new Promise(() => undefined));
+      const fetchMock = vi.fn();
+      vi.stubGlobal("fetch", fetchMock);
+      const service = new ResearchService(policy, new Logger("error", {}, () => undefined));
+      const pending = service.research("hung-policy");
+      const expectedTimeout = expect(pending).rejects.toMatchObject({ code: "RESEARCH_TIMEOUT" });
+
+      await vi.advanceTimersByTimeAsync(30_000);
+      await expectedTimeout;
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+      vi.useRealTimers();
+    }
+  });
+
+  it("times out when a response body ignores abort", async () => {
+    vi.useFakeTimers();
+    try {
+      const body = new ReadableStream<Uint8Array>({
+        pull: () => new Promise(() => undefined),
+      });
+      const fetchMock = vi.fn(async () => new Response(body, { status: 200 }));
+      vi.stubGlobal("fetch", fetchMock);
+      const service = new ResearchService(researchPolicy(), new Logger("error", {}, () => undefined));
+      const pending = service.research("hung-body");
+      const expectedTimeout = expect(pending).rejects.toMatchObject({ code: "RESEARCH_TIMEOUT" });
+
+      await vi.advanceTimersByTimeAsync(30_000);
+      await expectedTimeout;
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.unstubAllGlobals();
+      vi.useRealTimers();
+    }
   });
 
   it("decodes entities exactly once (no double decoding)", async () => {

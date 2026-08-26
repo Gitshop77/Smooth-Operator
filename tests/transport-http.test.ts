@@ -92,6 +92,8 @@ describe("HTTP transport", () => {
     // waiting for a slow or stalled oversized sender.
     expect(slowOversized.elapsedMs).toBeLessThan(1_500);
     expect(await rawChunkedPost(port, { Authorization: `Bearer ${token}` }, ["x".repeat(700), "y".repeat(700)])).toBe(413);
+    expect(await rawChunkedRequest(port, "DELETE", { Authorization: `Bearer ${token}` }, ["x".repeat(700), "y".repeat(700)])).toBe(413);
+    await rawAbortedPost(port, { Authorization: `Bearer ${token}` });
     const valid = await request({ Authorization: `Bearer ${token}` });
     expect(valid.status).toBe(200);
     expect(valid.headers.get("content-type")).toContain("text/event-stream");
@@ -111,7 +113,7 @@ describe("HTTP transport", () => {
       expect(client.getProtocolEra()).toBe("modern");
       expect(client.getNegotiatedProtocolVersion()).toBe("2026-07-28");
       const tools = await client.listTools();
-      expect(tools.tools).toHaveLength(59);
+      expect(tools.tools).toHaveLength(60);
       const health = await client.callTool({ name: "server_health", arguments: {} });
       expect(health.isError).not.toBe(true);
       expect(JSON.stringify(health)).toContain('"status":"ok"');
@@ -171,15 +173,20 @@ async function rawPost(port: number, headers: Record<string, string>, body: stri
 }
 
 async function rawChunkedPost(port: number, headers: Record<string, string>, chunks: string[]): Promise<number> {
+  return rawChunkedRequest(port, "POST", headers, chunks);
+}
+
+async function rawChunkedRequest(port: number, method: string, headers: Record<string, string>, chunks: string[]): Promise<number> {
   return new Promise((resolve, reject) => {
     const request = httpRequest({
       hostname: "127.0.0.1",
       port,
       path: "/mcp",
-      method: "POST",
+      method,
       headers: {
         "content-type": "application/json",
         accept: "application/json, text/event-stream",
+        "transfer-encoding": "chunked",
         ...headers,
       },
     }, (response) => {
@@ -192,6 +199,27 @@ async function rawChunkedPost(port: number, headers: Record<string, string>, chu
       request.write(chunk);
     }
     request.end();
+  });
+}
+
+async function rawAbortedPost(port: number, headers: Record<string, string>): Promise<void> {
+  await new Promise<void>((resolve) => {
+    const request = httpRequest({
+      hostname: "127.0.0.1",
+      port,
+      path: "/mcp",
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        ...headers,
+      },
+    });
+    const finish = (): void => resolve();
+    request.once("close", finish);
+    request.once("error", finish);
+    request.write("x".repeat(64));
+    request.destroy();
   });
 }
 

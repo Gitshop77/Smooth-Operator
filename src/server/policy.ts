@@ -60,11 +60,25 @@ function isPrivateIpv6(host: string): boolean {
   // their low bits. Best-effort preflight hardening, not a firewall: route the
   // embedded host through the same private-IPv4 decision as mapped addresses.
   const nat64 = first === 0x0064 && parts[1] === 0xff9b && parts.slice(2, 6).every((part) => part === 0);
+  const sixToFour = first === 0x2002;
+  const sixToFourIpv4 = sixToFour
+    ? [parts[1] >> 8, parts[1] & 255, parts[2] >> 8, parts[2] & 255].join(".")
+    : undefined;
   const teredo = first === 0x2001 && parts[1] === 0x0000;
+  const teredoIpv4 = teredo
+    ? [
+      ((parts[6] >> 8) ^ 0xff),
+      ((parts[6] & 255) ^ 0xff),
+      ((parts[7] >> 8) ^ 0xff),
+      ((parts[7] & 255) ^ 0xff),
+    ].join(".")
+    : undefined;
   const mappedIpv4 = embeddedIpv4
-    ?? ((parts.slice(0, 5).every((part) => part === 0) && (parts[5] === 0 || parts[5] === 0xffff)) || nat64 || teredo
+    ?? (teredoIpv4
+      ?? (sixToFourIpv4
+        ?? (((parts.slice(0, 5).every((part) => part === 0) && (parts[5] === 0 || parts[5] === 0xffff)) || nat64)
       ? [parts[6] >> 8, parts[6] & 255, parts[7] >> 8, parts[7] & 255].join(".")
-      : undefined);
+          : undefined)));
   return (mappedIpv4 !== undefined && isPrivateIpv4(mappedIpv4))
     || parts.every((part) => part === 0)
     || (parts.slice(0, 7).every((part) => part === 0) && parts[7] === 1)
@@ -157,6 +171,28 @@ function matchesDomain(host: string, pattern: string): boolean {
   return normalized === normalizedPattern;
 }
 
+function isValidDomainPattern(pattern: string): boolean {
+  if (typeof pattern !== "string") {
+    return false;
+  }
+  try {
+    const rawPattern = pattern.trim().replace(/^\.+|\.+$/g, "");
+    const wildcard = rawPattern.startsWith("*.");
+    const base = wildcard ? rawPattern.slice(2) : rawPattern;
+    if (!base || (rawPattern.includes("*") && !wildcard) || base.includes("..")) {
+      return false;
+    }
+    const bracketless = base.replace(/^\[|\]$/g, "");
+    if (isIP(bracketless) !== 0) {
+      return true;
+    }
+    const ascii = domainToASCII(base);
+    return Boolean(ascii) && ascii.split(".").every((label) => label.length > 0 && label.length <= 63 && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i.test(label));
+  } catch {
+    return false;
+  }
+}
+
 function requireString(value: string | undefined, name: string): string {
   if (typeof value !== "string" || !value.trim()) {
     throw new AppError("INVALID_ARGUMENT", `The '${name}' field is required.`);
@@ -239,6 +275,7 @@ function hasNoSymlinkSegments(path: string): boolean {
 }
 
 export class SecurityPolicy {
+  private static readonly DNS_LOOKUP_TIMEOUT_MS = 10_000;
   private readonly dnsCache = new Map<string, { expiresAt: number; private: boolean }>();
   private readonly dnsInFlight = new Map<string, Promise<Array<{ address: string }>>>();
 
@@ -259,6 +296,12 @@ export class SecurityPolicy {
     }
 
     const host = normalizeHost(url.hostname);
+    if (!host) {
+      throw new AppError("URL_INVALID", "The URL host is invalid.");
+    }
+    if (this.config.security.blockedDomains.some((pattern) => !isValidDomainPattern(pattern))) {
+      throw new AppError("CONFIG_INVALID", "Configured blocked-domain patterns are invalid.");
+    }
     if (this.config.security.blockedDomains.some((pattern) => matchesDomain(host, pattern))) {
       throw new AppError("DOMAIN_BLOCKED", `Navigation to '${host}' is blocked by policy.`);
     }
@@ -288,14 +331,24 @@ export class SecurityPolicy {
     if (inFlight) {
       addresses = await inFlight;
     } else {
-      const resolution = lookup(host, { all: true, verbatim: true }).catch((error: unknown) => {
+      const resolution = Promise.resolve().then(() => lookup(host, { all: true, verbatim: true })).catch((error: unknown) => {
         throw new AppError("DNS_RESOLUTION_FAILED", `The target hostname '${host}' could not be resolved.`, { retryable: true, cause: error });
       });
-      this.dnsInFlight.set(host, resolution);
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      const boundedResolution = Promise.race([
+        resolution,
+        new Promise<Array<{ address: string }>>((_, reject) => {
+          timeout = setTimeout(() => reject(new AppError("DNS_RESOLUTION_FAILED", `The target hostname '${host}' did not resolve before the DNS deadline.`, { retryable: true })), SecurityPolicy.DNS_LOOKUP_TIMEOUT_MS);
+        }),
+      ]);
+      this.dnsInFlight.set(host, boundedResolution);
       try {
-        addresses = await resolution;
+        addresses = await boundedResolution;
       } finally {
-        if (this.dnsInFlight.get(host) === resolution) {
+        if (timeout) {
+          clearTimeout(timeout);
+        }
+        if (this.dnsInFlight.get(host) === boundedResolution) {
           this.dnsInFlight.delete(host);
         }
       }

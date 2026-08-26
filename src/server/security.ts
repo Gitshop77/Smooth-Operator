@@ -4,7 +4,7 @@ const DEFAULT_UNTRUSTED_LIMIT = 100_000;
 const MAX_UNTRUSTED_LIMIT = 500_000;
 
 export function normalizeUntrustedText(value: string): string {
-  return value.slice(0, MAX_UNTRUSTED_LIMIT).normalize("NFKC").replace(ZERO_WIDTH_PATTERN, "");
+  return value.slice(0, MAX_UNTRUSTED_LIMIT).normalize("NFKC").replace(ZERO_WIDTH_PATTERN, "").slice(0, MAX_UNTRUSTED_LIMIT);
 }
 
 export function containsPromptInjection(value: string): boolean {
@@ -14,7 +14,7 @@ export function containsPromptInjection(value: string): boolean {
 export function wrapUntrustedText(label: string, value: string, maxChars = DEFAULT_UNTRUSTED_LIMIT): string {
   const safeLabel = label.replace(/[^a-z0-9_]/gi, "_").slice(0, 64) || "data";
   const limit = boundedLimit(maxChars);
-  const untrustedTagPattern = /<\s*\/?\s*untrusted_[a-z0-9_]+\s*>/gi;
+  const untrustedTagPattern = /<\s*\/?\s*untrusted_[a-z0-9_]+(?:\s+[^>]{0,256}=[^>]{0,256})?\s*\/?\s*>/gi;
   // NFKC can expand characters (e.g. U+FB01 -> "fi"), so bound AFTER
   // normalization; slicing first would let wrappers exceed their budget.
   // The generic strip removes forged untrusted OPENING and CLOSING tags of
@@ -36,5 +36,5 @@ function boundedLimit(value: number): number {
 }
 
 export function redactSecretPlaceholders(value: string): string {
-  return value.slice(0, MAX_UNTRUSTED_LIMIT).replace(/%[A-Za-z_][A-Za-z0-9_]{0,127}%/g, "[SECRET_PLACEHOLDER]");
+  return value.slice(0, MAX_UNTRUSTED_LIMIT).replace(/%[A-Za-z_][A-Za-z0-9_]{0,127}%/g, "[SECRET_PLACEHOLDER]").slice(0, MAX_UNTRUSTED_LIMIT);
 }

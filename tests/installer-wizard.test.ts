@@ -135,6 +135,42 @@ describe("persistWizardConfig merges instead of replacing", () => {
       await rm(home, { recursive: true, force: true });
     }
   });
+
+  it("rejects an oversized existing config before merging or backing it up", async () => {
+    const home = await mkdtemp(join(tmpdir(), "smooth-operator-wizard-large-"));
+    try {
+      const configDir = join(home, ".smooth-operator");
+      await mkdir(configDir, { recursive: true });
+      const configPath = join(configDir, "config.json");
+      await writeFile(configPath, "x".repeat(2_000_001));
+      await chmod(configPath, 0o600);
+      await expect(persistWizardConfig(
+        { mode: "managed", headless: false, allowedDomains: [], blockedDomains: [], allowEval: false,
+          dataDir: join(home, ".smooth-operator") },
+        home,
+      )).rejects.toThrow(/2000000 bytes or smaller/);
+      await expect(readFile(`${configPath}.bak`, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a symlinked config directory before creating files through it", async () => {
+    const home = await mkdtemp(join(tmpdir(), "smooth-operator-wizard-directory-link-"));
+    const outside = join(home, "outside");
+    try {
+      await mkdir(outside, { recursive: true });
+      await symlink(outside, join(home, ".smooth-operator"));
+      await expect(persistWizardConfig(
+        { mode: "managed", headless: false, allowedDomains: [], blockedDomains: [], allowEval: false,
+          dataDir: join(home, ".smooth-operator") },
+        home,
+      )).rejects.toThrow(/symbolic link/i);
+      await expect(readFile(join(outside, "config.json"))).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("persistWizardConfig browser selection", () => {

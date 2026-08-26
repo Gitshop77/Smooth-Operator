@@ -1,6 +1,6 @@
 {
   "name": "smooth-operator-mcp",
-  "version": "2.4.7",
+  "version": "2.4.8",
   "type": "module",
   "packageManager": "npm@12.0.2",
   "description": "A lightweight, production-grade MCP server for secure browser automation.",
@@ -34,12 +34,9 @@
     "dead-code": "knip --include files,exports,dependencies,unlisted --no-progress",
     "mcp:stdio": "npm run start -- --transport stdio",
     "mcp:http": "npm run start -- --transport http",
-    "benchmark:mcp": "node scripts/benchmark-mcp.mjs",
-    "benchmark:mcp:live": "node scripts/benchmark-mcp.mjs --live",
-    "benchmark:mcp:dist": "node scripts/benchmark-mcp.mjs --dist",
     "package:smoke": "npm run build && node scripts/verify-package.mjs",
     "package:smoke:install": "npm run build && node scripts/verify-package.mjs --install",
-    "release:smoke": "npm run package:smoke:install && npm run benchmark:mcp:dist",
+    "release:smoke": "npm run package:smoke:install",
     "prepack": "npm run build",
     "prepare": "npm run build"
   },

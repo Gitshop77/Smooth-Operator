@@ -103,6 +103,7 @@ interface ClickDescriptor {
   type: string;
   role: string;
   label: string;
+  focusable?: boolean;
 }
 
 interface ClickMonitorResult {
@@ -165,6 +166,8 @@ interface PageState {
   dialogs: PendingDialog[];
   listenersInstalled: boolean;
   timeoutsConfigured: boolean;
+  viewportConfigured: boolean;
+  viewportSession?: CDPSession;
   downloadConfigured: boolean;
   navigationGuardInstalled: boolean;
   networkRequestListener?: (request: HTTPRequest) => void;
@@ -181,6 +184,7 @@ interface PageState {
   navigationGeneration: number;
   activeNavigationGeneration?: number;
   mainFrameStatus?: number;
+  policyVerifiedUrls: Set<string>;
   challengeActive: boolean;
   dialogResolutionPromise?: Promise<void>;
 }
@@ -259,9 +263,19 @@ export interface BrowserShutdownOutcome {
 
 const MAX_LOG_ENTRIES = 500;
 const MAX_ACTION_PLAN_STEPS = 100;
-const MAX_QUEUED_OPERATIONS = 64;
+// Keep a finite admission bound for hostile/unbounded clients, while leaving
+// enough headroom for legitimate concurrent read bursts. The read lane still
+// limits actual Chromium work separately.
+const MAX_QUEUED_OPERATIONS = 1_024;
+const MAX_PARALLEL_READ_OPERATIONS = 8;
 const NEW_TAB_DETECTION_TIMEOUT_MS = 1_000;
 const TARGET_GUARD_MAX_REQUEST_IDS = 128;
+const CLICK_SETTLE_TIMEOUT_MS = 10;
+const CLICK_RETRY_ATTEMPTS = 3;
+const CLICK_RETRY_DELAY_MS = 16;
+const NAVIGATION_CLICK_SETTLE_TIMEOUT_MS = 50;
+const NAVIGATION_CLICK_EVENT_TIMEOUT_MS = 250;
+const NAVIGATION_CLICK_READY_TIMEOUT_MS = 250;
 const SHUTDOWN_CONNECTION_SETTLE_TIMEOUT_MS = 1_000;
 const COMMON_KEY_ALIASES: Readonly<Record<string, KeyInput>> = {
   ALT: "Alt",
@@ -303,14 +317,18 @@ const COMMON_KEY_ALIASES: Readonly<Record<string, KeyInput>> = {
 const FRAME_IDS = new WeakMap<Frame, string>();
 const CHALLENGE_BLOCKED_ACTIONS = new Set<BrowserAction["action"]>([
   "click", "input", "select_dropdown", "scroll", "scroll_to_bottom", "send_keys",
-  "upload_file", "evaluate", "run_script", "hover", "press_and_hold",
+  "upload_file", "evaluate", "run_script", "hover", "move", "press_and_hold",
   "set_cookie", "delete_cookies", "set_storage", "clear_storage",
 ]);
 const SNAPSHOT_AFTER_ACTIONS = new Set<BrowserAction["action"]>([
   "navigate", "click", "input", "select_dropdown", "scroll", "send_keys", "go_back", "go_forward", "reload",
 ]);
 const DOM_MUTATING_ACTIONS = new Set<BrowserAction["action"]>([
-  "click", "input", "select_dropdown", "scroll", "scroll_to_bottom", "send_keys", "upload_file", "set_storage", "clear_storage",
+  "navigate", "click", "input", "select_dropdown", "scroll", "scroll_to_bottom", "send_keys", "go_back", "go_forward", "reload", "upload_file", "set_storage", "clear_storage", "find_text", "evaluate", "hover", "move", "press_and_hold", "alert_accept", "alert_dismiss", "alert_send_keys",
+]);
+const PARALLEL_READ_ACTIONS = new Set<BrowserAction["action"]>([
+  "wait", "wait_for_element", "wait_for_text", "wait_for_url", "wait_for_network_idle",
+  "get_network_log", "get_console_log", "extract", "get_html", "dropdown_options", "page_next", "search_page", "find_elements", "list_frames", "accessibility_snapshot", "get_computed_style", "get_page_info", "get_cookies", "get_storage", "list_downloads",
 ]);
 
 export class BrowserService {
@@ -331,13 +349,18 @@ export class BrowserService {
   private recoveryRequired = false;
   private recoveryPromise: Promise<void> | undefined;
   private readonly shutdownController = new AbortController();
-  private activeOperationController: AbortController | undefined;
+  private readonly activeOperationControllers = new Set<AbortController>();
+  private activeReadOperations = 0;
+  private readonly readPermitWaiters: Array<() => void> = [];
+  private readDrainPromise = Promise.resolve();
+  private readDrainRelease: (() => void) | undefined;
   private currentPageId: string | undefined;
   private sessionGeneration = 0;
   private readonly states = new Map<string, PageState>();
   private readonly configuredDownloadContexts = new WeakSet<object>();
   private readonly ids = new WeakMap<Page, string>();
   private readonly targetGuardSessions = new Map<string, TargetGuardSession>();
+  private readonly targetGuardNavigationErrors = new Map<string, AppError>();
   private readonly unguardedTargetSessions = new Set<string>();
   private readonly pendingTargetGuardSessions = new Map<string, CDPSession>();
   private readonly pendingTargetGuardInfos = new Map<string, { targetId: string; targetType: string }>();
@@ -385,7 +408,9 @@ export class BrowserService {
     this.shuttingDown = true;
     this.lifecycleGeneration += 1;
     this.shutdownController.abort();
-    this.activeOperationController?.abort();
+    for (const controller of this.activeOperationControllers) {
+      controller.abort();
+    }
     // Shutdown must be able to interrupt a long wait or dialog-blocked action;
     // waiting behind the operation queue could leave SIGTERM stuck for the
     // entire action timeout.
@@ -454,7 +479,9 @@ export class BrowserService {
     this.sessionGeneration += 1;
     // Session close is a control-plane operation. It must be able to cancel a
     // queued/long-running browser action instead of waiting behind it forever.
-    this.activeOperationController?.abort();
+    for (const controller of this.activeOperationControllers) {
+      controller.abort();
+    }
     let interruptedCleanupFailed = false;
     if (this.interruptedBrowserShutdown) {
       const cleanup = await settleWithTimeout(this.interruptedBrowserShutdown, SHUTDOWN_CONNECTION_SETTLE_TIMEOUT_MS);
@@ -597,7 +624,7 @@ export class BrowserService {
         title = "";
       }
       try {
-        await this.assertCurrentPageAllowed(page);
+        await this.assertCurrentPageAllowed(page, state);
         tabs.push({ index, id: state.id, tab_id: tabIdentifier(state.id, this.states), url: safeUrl(page.url()), title: wrapUntrustedText("tab_title", redactSecretPlaceholders(title.slice(0, 1_000)), 1_000), active: state.id === this.currentPageId || (!this.currentPageId && tabs.length === 0) });
       } catch (error) {
         this.logger.warn("Existing tab hidden by navigation policy", { pageId: state.id, code: error instanceof AppError ? error.code : "POLICY_ERROR" });
@@ -622,7 +649,7 @@ export class BrowserService {
     this.assertNoPendingDialog(options.pageId);
     const state = await this.pageState(options.pageId, options.signal);
     await this.configurePage(state, options.signal);
-    await this.assertCurrentPageAllowed(state.page);
+    await this.assertCurrentPageAllowed(state.page, state);
     const frame = await this.frameFor(state, options.frameId);
     const domRevisionAtStart = state.domRevision;
     const maxChars = Math.min(options.maxChars ?? 40_000, this.config.browser.maxHtmlChars);
@@ -649,7 +676,7 @@ export class BrowserService {
         const htmlElement = element as HTMLElement;
         const rect = htmlElement.getBoundingClientRect();
         const style = window.getComputedStyle(htmlElement);
-        if (rect.width <= 0 || rect.height <= 0 || style.visibility === "hidden" || style.display === "none") {
+        if (rect.width <= 0 || rect.height <= 0 || style.visibility === "hidden" || style.display === "none" || Number.parseFloat(style.opacity || "1") <= 0 || style.pointerEvents === "none") {
           continue;
         }
         visibleInteractiveCount += 1;
@@ -683,17 +710,20 @@ export class BrowserService {
             selector = parts.join(" > ") || "body";
           }
           const anchor = element.closest("a") as HTMLAnchorElement | null;
+          // Geometry is deliberately excluded: sticky headers, lazy ads, and
+          // scrolling can move the same DOM node between snapshot and action.
           const signature = [
             element.tagName.toLowerCase(),
+            element.getAttribute("id") ?? "",
+            element.getAttribute("name") ?? "",
             element.getAttribute("role") ?? "",
             element.getAttribute("aria-label") ?? "",
+            element.getAttribute("placeholder") ?? "",
+            element.getAttribute("disabled") ?? "",
+            element.getAttribute("aria-disabled") ?? "",
             htmlElement.type ?? "",
             (htmlElement.innerText || element.getAttribute("value") || element.textContent || "").replace(/\s+/g, " ").trim().slice(0, 500),
             anchor?.href ?? "",
-            Math.round(rect.x),
-            Math.round(rect.y),
-            Math.round(rect.width),
-            Math.round(rect.height),
           ].join("\u001f");
           return {
             ref: `e${index + 1}`,
@@ -804,7 +834,25 @@ export class BrowserService {
     if (isDialogAction(action)) {
       const pendingState = this.dialogState(action.pageId);
       if (pendingState?.dialogs.length) {
-        return this.executeDialogAction(pendingState, action, combineSignals(signal, this.shutdownController.signal));
+        const timeoutMs = action.timeoutMs ?? this.config.browser.actionTimeoutMs;
+        const timeoutController = new AbortController();
+        const timeout = setTimeout(() => timeoutController.abort(), Math.max(1, Math.floor(timeoutMs)));
+        try {
+          return await this.executeDialogAction(pendingState, action, combineSignals(signal, this.shutdownController.signal, timeoutController.signal));
+        } catch (error) {
+          if (timeoutController.signal.aborted && !signal?.aborted && !this.shutdownController.signal.aborted) {
+            throw new AppError("BROWSER_TIMEOUT", `The browser operation exceeded its ${Math.max(1, Math.floor(timeoutMs))}ms action deadline.`, { retryable: true, details: { timeoutMs: Math.max(1, Math.floor(timeoutMs)) }, cause: error });
+          }
+          throw error;
+        } finally {
+          clearTimeout(timeout);
+          // Resolving a dialog can run page JavaScript (for example a confirm
+          // handler can replace the form). Invalidate refs even when the
+          // caller cancels while Chromium is settling the dialog command.
+          if (action.action !== "alert_get_text") {
+            this.invalidateActionSnapshot(action, { pageId: pendingState.id });
+          }
+        }
       }
     }
     if (!isDialogAction(action) && action.action !== "list_tabs" && action.action !== "close_browser") {
@@ -817,15 +865,28 @@ export class BrowserService {
     // before the internal deadline elapses and returns a status object.
     const budgetMs = action.action === "wait_for_human" ? timeoutMs + 5_000 : timeoutMs;
     return this.withOperationLock(signal, async (operationSignal) => {
-      const result = await this.executeUnlocked(action, operationSignal);
-      if (DOM_MUTATING_ACTIONS.has(action.action)) {
-        this.invalidateActionSnapshot(action, result);
+      let result: unknown;
+      let snapshotInvalidated = false;
+      try {
+        result = await this.executeUnlocked(action, operationSignal);
+        if (DOM_MUTATING_ACTIONS.has(action.action)) {
+          this.invalidateActionSnapshot(action, result);
+          snapshotInvalidated = true;
+        }
+        if (!action.includeSnapshot || !SNAPSHOT_AFTER_ACTIONS.has(action.action)) {
+          return result;
+        }
+        return this.attachOptionalSnapshot(action, result, operationSignal);
+      } finally {
+        // A browser action can mutate the document and then be cancelled while
+        // Puppeteer is still settling. Do not leave refs from the pre-action
+        // document usable in that window. A successful action has already
+        // invalidated before its optional trailing snapshot is collected.
+        if (DOM_MUTATING_ACTIONS.has(action.action) && !snapshotInvalidated) {
+          this.invalidateActionSnapshot(action, result);
+        }
       }
-      if (!action.includeSnapshot || !SNAPSHOT_AFTER_ACTIONS.has(action.action)) {
-        return result;
-      }
-      return this.attachOptionalSnapshot(action, result, operationSignal);
-    }, budgetMs, budgetMs);
+    }, budgetMs, budgetMs, PARALLEL_READ_ACTIONS.has(action.action) && action.includeSnapshot !== true ? "read" : "exclusive");
   }
 
   private invalidateActionSnapshot(action: BrowserAction, result: unknown): void {
@@ -835,7 +896,16 @@ export class BrowserService {
       : typeof record?.openedPageId === "string"
         ? record.openedPageId
         : action.pageId ?? this.currentPageId;
-    const state = resultPageId ? this.states.get(resultPageId) : undefined;
+    let state = resultPageId ? this.states.get(resultPageId) : undefined;
+    if (!state && action.pageId) {
+      try {
+        const resolvedPageId = this.resolvePageId(action.pageId);
+        state = resolvedPageId ? this.states.get(resolvedPageId) : undefined;
+      } catch {
+        // Invalidation is best-effort cleanup. An ambiguous alias must not
+        // turn the original browser error into a different failure.
+      }
+    }
     if (!state || state.disposed) {
       return;
     }
@@ -881,6 +951,12 @@ export class BrowserService {
       throw new AppError("EVALUATE_DISABLED", "Page JavaScript execution is disabled by server configuration.");
     }
     throwIfAborted(signal);
+    if (isDialogAction(action)) {
+      const pendingState = this.dialogState(action.pageId);
+      if (pendingState?.dialogs.length) {
+        return this.executeDialogAction(pendingState, action, signal);
+      }
+    }
 
     switch (action.action) {
       case "list_tabs":
@@ -904,17 +980,29 @@ export class BrowserService {
       const url = await this.policy.assertNavigationAllowedAsync(targetUrl);
       const state = newTab ? await this.newPageState(signal) : await this.pageState(action.pageId, signal);
       await this.configurePage(state, signal);
+      this.clearTargetGuardNavigationError(state.page);
       const navigationGeneration = this.beginNavigation(state);
       try {
         await state.page.goto(url.toString(), { waitUntil: action.waitUntil ?? "domcontentloaded", timeout: action.timeoutMs ?? this.config.browser.actionTimeoutMs, signal });
         this.throwNavigationError(state, navigationGeneration);
-        await this.policy.assertNavigationAllowedAsync(state.page.url());
+        await this.assertCurrentPageAllowed(state.page, state);
       } catch (error) {
-        const navigationError = this.takeNavigationError(state, navigationGeneration);
+        const navigationError = this.takeNavigationError(state, navigationGeneration) ?? this.takeTargetGuardNavigationError(state.page);
         if (newTab) {
           await this.disposePageState(state);
         }
-        throw navigationError ?? error;
+        if (navigationError) {
+          if (!newTab) {
+            await this.recoverBlockedNavigation(state);
+          }
+          throw navigationError;
+        }
+        const currentUrl = state.page.url();
+        if (!newTab && !/^https?:\/\//i.test(currentUrl)) {
+          await this.recoverBlockedNavigation(state);
+          throw new AppError("NAVIGATION_BLOCKED", "The browser navigation was blocked by policy.", { retryable: true, cause: error });
+        }
+        throw error;
       } finally {
         if (state.activeNavigationGeneration === navigationGeneration) {
           state.activeNavigationGeneration = undefined;
@@ -931,7 +1019,7 @@ export class BrowserService {
 
     const state = await this.pageState(action.pageId, signal);
     const page = state.page;
-    await this.assertCurrentPageAllowed(page);
+    await this.assertCurrentPageAllowed(page, state);
     if (state.challengeActive && isChallengeBlockedAction(action.action)) {
       throw new AppError("CHALLENGE_REQUIRES_HUMAN", "A verified browser challenge is active. Complete it in the browser, then call browser_wait_for_human before continuing.", {
         retryable: true,
@@ -950,9 +1038,19 @@ export class BrowserService {
         const coordinateX = action.coordinateX ?? action.coordinate_x;
         const coordinateY = action.coordinateY ?? action.coordinate_y;
         const clickInNewTab = action.newTab ?? action.new_tab;
+        const pointerType = action.pointerType ?? "mouse";
+        if (pointerType === "touch" && (action.button ?? "left") !== "left") {
+          throw new AppError("INVALID_ACTION", "Touch clicks support only the left button.");
+        }
+        if (pointerType === "touch" && (action.clickCount ?? 1) !== 1) {
+          throw new AppError("INVALID_ACTION", "Touch clicks support one tap at a time.");
+        }
         if (coordinateX !== undefined || coordinateY !== undefined) {
           if (coordinateX === undefined || coordinateY === undefined) {
             throw new AppError("INVALID_ACTION", "coordinateX and coordinateY must be provided together.");
+          }
+          if (action.frameId && action.frameId !== "main") {
+            throw new AppError("FRAME_ACTION_UNSUPPORTED", "Coordinate clicks target the top-level viewport; use a selector or ref for a child frame.");
           }
           if (clickInNewTab) {
             throw new AppError("INVALID_ACTION", "newTab is supported for link targets, not coordinate clicks.");
@@ -968,17 +1066,24 @@ export class BrowserService {
             }
             const clickable = element.closest("a,button,input,select,textarea,[role=button]") ?? element;
             const htmlElement = clickable as HTMLElement & { type?: string; value?: string };
+            const anchor = clickable.closest("a") as HTMLAnchorElement | null;
             return {
               tag: clickable.tagName.toLowerCase(),
               type: htmlElement.type?.toLowerCase() ?? "",
               role: clickable.getAttribute("role") ?? "",
               label: [clickable.textContent, clickable.getAttribute("aria-label"), clickable.getAttribute("title"), htmlElement.value].filter(Boolean).join(" ").replace(/\s+/g, " ").trim().slice(0, 200),
+              href: anchor?.href ?? clickable.getAttribute("href") ?? undefined,
             };
           }, { x: coordinateX, y: coordinateY });
           if (coordinateTarget) {
             this.assertClickTargetSafe(coordinateTarget);
+            if (coordinateTarget.href) {
+              await this.assertNavigationUrl(page.url(), coordinateTarget.href);
+            }
           }
-          monitor = await this.runClickAndMonitor(page, () => page.mouse.click(coordinateX, coordinateY, { button: action.button ?? "left", count: action.clickCount ?? 1 }), signal);
+          monitor = await this.runClickAndMonitor(page, () => pointerType === "touch"
+            ? this.touchTap(page, coordinateX, coordinateY, signal)
+            : this.mouseClick(page, coordinateX, coordinateY, action.button ?? "left", action.clickCount ?? 1, signal), signal, Boolean(coordinateTarget?.href));
         } else {
           const target = targetForAction(action, "target");
           if (clickInNewTab) {
@@ -990,7 +1095,7 @@ export class BrowserService {
               return opened;
             }
           }
-          monitor = await this.clickTarget(state, target, action.button ?? "left", action.clickCount ?? 1, signal, frame);
+          monitor = await this.clickTarget(state, target, action.button ?? "left", action.clickCount ?? 1, signal, frame, pointerType);
         }
         await this.throwPendingNavigationError(state, signal, navigationGeneration);
         return { clicked: true, pageId: state.id, navigated: monitor.navigated, urlChanged: monitor.urlChanged, ...(monitor.url ? { url: safeUrl(monitor.url) } : {}) };
@@ -1015,16 +1120,81 @@ export class BrowserService {
           )),
         };
       case "select_dropdown": {
-        const selector = await this.selectorFor(state, targetForAction(action, "target"), action.frameId);
-        const value = requireField(action.optionValue ?? action.value, "optionValue");
-        const selected = await frame.select(selector, value);
+        const selector = await this.selectorFor(state, targetForAction(action, "target"), action.frameId, frame);
+        const values = action.optionValues ?? (action.optionValue !== undefined || action.value !== undefined
+          ? [requireField(action.optionValue ?? action.value, "optionValue")]
+          : []);
+        if (values.length === 0) {
+          throw new AppError("INVALID_ACTION", "Select requires optionValue or optionValues.");
+        }
+        let selected: string[];
+        try {
+          selected = await frame.select(selector, ...values);
+        } catch (error) {
+          if (isMissingElementError(error)) {
+            throw new AppError("ELEMENT_NOT_FOUND", `No select element matched '${selector.slice(0, 200)}'.`, { cause: error });
+          }
+          if (isInvalidSelectorError(error)) {
+            throw new AppError("INVALID_SELECTOR", `The selector '${selector.slice(0, 200)}' is invalid.`, { cause: error });
+          }
+          throw normalizeBrowserOperationError(error, signal);
+        }
         return { selected, pageId: state.id };
       }
       case "scroll": {
         const amount = action.amount ?? 600;
-        const direction = action.direction === "up" || action.direction === "left" ? -1 : 1;
-        await frame.evaluate((delta) => window.scrollBy(delta.x, delta.y), { x: action.direction === "left" || action.direction === "right" ? amount * direction : 0, y: action.direction === "up" || action.direction === "down" ? amount * direction : 0 });
-        return { scrolled: true, y: await frame.evaluate(() => window.scrollY), frameId: framePath(frame) };
+        const directionName = action.direction ?? "down";
+        const direction = directionName === "up" || directionName === "left" ? -1 : 1;
+        const delta = { x: directionName === "left" || directionName === "right" ? amount * direction : 0, y: directionName === "up" || directionName === "down" ? amount * direction : 0 };
+        if (action.selector) {
+          const selector = await this.selectorFor(state, action.selector, action.frameId, frame);
+          const scrollResult = await frame.$eval(selector, (element, { x, y: deltaY }) => {
+            let container: HTMLElement | null = element instanceof HTMLElement ? element : element.parentElement;
+            while (container && container !== document.body) {
+              const style = window.getComputedStyle(container);
+              const scrollable = (container.scrollHeight > container.clientHeight + 1 && /auto|scroll|overlay/.test(style.overflowY))
+                || (container.scrollWidth > container.clientWidth + 1 && /auto|scroll|overlay/.test(style.overflowX));
+              if (scrollable) break;
+              container = container.parentElement;
+            }
+            if (!container || container === document.body) {
+              window.scrollBy({ left: x, top: deltaY, behavior: "instant" as ScrollBehavior });
+              return { x: window.scrollX, y: window.scrollY, container: "document" as const };
+            }
+            const maxX = Math.max(0, container.scrollWidth - container.clientWidth);
+            const maxY = Math.max(0, container.scrollHeight - container.clientHeight);
+            container.scrollLeft = Math.max(0, Math.min(maxX, container.scrollLeft + x));
+            container.scrollTop = Math.max(0, Math.min(maxY, container.scrollTop + deltaY));
+            container.dispatchEvent(new Event("scroll", { bubbles: true }));
+            return { x: container.scrollLeft, y: container.scrollTop, container: "element" as const };
+          }, delta);
+          return { scrolled: true, ...scrollResult, frameId: framePath(frame), selector };
+        }
+        const scrollResult = await frame.evaluate(({ x, y: deltaY }) => {
+          // MiniWoB++ uses focused textareas and nested overflow containers
+          // whose scroll position is independent of the document. Prefer the
+          // nearest scrollable ancestor of the focused control, while keeping
+          // ordinary page scrolling on window for all other pages.
+          let container: HTMLElement | null = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+          while (container && container !== document.body) {
+            const style = window.getComputedStyle(container);
+            const scrollable = (container.scrollHeight > container.clientHeight + 1 && /auto|scroll|overlay/.test(style.overflowY))
+              || (container.scrollWidth > container.clientWidth + 1 && /auto|scroll|overlay/.test(style.overflowX));
+            if (scrollable) break;
+            container = container.parentElement;
+          }
+          if (container && container !== document.body) {
+            const maxX = Math.max(0, container.scrollWidth - container.clientWidth);
+            const maxY = Math.max(0, container.scrollHeight - container.clientHeight);
+            container.scrollLeft = Math.max(0, Math.min(maxX, container.scrollLeft + x));
+            container.scrollTop = Math.max(0, Math.min(maxY, container.scrollTop + deltaY));
+            container.dispatchEvent(new Event("scroll", { bubbles: true }));
+            return { x: container.scrollLeft, y: container.scrollTop, container: "element" as const };
+          }
+          window.scrollBy({ left: x, top: deltaY, behavior: "instant" as ScrollBehavior });
+          return { x: window.scrollX, y: window.scrollY, container: "document" as const };
+        }, delta);
+        return { scrolled: true, ...scrollResult, frameId: framePath(frame) };
       }
       case "scroll_to_bottom": {
         if (action.frameId && action.frameId !== "main") {
@@ -1035,35 +1205,51 @@ export class BrowserService {
         const initialPosition = await page.evaluate(() => ({ x: window.scrollX, y: window.scrollY }));
         let iterations = 0;
         let previousHeight = -1;
-        for (; iterations < maxScrolls; iterations += 1) {
-          throwIfAborted(signal);
-          if (scrollDeadline - Date.now() <= 0) {
-            throw new AppError("WAIT_TIMEOUT", "Scroll-to-bottom exceeded its action timeout.", { retryable: true });
-          }
-          const before = await page.evaluate(() => ({ height: document.documentElement.scrollHeight, y: window.scrollY, viewport: window.innerHeight }));
-          await page.evaluate(() => window.scrollTo({ top: document.documentElement.scrollHeight, behavior: "instant" as ScrollBehavior }));
-          const remaining = scrollDeadline - Date.now();
-          if (remaining <= 0) {
-            throw new AppError("WAIT_TIMEOUT", "Scroll-to-bottom exceeded its action timeout.", { retryable: true });
-          }
-          await page.waitForNetworkIdle({ idleTime: 500, timeout: Math.min(remaining, 5_000), signal }).catch(() => {
+        try {
+          for (; iterations < maxScrolls; iterations += 1) {
             throwIfAborted(signal);
-            return undefined;
-          });
-          const after = await page.evaluate(() => ({ height: document.documentElement.scrollHeight, y: window.scrollY, viewport: window.innerHeight }));
-          if (after.y + after.viewport >= after.height - 2 && after.height === before.height && after.height === previousHeight) {
-            if (action.restoreTop) {
-              await page.evaluate(({ x, y }) => window.scrollTo({ left: x, top: y, behavior: "instant" as ScrollBehavior }), initialPosition);
+            if (scrollDeadline - Date.now() <= 0) {
+              throw new AppError("WAIT_TIMEOUT", "Scroll-to-bottom exceeded its action timeout.", { retryable: true });
             }
-            return { scrolled: true, atBottom: true, iterations: iterations + 1, height: after.height, scrollY: after.y, restored: action.restoreTop === true };
+            const before = await page.evaluate(() => {
+              const height = Math.max(document.documentElement.scrollHeight, document.body?.scrollHeight ?? 0);
+              return { height, y: window.scrollY, viewport: window.innerHeight };
+            });
+            const targetY = Math.max(0, before.height - before.viewport);
+            await page.evaluate((top) => window.scrollTo({ top, behavior: "instant" as ScrollBehavior }), targetY);
+            const remaining = scrollDeadline - Date.now();
+            if (remaining <= 0) {
+              throw new AppError("WAIT_TIMEOUT", "Scroll-to-bottom exceeded its action timeout.", { retryable: true });
+            }
+            // Lazy content only needs a short quiet window here. A 500ms
+            // fixed settle cost per iteration dominates small MiniWoB++
+            // pages, while the bounded loop still observes height changes.
+            await page.waitForNetworkIdle({ idleTime: 100, timeout: Math.min(remaining, 5_000), signal }).catch((error: unknown) => {
+              throwIfAborted(signal);
+              if (!isPuppeteerTimeoutError(error)) {
+                throw normalizeBrowserOperationError(error, signal);
+              }
+              return undefined;
+            });
+            const after = await page.evaluate(() => {
+              const height = Math.max(document.documentElement.scrollHeight, document.body?.scrollHeight ?? 0);
+              return { height, y: window.scrollY, viewport: window.innerHeight };
+            });
+            if (after.y + after.viewport >= after.height - 2 && after.height === before.height && after.height === previousHeight) {
+              return { scrolled: true, atBottom: true, iterations: iterations + 1, height: after.height, scrollY: after.y, restored: action.restoreTop === true };
+            }
+            previousHeight = after.height;
           }
-          previousHeight = after.height;
+          const final = await page.evaluate(() => {
+            const height = Math.max(document.documentElement.scrollHeight, document.body?.scrollHeight ?? 0);
+            return { height, y: window.scrollY, viewport: window.innerHeight };
+          });
+          return { scrolled: true, atBottom: final.y + final.viewport >= final.height - 2, iterations, height: final.height, scrollY: final.y, restored: action.restoreTop === true };
+        } finally {
+          if (action.restoreTop) {
+            await page.evaluate(({ x, y }) => window.scrollTo({ left: x, top: y, behavior: "instant" as ScrollBehavior }), initialPosition).catch(() => undefined);
+          }
         }
-        const final = await page.evaluate(() => ({ height: document.documentElement.scrollHeight, y: window.scrollY, viewport: window.innerHeight }));
-        if (action.restoreTop) {
-          await page.evaluate(({ x, y }) => window.scrollTo({ left: x, top: y, behavior: "instant" as ScrollBehavior }), initialPosition);
-        }
-        return { scrolled: true, atBottom: final.y + final.viewport >= final.height - 2, iterations, height: final.height, scrollY: final.y, restored: action.restoreTop === true };
       }
       case "send_keys":
         await this.sendKeys(page, action.keys ?? [requireField(action.key, "key")], signal);
@@ -1073,8 +1259,8 @@ export class BrowserService {
         const targetState = await this.pageState(targetId, signal);
         await targetState.page.bringToFront();
         this.assertStateLive(targetState);
-        this.currentPageId = targetId;
-        return { pageId: targetId };
+        this.currentPageId = targetState.id;
+        return { pageId: targetState.id };
       }
       case "go_back":
         {
@@ -1085,7 +1271,7 @@ export class BrowserService {
             try {
               response = await page.goBack({ waitUntil: action.waitUntil ?? "domcontentloaded", timeout: action.timeoutMs ?? this.config.browser.actionTimeoutMs, signal });
             } catch (error) {
-              const navigationError = this.takeNavigationError(state, navigationGeneration);
+              const navigationError = this.takeNavigationError(state, navigationGeneration) ?? this.takeTargetGuardNavigationError(page);
               if (navigationError) {
                 throw navigationError;
               }
@@ -1107,7 +1293,7 @@ export class BrowserService {
               state.activeNavigationGeneration = undefined;
             }
           }
-          await this.assertCurrentPageAllowed(page);
+          await this.assertCurrentPageAllowed(page, state);
           return { url: safeUrl(page.url()), ...(changed ? {} : { changed: false }) };
         }
       case "go_forward":
@@ -1119,7 +1305,7 @@ export class BrowserService {
             try {
               response = await page.goForward({ waitUntil: action.waitUntil ?? "domcontentloaded", timeout: action.timeoutMs ?? this.config.browser.actionTimeoutMs, signal });
             } catch (error) {
-              const navigationError = this.takeNavigationError(state, navigationGeneration);
+              const navigationError = this.takeNavigationError(state, navigationGeneration) ?? this.takeTargetGuardNavigationError(page);
               if (navigationError) {
                 throw navigationError;
               }
@@ -1141,7 +1327,7 @@ export class BrowserService {
               state.activeNavigationGeneration = undefined;
             }
           }
-          await this.assertCurrentPageAllowed(page);
+          await this.assertCurrentPageAllowed(page, state);
           return { url: safeUrl(page.url()), ...(changed ? {} : { changed: false }) };
         }
       case "reload":
@@ -1154,13 +1340,13 @@ export class BrowserService {
             return { url: safeUrl(page.url()), reloaded: false, title: wrapUntrustedText("page_title", redactSecretPlaceholders((await page.title().catch(() => "")).slice(0, 1_000)), 1_000) };
           }
         } catch (error) {
-          throw this.takeNavigationError(state, navigationGeneration) ?? error;
+          throw this.takeNavigationError(state, navigationGeneration) ?? this.takeTargetGuardNavigationError(page) ?? error;
         } finally {
           if (state.activeNavigationGeneration === navigationGeneration) {
             state.activeNavigationGeneration = undefined;
           }
         }
-        await this.assertCurrentPageAllowed(page);
+        await this.assertCurrentPageAllowed(page, state);
         return { url: safeUrl(page.url()), title: wrapUntrustedText("page_title", redactSecretPlaceholders((await page.title().catch(() => "")).slice(0, 1_000)), 1_000) };
         }
       case "wait":
@@ -1168,7 +1354,7 @@ export class BrowserService {
         return { waitedMs: action.milliseconds ?? 500 };
       case "wait_for_element": {
         const selector = targetForAction(action, "selector");
-        const resolvedSelector = await this.selectorFor(state, selector, action.frameId);
+        const resolvedSelector = await this.selectorFor(state, selector, action.frameId, frame);
         const waitState = action.state ?? "visible";
         await waitForElementState(frame, resolvedSelector, waitState, action.timeoutMs ?? this.config.browser.actionTimeoutMs, signal);
         return { found: true, selector, state: waitState };
@@ -1263,12 +1449,18 @@ export class BrowserService {
           }
         }
         const maxChars = Math.min(action.maxChars ?? 40_000, this.config.browser.maxHtmlChars);
-        const resolvedSelector = selector ? await this.selectorFor(state, selector, action.frameId) : undefined;
+        const resolvedSelector = selector ? await this.selectorFor(state, selector, action.frameId, frame) : undefined;
         const includeLinks = action.includeLinks === true;
-        const extracted = resolvedSelector
+        const extracted = (resolvedSelector
           ? await frame.$eval(resolvedSelector, (element, options: { start: number; limit: number; includeLinks: boolean }) => {
             const fullText = element.textContent ?? "";
             const value = fullText.slice(options.start, options.start + options.limit);
+            const tagName = element.tagName.toLowerCase();
+            const inputType = tagName === "input" ? String((element as HTMLInputElement).type ?? "text").toLowerCase() : "";
+            const formValue = tagName === "textarea" || tagName === "select"
+              || (tagName === "input" && !["password", "hidden", "file"].includes(inputType))
+              ? String((element as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement).value ?? "").slice(0, options.limit)
+              : undefined;
             const links = options.includeLinks
               ? [element, ...Array.from(element.querySelectorAll("a"))].slice(0, 100).map((candidate) => {
                 const rawHref = (candidate as HTMLAnchorElement).href;
@@ -1285,7 +1477,7 @@ export class BrowserService {
                 }
               }).filter((link): link is { text: string; href: string } => Boolean(link))
               : undefined;
-            return { value, totalLength: fullText.length, truncated: options.start + value.length < fullText.length, links };
+            return { value, formValue, totalLength: fullText.length, truncated: options.start + value.length < fullText.length, links };
           }, { start: offset, limit: maxChars, includeLinks }).catch((error: unknown) => {
             if (isMissingElementError(error)) {
               throw new AppError("ELEMENT_NOT_FOUND", `No element matched '${resolvedSelector}'.`, { cause: error });
@@ -1312,7 +1504,13 @@ export class BrowserService {
               }).filter((link): link is { text: string; href: string } => Boolean(link))
               : undefined;
             return { value, totalLength: fullText.length, truncated: start + value.length < fullText.length, links };
-          }, { start: offset, limit: maxChars, includeLinks });
+          }, { start: offset, limit: maxChars, includeLinks })) as {
+            value: string;
+            formValue?: string;
+            totalLength: number;
+            truncated: boolean;
+            links?: Array<{ text: string; href: string }>;
+          };
         if (state.domRevision !== revision) {
           throw new AppError("STALE_PAGE_SLICE", "The page changed while its text slice was being collected. Retry with a fresh revision.", { retryable: true, details: { hint: "Capture browser_extract again and use its new revision." } });
         }
@@ -1323,6 +1521,7 @@ export class BrowserService {
           hasMore: extracted.truncated,
           revision,
           text: wrapUntrustedText("extracted_text", redactSecretPlaceholders(extracted.value), maxChars),
+          ...(extracted.formValue !== undefined ? { formValue: wrapUntrustedText("extracted_form_value", redactSecretPlaceholders(extracted.formValue), maxChars) } : {}),
           truncated: extracted.truncated,
           textTruncated: extracted.truncated,
           ...(extracted.links ? {
@@ -1338,7 +1537,7 @@ export class BrowserService {
         const selector = action.selector ?? action.target ?? (action.index !== undefined ? `e${action.index + 1}` : undefined);
         const maxChars = Math.min(action.maxChars ?? this.config.browser.maxHtmlChars, this.config.browser.maxHtmlChars);
         const result = selector
-          ? await frame.$eval(await this.selectorFor(state, selector, action.frameId), (element, limit) => {
+          ? await frame.$eval(await this.selectorFor(state, selector, action.frameId, frame), (element, limit) => {
             const clone = element.cloneNode(true) as Element;
             if (clone.tagName.toLowerCase() === "script") {
               clone.textContent = "";
@@ -1434,6 +1633,10 @@ export class BrowserService {
         throwIfAborted(signal);
         await rejectSymlink(outputPath);
         const temporaryPath = join(dirname(outputPath), `.${basename(outputPath)}.tmp-${randomUUID()}`);
+        // Validate the actual staging pathname too. This rejects an output
+        // path that is itself an allowed directory before Chromium can write a
+        // sibling temporary file outside the configured root.
+        this.policy.assertFilePath(temporaryPath);
         try {
           throwIfAborted(signal);
           await page.pdf({ path: temporaryPath, printBackground: true, format: "A4" });
@@ -1450,7 +1653,7 @@ export class BrowserService {
       case "list_downloads":
         return this.listDownloads();
       case "dropdown_options": {
-        const selector = await this.selectorFor(state, targetForAction(action, "selector"), action.frameId);
+        const selector = await this.selectorFor(state, targetForAction(action, "selector"), action.frameId, frame);
         const options = await frame.$$eval(selector, (elements) => elements.flatMap((element) => Array.from((element as HTMLSelectElement).options ?? []).slice(0, 200).map((option) => ({ value: option.value, label: option.textContent?.trim() ?? "", selected: option.selected }))).slice(0, 200));
         return options.map((option) => ({
           value: wrapUntrustedText("option_value", redactSecretPlaceholders(option.value), 500),
@@ -1506,21 +1709,79 @@ export class BrowserService {
       }
       case "find_elements": {
         const selector = targetForAction(action, "selector");
-        const safeSelector = await this.selectorFor(state, selector, action.frameId);
-        const elements = await frame.$$eval(safeSelector, (matches) => matches.slice(0, 50).map((element) => {
+        const safeSelector = await this.selectorFor(state, selector, action.frameId, frame);
+        function collectFindElements(matches: Element[], fallbackSelector: string): Array<{ tag: string; selector: string; rect: { x: number; y: number; width: number; height: number }; text: string; attributes: Record<string, string>; omittedAttributes: number }> {
+          return matches.slice(0, 50).map((element) => {
+          let elementSelector = fallbackSelector;
+          let usedUniqueId = false;
+          const root = element.getRootNode();
+          if (root === document) {
+            const id = element.getAttribute("id");
+            if (id) {
+              try {
+                if (document.querySelectorAll(`#${CSS.escape(id)}`).length === 1) {
+                  elementSelector = `#${CSS.escape(id)}`;
+                  usedUniqueId = true;
+                }
+              } catch {
+                // Fall through to the bounded structural selector.
+              }
+            }
+            if (!usedUniqueId) {
+              const parts: string[] = [];
+              let current: Element | null = element;
+              while (current && current !== document.body && parts.length < 8) {
+                const parent: HTMLElement | null = current.parentElement;
+                const tag = current.tagName.toLowerCase();
+                if (!parent) {
+                  parts.unshift(tag);
+                  break;
+                }
+                const currentTagName = current.tagName;
+                const siblings = Array.from(parent.children as HTMLCollectionOf<Element>).filter((child: Element) => child.tagName === currentTagName);
+                const index = siblings.indexOf(current) + 1;
+                parts.unshift(`${tag}:nth-of-type(${index})`);
+                current = parent;
+              }
+              elementSelector = parts.join(" > ").slice(0, 500) || fallbackSelector;
+            }
+          }
+          const rect = element.getBoundingClientRect();
+          const boundedX = Number.isFinite(rect.x) ? Math.max(-10_000_000, Math.min(10_000_000, Math.round(rect.x))) : 0;
+          const boundedY = Number.isFinite(rect.y) ? Math.max(-10_000_000, Math.min(10_000_000, Math.round(rect.y))) : 0;
+          const boundedWidth = Number.isFinite(rect.width) ? Math.max(-10_000_000, Math.min(10_000_000, Math.round(rect.width))) : 0;
+          const boundedHeight = Number.isFinite(rect.height) ? Math.max(-10_000_000, Math.min(10_000_000, Math.round(rect.height))) : 0;
           const attributes: Record<string, string> = {};
           let omittedAttributes = 0;
-          for (const attribute of Array.from(element.attributes).slice(0, 40)) {
-            if (/^(?:value|srcdoc|autocomplete|on[a-z]+|data-)/i.test(attribute.name)) {
+          // These attributes describe bounded, visible DOM geometry/state and
+          // are useful for agents operating SVG/canvas-adjacent widgets. They
+          // are still wrapped, truncated, and never treated as executable.
+          const safeAttributes = new Set(["id", "class", "role", "type", "name", "placeholder", "title", "tabindex", "style", "fill", "stroke", "x", "y", "x1", "x2", "y1", "y2", "r", "cx", "cy", "width", "height", "points", "transform", "font-size"]);
+          const safeDataAttributes = new Set(["data-color", "data-index", "data-sides", "data-result", "data-key", "data-type", "data-item", "data-id", "data-start", "data-end", "data-duration", "data-output", "data-value", "data-position", "data-price"]);
+          for (const [index, attribute] of Array.from(element.attributes).entries()) {
+            const name = attribute.name.toLowerCase();
+            const allowed = safeAttributes.has(name) || safeDataAttributes.has(name) || /^aria-[a-z0-9_-]+$/i.test(name);
+            if (index >= 40 || !allowed) {
               omittedAttributes += 1;
               continue;
             }
-            attributes[attribute.name] = attribute.value.slice(0, 200);
+            attributes[name.slice(0, 100)] = attribute.value.slice(0, 200);
           }
-          return { tag: element.tagName.toLowerCase(), text: (element.textContent ?? "").trim().slice(0, 300), attributes, omittedAttributes };
-        }));
+          return {
+            tag: element.tagName.toLowerCase(),
+            selector: elementSelector,
+            rect: { x: boundedX, y: boundedY, width: boundedWidth, height: boundedHeight },
+            text: (element.textContent ?? "").trim().slice(0, 300),
+            attributes,
+            omittedAttributes,
+          };
+          });
+        }
+        const elements = await frame.$$eval(safeSelector, collectFindElements, safeSelector);
         return elements.map((element) => ({
           tag: element.tag,
+          selector: wrapUntrustedText("element_selector", redactSecretPlaceholders(element.selector), 500),
+          rect: element.rect,
           text: wrapUntrustedText("element_text", redactSecretPlaceholders(element.text), 300),
           attributes: Object.fromEntries(Object.entries(element.attributes).map(([name, value]) => [name, wrapUntrustedText("element_attribute", redactSecretPlaceholders(value), 500)])),
           omittedAttributes: element.omittedAttributes,
@@ -1535,9 +1796,9 @@ export class BrowserService {
       case "list_frames":
         return this.listFrames(state);
       case "accessibility_snapshot":
-        return this.accessibilitySnapshot(state, action.maxNodes ?? 500, action.maxChars ?? 40_000, action.interestingOnly ?? true);
+        return this.accessibilitySnapshot(state, action.maxNodes ?? 500, action.maxChars ?? 40_000, action.interestingOnly ?? true, frame);
       case "get_computed_style": {
-        const selector = await this.selectorFor(state, targetForAction(action, "selector"), action.frameId);
+        const selector = await this.selectorFor(state, targetForAction(action, "selector"), action.frameId, frame);
         return frame.$eval(selector, (element) => {
           const style = getComputedStyle(element);
           return { display: style.display, visibility: style.visibility, position: style.position, color: style.color, backgroundColor: style.backgroundColor, width: style.width, height: style.height, zIndex: style.zIndex };
@@ -1550,28 +1811,138 @@ export class BrowserService {
         const value = await frame.evaluate((source) => (0, eval)(source), code);
         return sanitizeEvaluateResult(value);
       }
+      case "move": {
+        if (action.frameId && action.frameId !== "main") {
+          throw new AppError("FRAME_ACTION_UNSUPPORTED", "Coordinate moves target the top-level viewport; use a selector for a child frame.");
+        }
+        const coordinateX = action.coordinateX ?? action.coordinate_x;
+        const coordinateY = action.coordinateY ?? action.coordinate_y;
+        if (coordinateX === undefined || coordinateY === undefined) {
+          throw new AppError("INVALID_ACTION", "coordinateX and coordinateY must be provided together.");
+        }
+        const viewport = page.viewport() ?? await page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight }));
+        if (coordinateX < 0 || coordinateY < 0 || coordinateX >= viewport.width || coordinateY >= viewport.height) {
+          throw new AppError("COORDINATE_OUT_OF_BOUNDS", `The pointer coordinate (${coordinateX}, ${coordinateY}) is outside the ${viewport.width}x${viewport.height} viewport.`);
+        }
+        await page.mouse.move(coordinateX, coordinateY);
+        return { moved: true, x: coordinateX, y: coordinateY, pageId: state.id };
+      }
       case "hover":
-        await frame.hover(await this.selectorFor(state, targetForAction(action, "target"), action.frameId));
+        await frame.hover(await this.selectorFor(state, targetForAction(action, "target"), action.frameId, frame));
         return { hovered: true };
       case "press_and_hold": {
-        const selector = await this.selectorFor(state, targetForAction(action, "target"), action.frameId);
+        const selector = await this.selectorFor(state, targetForAction(action, "target"), action.frameId, frame);
         const targetHandle = await frame.$(selector);
+        let mouseButtonMayBeDown = false;
+        const startCoordinateX = action.startCoordinateX ?? action.start_coordinate_x;
+        const startCoordinateY = action.startCoordinateY ?? action.start_coordinate_y;
+        const endCoordinateX = action.endCoordinateX ?? action.end_coordinate_x;
+        const endCoordinateY = action.endCoordinateY ?? action.end_coordinate_y;
+        const path = action.path;
+        if ((startCoordinateX === undefined) !== (startCoordinateY === undefined)) {
+          await targetHandle?.dispose().catch(() => undefined);
+          throw new AppError("INVALID_ACTION", "startCoordinateX and startCoordinateY must be provided together.");
+        }
+        if ((endCoordinateX === undefined) !== (endCoordinateY === undefined)) {
+          await targetHandle?.dispose().catch(() => undefined);
+          throw new AppError("INVALID_ACTION", "endCoordinateX and endCoordinateY must be provided together.");
+        }
+        if (path !== undefined && (startCoordinateX !== undefined || startCoordinateY !== undefined || endCoordinateX !== undefined || endCoordinateY !== undefined)) {
+          await targetHandle?.dispose().catch(() => undefined);
+          throw new AppError("INVALID_ACTION", "Provide path or start/end coordinates, not both.");
+        }
         try {
-          const bounds = await targetHandle?.boundingBox();
-          if (!bounds) {
-            throw new AppError("ELEMENT_NOT_FOUND", "The hold target is detached or not visible.");
+          const scrollIntoView = (targetHandle as unknown as { scrollIntoView?: () => Promise<void> } | null)?.scrollIntoView;
+          if (scrollIntoView) {
+            await scrollIntoView.call(targetHandle);
           }
-          const box = { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 };
-          await page.mouse.move(box.x, box.y);
+          throwIfAborted(signal);
+          const clickablePoint = (targetHandle as unknown as { clickablePoint?: () => Promise<{ x: number; y: number }> } | null)?.clickablePoint;
+          const clickable = clickablePoint
+            ? await clickablePoint.call(targetHandle)
+            : await (async () => {
+              const bounds = await targetHandle?.boundingBox();
+              if (!bounds) {
+                throw new AppError("ELEMENT_NOT_FOUND", "The hold target is detached or not visible.");
+              }
+              return { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 };
+            })();
+          const point = path?.[0]
+            ?? (startCoordinateX !== undefined && startCoordinateY !== undefined
+              ? { x: startCoordinateX, y: startCoordinateY }
+              : clickable);
+          if (path !== undefined && path.length < 2) {
+            throw new AppError("INVALID_ACTION", "path must contain at least two points.");
+          }
+          if (path !== undefined && action.frameId && action.frameId !== "main") {
+            throw new AppError("FRAME_ACTION_UNSUPPORTED", "Pointer paths target the top-level viewport; use a selector/ref in the main frame.");
+          }
+          if (path !== undefined && path.some((item) => !Number.isFinite(item.x) || !Number.isFinite(item.y))) {
+            throw new AppError("INVALID_ACTION", "Every pointer path point must contain finite x and y coordinates.");
+          }
+          if (path !== undefined && path.some((item) => item.x < 0 || item.y < 0)) {
+            throw new AppError("COORDINATE_OUT_OF_BOUNDS", "Pointer path coordinates must be non-negative.");
+          }
+          if (startCoordinateX !== undefined && startCoordinateY !== undefined && path === undefined) {
+            if (action.frameId && action.frameId !== "main") {
+              throw new AppError("FRAME_ACTION_UNSUPPORTED", "Drag start coordinates target the top-level viewport; use a selector/ref in the main frame.");
+            }
+            const viewport = page.viewport() ?? await page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight }));
+            if (startCoordinateX < 0 || startCoordinateY < 0 || startCoordinateX >= viewport.width || startCoordinateY >= viewport.height) {
+              throw new AppError("COORDINATE_OUT_OF_BOUNDS", `The drag start (${startCoordinateX}, ${startCoordinateY}) is outside the ${viewport.width}x${viewport.height} viewport.`);
+            }
+          }
+          throwIfAborted(signal);
+          await page.mouse.move(point.x, point.y);
+          throwIfAborted(signal);
           const button = action.button ?? "left";
+          if (endCoordinateX !== undefined && endCoordinateY !== undefined) {
+            if (action.frameId && action.frameId !== "main") {
+              throw new AppError("FRAME_ACTION_UNSUPPORTED", "Drag destinations target the top-level viewport; use a selector/ref in the main frame.");
+            }
+            const viewport = page.viewport() ?? await page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight }));
+            if (endCoordinateX < 0 || endCoordinateY < 0 || endCoordinateX >= viewport.width || endCoordinateY >= viewport.height) {
+              throw new AppError("COORDINATE_OUT_OF_BOUNDS", `The drag destination (${endCoordinateX}, ${endCoordinateY}) is outside the ${viewport.width}x${viewport.height} viewport.`);
+            }
+          }
+          // Treat a failed mouse.down as potentially pressed: Chromium can
+          // reject after sending the input event. Always attempt the matching
+          // mouse.up so cancellation and setup failures do not leak a held
+          // pointer into the next action.
+          mouseButtonMayBeDown = true;
           await page.mouse.down({ button });
           try {
             await wait(action.durationMs ?? action.milliseconds ?? 2_000, signal);
+            if (path !== undefined) {
+              const viewport = page.viewport() ?? await page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight }));
+              for (const item of path) {
+                if (item.x >= viewport.width || item.y >= viewport.height) {
+                  throw new AppError("COORDINATE_OUT_OF_BOUNDS", `The pointer path coordinate (${item.x}, ${item.y}) is outside the ${viewport.width}x${viewport.height} viewport.`);
+                }
+              }
+              for (const item of path.slice(1)) {
+                throwIfAborted(signal);
+                await page.mouse.move(item.x, item.y);
+              }
+            } else if (endCoordinateX !== undefined && endCoordinateY !== undefined) {
+              const distance = Math.hypot(endCoordinateX - point.x, endCoordinateY - point.y);
+              const steps = Math.min(64, Math.max(1, Math.ceil(distance / 8)));
+              await page.mouse.move(endCoordinateX, endCoordinateY, { steps });
+            }
           } finally {
-            await page.mouse.up({ button }).catch(() => undefined);
+            if (mouseButtonMayBeDown) {
+              await page.mouse.up({ button }).catch(() => undefined);
+              mouseButtonMayBeDown = false;
+            }
           }
-          return { heldMs: action.durationMs ?? action.milliseconds ?? 2_000 };
+          return {
+            heldMs: action.durationMs ?? action.milliseconds ?? 2_000,
+            ...(path !== undefined ? { draggedPath: path.length } : endCoordinateX !== undefined && endCoordinateY !== undefined ? { draggedTo: { x: endCoordinateX, y: endCoordinateY } } : {}),
+          };
         } finally {
+          if (mouseButtonMayBeDown) {
+            await page.mouse.up({ button: action.button ?? "left" }).catch(() => undefined);
+          }
           await targetHandle?.dispose().catch(() => undefined);
         }
       }
@@ -1688,7 +2059,7 @@ export class BrowserService {
       throw new AppError("INVALID_ACTION", "close_tab target must be a tab pageId or tab identifier, not an element ref.");
     }
     const state = await this.pageState(target, signal);
-    await this.assertCurrentPageAllowed(state.page);
+    await this.assertCurrentPageAllowed(state.page, state);
     throwIfAborted(signal);
     const wasCurrent = this.currentPageId === state.id;
     await state.page.close();
@@ -1747,6 +2118,9 @@ export class BrowserService {
         }
         results.push(result);
       } catch (error) {
+        if (DOM_MUTATING_ACTIONS.has(action.action)) {
+          this.invalidateActionSnapshot(action, undefined);
+        }
         const normalized = asAppError(normalizeBrowserOperationError(error, signal));
         throw new AppError(normalized.code, normalized.message, {
           retryable: normalized.retryable,
@@ -2033,6 +2407,9 @@ export class BrowserService {
       throw this.browserLifecycleError();
     }
     if (pages.length === 0) {
+      if (pageId) {
+        throw new AppError("TAB_NOT_FOUND", `Tab '${pageId}' was not found.`);
+      }
       let page: Page;
       try {
         page = await browser.newPage();
@@ -2214,6 +2591,7 @@ export class BrowserService {
       const guard = this.targetGuardSessions.get(value.sessionId);
       if (guard) {
         guard.released = true;
+        this.targetGuardNavigationErrors.delete(guard.targetId);
         removeCdpListener(guard.session, "Fetch.requestPaused", guard.requestPausedListener);
         removeCdpListener(guard.session, "disconnected", guard.disconnectedListener);
         this.targetGuardSessions.delete(value.sessionId);
@@ -2300,6 +2678,7 @@ export class BrowserService {
       void guard.session.send("Fetch.disable").catch(() => undefined);
     }
     this.targetGuardSessions.clear();
+    this.targetGuardNavigationErrors.clear();
     this.unguardedTargetSessions.clear();
   }
 
@@ -2406,6 +2785,7 @@ export class BrowserService {
     const requestId = typeof event.requestId === "string" ? event.requestId : "";
     const request = isRecordValue(event.request) ? event.request : undefined;
     const requestUrl = typeof request?.url === "string" ? request.url : "";
+    const resourceType = typeof event.resourceType === "string" ? event.resourceType : "";
     if (!requestId || guard.requestIds.has(requestId)) {
       return;
     }
@@ -2419,6 +2799,11 @@ export class BrowserService {
     try {
       if (/^about:blank(?:#.*)?$/i.test(requestUrl)) {
         allowed = true;
+      } else if (/^chrome-error:\/\//i.test(requestUrl)) {
+        // Chromium may expose its internal error document after a blocked
+        // redirect. It is not an external navigation and must not overwrite
+        // the policy error for the original request.
+        allowed = true;
       } else if (requestUrl.startsWith("data:") || requestUrl.startsWith("blob:")) {
         allowed = guard.targetType === "service_worker" || guard.targetType === "shared_worker";
       } else if (/^wss?:\/\//i.test(requestUrl)) {
@@ -2431,7 +2816,11 @@ export class BrowserService {
         allowed = false;
       }
     } catch (error) {
-      this.logger.warn("New browser target request blocked", { url: safeUrl(requestUrl), code: error instanceof AppError ? error.code : "URL_BLOCKED" });
+      const normalized = error instanceof AppError ? error : new AppError("NAVIGATION_BLOCKED", "The browser navigation was blocked by policy.", { cause: error });
+      if (guard.targetType === "page" && resourceType === "Document" && /^https?:\/\//i.test(requestUrl)) {
+        this.targetGuardNavigationErrors.set(guard.targetId, normalized);
+      }
+      this.logger.warn("New browser target request blocked", { url: safeUrl(requestUrl), code: normalized.code });
     }
     try {
       if (allowed) {
@@ -2455,6 +2844,23 @@ export class BrowserService {
       return [...this.targetGuardSessions.values()].find((guard) => guard.targetId === identity.targetId);
     }
     return undefined;
+  }
+
+  private clearTargetGuardNavigationError(page: Page): void {
+    const targetId = pageTargetIdentity(page).targetId;
+    if (targetId) {
+      this.targetGuardNavigationErrors.delete(targetId);
+    }
+  }
+
+  private takeTargetGuardNavigationError(page: Page): AppError | undefined {
+    const targetId = pageTargetIdentity(page).targetId;
+    if (!targetId) {
+      return undefined;
+    }
+    const error = this.targetGuardNavigationErrors.get(targetId);
+    this.targetGuardNavigationErrors.delete(targetId);
+    return error;
   }
 
   private async waitForTargetGuardDrain(page: Page, signal?: AbortSignal): Promise<void> {
@@ -2556,6 +2962,25 @@ export class BrowserService {
     }
   }
 
+  private async recoverBlockedNavigation(state: PageState): Promise<void> {
+    if (isPageClosed(state.page)) {
+      return;
+    }
+    try {
+      await state.page.goto("about:blank", {
+        waitUntil: "domcontentloaded",
+        timeout: Math.min(this.config.browser.actionTimeoutMs, 2_000),
+      });
+      await new Promise<void>((resolve) => setTimeout(resolve, 50));
+      state.navigationError = undefined;
+      this.clearTargetGuardNavigationError(state.page);
+      state.policyVerifiedUrls?.clear();
+      state.challengeActive = false;
+    } catch (error) {
+      this.logger.debug("Blocked navigation recovery could not restore a blank page", { pageId: state.id, error: String(error) });
+    }
+  }
+
   private async disposePageState(state: PageState): Promise<void> {
     this.retireState(state);
     await closePageSafely(state.page);
@@ -2573,9 +2998,13 @@ export class BrowserService {
     }
     state.disposed = true;
     this.removePageListeners(state);
+    const viewportSession = state.viewportSession;
+    state.viewportSession = undefined;
+    void viewportSession?.detach().catch(() => undefined);
     state.refs.clear();
     state.snapshotInteractive = undefined;
     state.snapshotId = undefined;
+    state.policyVerifiedUrls?.clear();
     state.dialogs.length = 0;
     state.navigationError = undefined;
     state.activeNavigationGeneration = undefined;
@@ -2707,6 +3136,34 @@ export class BrowserService {
       state.page.setDefaultNavigationTimeout(this.config.browser.actionTimeoutMs);
       state.timeoutsConfigured = true;
     }
+    if (this.config.browser.viewport && !state.viewportConfigured) {
+      throwIfAborted(signal);
+      // Keep Puppeteer's input coordinate map in sync with the CDP metrics.
+      // Connected pages can report the correct CSS viewport while Puppeteer
+      // still has a null/stale viewport, which makes mouse hit testing drift
+      // on small inline controls. This is applied only for an explicit
+      // viewport override; normal personal-browser sessions remain untouched.
+      await state.page.setViewport({
+        width: this.config.browser.viewport.width,
+        height: this.config.browser.viewport.height,
+        deviceScaleFactor: 1,
+      });
+      const session = await state.page.createCDPSession();
+      try {
+        await session.send("Emulation.setDeviceMetricsOverride", {
+          width: this.config.browser.viewport.width,
+          height: this.config.browser.viewport.height,
+          deviceScaleFactor: 1,
+          mobile: false,
+        });
+        state.viewportSession = session;
+        state.viewportConfigured = true;
+      } catch (error) {
+        await session.detach().catch(() => undefined);
+        throw error;
+      }
+      this.assertStateLive(state);
+    }
     if (!state.downloadConfigured) {
       try {
         const downloadPath = resolve(this.config.dataDir, "downloads");
@@ -2786,8 +3243,18 @@ export class BrowserService {
       const isFrameNavigation = navigationRequest && requestFrame !== null;
       mainFrameNavigation = isFrameNavigation && requestFrame === state.page.mainFrame();
       navigationGeneration = mainFrameNavigation ? state.activeNavigationGeneration : undefined;
+      if (mainFrameNavigation && navigationGeneration !== undefined) {
+        // Keep the exact-document admission cache for ordinary clicks that do
+        // not navigate. Once a real main-frame request starts, the document
+        // identity is changing and all frame URL admissions must be rebuilt.
+        state.policyVerifiedUrls?.clear();
+      }
       requestUrl = request.url();
       if (/^about:blank(?:#.*)?$/i.test(requestUrl)) {
+        await request.continue();
+        return;
+      }
+      if (/^chrome-error:\/\//i.test(requestUrl)) {
         await request.continue();
         return;
       }
@@ -2842,7 +3309,7 @@ export class BrowserService {
       }
       this.ids.delete(page);
     }
-    const state: PageState = { id: randomUUID(), page, lifecycleGeneration: this.lifecycleGeneration, disposed: false, refs: new Map(), domRevision: 0, networkEnabled: false, consoleEnabled: false, network: [], console: [], dialogs: [], listenersInstalled: false, timeoutsConfigured: false, downloadConfigured: false, navigationGuardInstalled: false, navigationGeneration: 0, challengeActive: false };
+    const state: PageState = { id: randomUUID(), page, lifecycleGeneration: this.lifecycleGeneration, disposed: false, refs: new Map(), domRevision: 0, networkEnabled: false, consoleEnabled: false, network: [], console: [], dialogs: [], listenersInstalled: false, timeoutsConfigured: false, viewportConfigured: false, downloadConfigured: false, navigationGuardInstalled: false, navigationGeneration: 0, policyVerifiedUrls: new Set(), challengeActive: false };
     this.ids.set(page, state.id);
     this.states.set(state.id, state);
     this.installListeners(state);
@@ -2919,6 +3386,10 @@ export class BrowserService {
       if (state.disposed) {
         return;
       }
+      // A same-origin reload or child-frame navigation can keep the host
+      // unchanged while replacing the document. Re-run the DNS admission for
+      // the new frame URL rather than carrying the old document's cache.
+      state.policyVerifiedUrls?.clear();
       state.domRevision += 1;
       state.snapshotId = undefined;
       state.refs.clear();
@@ -2938,6 +3409,7 @@ export class BrowserService {
       if (state.disposed) {
         return;
       }
+      state.policyVerifiedUrls?.clear();
       state.domRevision += 1;
       state.snapshotId = undefined;
       state.refs.clear();
@@ -2949,6 +3421,7 @@ export class BrowserService {
       if (state.disposed) {
         return;
       }
+      state.policyVerifiedUrls?.clear();
       state.domRevision += 1;
       state.snapshotId = undefined;
       state.refs.clear();
@@ -3019,10 +3492,11 @@ export class BrowserService {
     return summaries.filter((summary): summary is FrameSummary => summary !== undefined);
   }
 
-  private async accessibilitySnapshot(state: PageState, maxNodes: number, maxChars: number, interestingOnly: boolean): Promise<unknown> {
+  private async accessibilitySnapshot(state: PageState, maxNodes: number, maxChars: number, interestingOnly: boolean, frame?: Frame): Promise<unknown> {
     const client = await state.page.createCDPSession();
     try {
-      const response = await client.send("Accessibility.getFullAXTree", {}) as unknown as { nodes?: Array<Record<string, unknown>> };
+      const frameId = frameProtocolId(frame);
+      const response = await client.send("Accessibility.getFullAXTree", frameId ? { frameId } : {}) as unknown as { nodes?: Array<Record<string, unknown>> };
       const sourceNodes = Array.isArray(response.nodes) ? response.nodes : [];
       const nodes = sourceNodes
         .filter((node) => !interestingOnly || isInterestingAxNode(node))
@@ -3091,7 +3565,7 @@ export class BrowserService {
     try {
       const url = frame.url();
       if (url !== "about:blank") {
-        await this.policy.assertNavigationAllowedAsync(url);
+        await this.assertFrameUrlAllowed(state, url);
       }
     } catch (error) {
       if (isFrameDetached(frame)) {
@@ -3102,7 +3576,7 @@ export class BrowserService {
     return frame;
   }
 
-  private async selectorFor(state: PageState, target: string, requestedFrameId?: string): Promise<string> {
+  private async selectorFor(state: PageState, target: string, requestedFrameId?: string, resolvedFrame?: Frame): Promise<string> {
     this.assertStateLive(state);
     const normalized = target.trim();
     const ref = normalized.startsWith("ref:") ? normalized.slice(4) : normalized;
@@ -3115,28 +3589,41 @@ export class BrowserService {
       if (effectiveFrameId !== stored.frameId) {
         throw new AppError("FRAME_MISMATCH", `Reference '${ref}' belongs to frame '${stored.frameId}', not '${effectiveFrameId}'.`, { retryable: true });
       }
-      const frame = await this.frameFor(state, stored.frameId);
+      let frame = resolvedFrame;
+      if (frame) {
+        try {
+          if (framePath(frame) !== stored.frameId) {
+            frame = undefined;
+          }
+        } catch {
+          frame = undefined;
+        }
+      }
+      frame ??= await this.frameFor(state, stored.frameId);
       const currentSignature = await frame.$eval(stored.selector, (element) => {
         const htmlElement = element as HTMLElement & { type?: string };
         const anchor = element.closest("a") as HTMLAnchorElement | null;
-        const rect = element.getBoundingClientRect();
         return [
           element.tagName.toLowerCase(),
+          element.getAttribute("id") ?? "",
+          element.getAttribute("name") ?? "",
           element.getAttribute("role") ?? "",
           element.getAttribute("aria-label") ?? "",
+          element.getAttribute("placeholder") ?? "",
+          element.getAttribute("disabled") ?? "",
+          element.getAttribute("aria-disabled") ?? "",
           htmlElement.type ?? "",
           (htmlElement.innerText || element.getAttribute("value") || element.textContent || "").replace(/\s+/g, " ").trim().slice(0, 500),
           anchor?.href ?? "",
-          Math.round(rect.x),
-          Math.round(rect.y),
-          Math.round(rect.width),
-          Math.round(rect.height),
         ].join("\u001f");
       }).catch(() => undefined);
       if (!currentSignature || currentSignature !== stored.signature) {
         throw new AppError("STALE_REFERENCE", `Element reference '${ref}' no longer identifies the same element. Capture a fresh browser snapshot before acting.`, { retryable: true });
       }
       return stored.selector;
+    }
+    if (resolvedFrame) {
+      return normalized;
     }
     try {
       const frame = await this.frameFor(state, requestedFrameId);
@@ -3170,19 +3657,21 @@ export class BrowserService {
       return {
         signature: [
           element.tagName.toLowerCase(),
+          element.getAttribute("id") ?? "",
+          element.getAttribute("name") ?? "",
           element.getAttribute("role") ?? "",
           element.getAttribute("aria-label") ?? "",
+          element.getAttribute("placeholder") ?? "",
+          element.getAttribute("disabled") ?? "",
+          element.getAttribute("aria-disabled") ?? "",
           htmlElement.type ?? "",
           (htmlElement.innerText || element.getAttribute("value") || element.textContent || "").replace(/\s+/g, " ").trim().slice(0, 500),
           anchor?.href ?? "",
-          Math.round(rect.x),
-          Math.round(rect.y),
-          Math.round(rect.width),
-          Math.round(rect.height),
         ].join("\u001f"),
         tag: clickable.tagName.toLowerCase(),
         type: htmlElement.type?.toLowerCase() ?? "",
         role: clickable.getAttribute("role") ?? "",
+        focusable: clickable instanceof HTMLElement && (clickable.hasAttribute("tabindex") || /^(?:button|input|select|textarea|a)$/i.test(clickable.tagName)),
         label: [clickable.textContent, clickable.getAttribute("aria-label"), clickable.getAttribute("title"), htmlElement.value].filter(Boolean).join(" ").replace(/\s+/g, " ").trim().slice(0, 200),
         href: anchor?.href ?? (clickable as HTMLAnchorElement).href ?? clickable.getAttribute("href") ?? undefined,
         rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
@@ -3203,7 +3692,7 @@ export class BrowserService {
     const beforeUrl = state.page.url();
     let selector: string | undefined;
     try {
-      selector = await this.selectorFor(state, target, "main");
+      selector = await this.selectorFor(state, target, "main", state.page.mainFrame());
     } catch (error) {
       if (shouldPropagateTargetError(error)) {
         throw error;
@@ -3258,7 +3747,7 @@ export class BrowserService {
           throw error;
         }
         this.currentPageId = next.id;
-        return { clicked: true, openedPageId: next.id, url: safeUrl(next.page.url()) };
+        return { clicked: true, pageId: state.id, openedPageId: next.id, url: safeUrl(next.page.url()) };
       }
       // Some sites prevent the popup event but still expose an ordinary anchor.
       // Only synthesize a tab when the real click left the current URL untouched;
@@ -3275,7 +3764,7 @@ export class BrowserService {
           throw error;
         }
         this.currentPageId = next.id;
-        return { clicked: true, openedPageId: next.id, url: safeUrl(next.page.url()), synthetic: true };
+        return { clicked: true, pageId: state.id, openedPageId: next.id, url: safeUrl(next.page.url()), synthetic: true };
       }
       this.assertStateLive(state);
       return { clicked: true, pageId: state.id, url: safeUrl(state.page.url()) };
@@ -3383,11 +3872,31 @@ export class BrowserService {
 
   private async waitForPageReady(page: Page, signal?: AbortSignal): Promise<void> {
     throwIfAborted(signal);
-    await page.waitForNetworkIdle({ idleTime: 100, timeout: Math.min(this.config.browser.actionTimeoutMs, 1_000), signal }).catch(() => {
+    await page.waitForNetworkIdle({ idleTime: 100, timeout: Math.min(this.config.browser.actionTimeoutMs, 1_000), signal }).catch((error: unknown) => {
       throwIfAborted(signal);
+      if (!isPuppeteerTimeoutError(error)) {
+        throw normalizeBrowserOperationError(error, signal);
+      }
       return undefined;
     });
     throwIfAborted(signal);
+  }
+
+  private async waitForDocumentReady(page: Page, signal?: AbortSignal): Promise<void> {
+    throwIfAborted(signal);
+    try {
+      await page.waitForFunction(() => document.readyState !== "loading", { timeout: NAVIGATION_CLICK_READY_TIMEOUT_MS, signal });
+    } catch (error) {
+      // A document that keeps loading is still a valid result of a click. The
+      // navigation event and request guard already establish the URL/policy
+      // boundary; callers can explicitly wait for a selector or network idle
+      // when they need stronger page readiness.
+      if (isPuppeteerTimeoutError(error)) {
+        throwIfAborted(signal);
+        return;
+      }
+      throw normalizeBrowserOperationError(error, signal);
+    }
   }
 
   private async waitForUrlPattern(page: Page, pattern: string, timeoutMs: number, signal?: AbortSignal): Promise<void> {
@@ -3436,7 +3945,7 @@ export class BrowserService {
     });
   }
 
-  private async clickTarget(state: PageState, target: string, button: "left" | "middle" | "right", clickCount: number, signal?: AbortSignal, frame: Frame = state.page.mainFrame()): Promise<ClickMonitorResult> {
+  private async clickTarget(state: PageState, target: string, button: "left" | "middle" | "right", clickCount: number, signal?: AbortSignal, frame: Frame = state.page.mainFrame(), pointerType: "mouse" | "touch" = "mouse"): Promise<ClickMonitorResult> {
     let selector: string | undefined;
     let clickDescriptor: (ClickDescriptor & { href?: string; rect: { x: number; y: number; width: number; height: number } }) | undefined;
     const normalizedTarget = target.trim();
@@ -3446,89 +3955,117 @@ export class BrowserService {
       selector = resolved.selector;
       clickDescriptor = resolved.descriptor;
     } else {
+      selector = normalizedTarget;
       try {
-        selector = await this.selectorFor(state, target, framePath(frame));
+        clickDescriptor = await this.clickDescriptorForSelector(frame, selector);
       } catch (error) {
-        if (shouldPropagateTargetError(error)) {
-          throw error;
+        if (isMissingElementError(error)) {
+          selector = undefined;
+        } else if (isSelectorSyntaxError(error)) {
+          if (looksLikeExplicitSelector(normalizedTarget)) {
+            throw new AppError("SELECTOR_INVALID", `The selector '${normalizedTarget.slice(0, 200)}' is invalid.`, { cause: error });
+          }
+          selector = undefined;
+        } else {
+          throw normalizeBrowserOperationError(error, signal);
         }
-        selector = undefined;
       }
     }
-    if (selector) {
-      // A plain visible label such as "Continue" is also syntactically valid
-      // CSS (as a tag name). Only take the selector path when it resolves to
-      // an element; otherwise continue to the exact-text resolver below.
-      const resolved = await frame.$(selector);
-      await resolved?.dispose().catch(() => undefined);
-      if (!resolved) {
-        selector = undefined;
-      }
-    }
-    if (selector) {
-      clickDescriptor ??= await frame.$eval(selector, (element) => {
-        const clickable = element.closest("a,button,input,select,textarea,[role=button]") ?? element;
-        const htmlElement = clickable as HTMLElement & { type?: string; value?: string };
-        const anchor = clickable.closest("a") as HTMLAnchorElement | null;
-        return {
-          tag: clickable.tagName.toLowerCase(),
-          type: htmlElement.type?.toLowerCase() ?? "",
-          role: clickable.getAttribute("role") ?? "",
-          label: [clickable.textContent, clickable.getAttribute("aria-label"), clickable.getAttribute("title"), htmlElement.value].filter(Boolean).join(" ").replace(/\s+/g, " ").trim().slice(0, 200),
-          href: anchor?.href ?? (clickable as HTMLAnchorElement).href ?? clickable.getAttribute("href") ?? undefined,
-          rect: (() => {
-            const rect = clickable.getBoundingClientRect();
-            return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
-          })(),
-        };
-      });
+    if (selector && clickDescriptor) {
       this.assertClickTargetSafe(clickDescriptor);
       if (clickDescriptor.href) {
         await this.assertNavigationUrl(frame.url() || state.page.url(), clickDescriptor.href);
       }
-      return this.clickElement(state, frame, selector, button, clickCount, signal);
+      return this.clickElement(state, frame, selector, button, clickCount, signal, Boolean(clickDescriptor.href), /^e\d+$/.test(ref) ? normalizedTarget : undefined, pointerType);
     }
     if (button !== "left") {
       throw new AppError("INVALID_ACTION", "Exact visible-text clicks support only the left mouse button; use a selector or coordinates for other buttons.");
     }
-    const targetBox = await frame.evaluate((needle) => {
-      const candidates = Array.from(document.querySelectorAll("body *"));
+    const targetHandle = await frame.evaluateHandle((needle) => {
+      const candidates = Array.from(document.querySelectorAll("body *")).reverse();
       const element = candidates.find((candidate) => {
         const htmlElement = candidate as HTMLElement;
-        return (htmlElement.innerText || candidate.textContent || "").trim() === needle;
-      }) as HTMLElement | undefined;
-      const clickable = element?.closest("a,button,input,select,textarea,[role=button],[onclick]") as HTMLElement | null;
-      if (!clickable) {
-        return undefined;
+        if ((htmlElement.innerText || candidate.textContent || "").trim() !== needle) {
+          return false;
+        }
+        const clickable = htmlElement.closest("a,button,input,select,textarea,[role=button],[onclick]");
+        if (!clickable) {
+          return candidate instanceof SVGElement;
+        }
+        const style = window.getComputedStyle(clickable);
+        const rect = clickable.getBoundingClientRect();
+        return style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0" && rect.width > 0 && rect.height > 0;
+      });
+      const htmlElement = element as HTMLElement | undefined;
+      const clickable = htmlElement?.closest("a,button,input,select,textarea,[role=button],[onclick]");
+      // MiniWoB++ uses SVG text/shapes with listeners attached by D3 rather
+      // than semantic HTML controls. Preserve exact-text matching but allow
+      // an SVG target itself when it has no HTML ancestor.
+      return clickable ?? (element instanceof SVGElement ? element : null);
+    }, target);
+    const clickable = targetHandle.asElement() as ElementHandle<Element> | null;
+    if (!clickable) {
+      await targetHandle.dispose().catch(() => undefined);
+      throw new AppError("ELEMENT_NOT_FOUND", `No clickable element matched '${target.slice(0, 200)}'.`);
+    }
+    try {
+      const targetDescriptor = await clickable.evaluate((element) => {
+        const htmlElement = element as HTMLElement & { type?: string; value?: string };
+        const anchor = element.closest("a") as HTMLAnchorElement | null;
+        const rect = element.getBoundingClientRect();
+        return {
+          width: rect.width,
+          height: rect.height,
+          tag: element.tagName.toLowerCase(),
+          type: htmlElement.type?.toLowerCase() ?? "",
+          role: element.getAttribute("role") ?? "",
+          label: [element.textContent, element.getAttribute("aria-label"), element.getAttribute("title"), htmlElement.value].filter(Boolean).join(" ").replace(/\s+/g, " ").trim().slice(0, 200),
+          href: anchor?.href ?? element.getAttribute("href") ?? undefined,
+        };
+      });
+      if (targetDescriptor.width <= 0 || targetDescriptor.height <= 0) {
+        throw new AppError("ELEMENT_NOT_FOUND", `No clickable element matched '${target.slice(0, 200)}'.`);
       }
-      const rect = clickable.getBoundingClientRect();
+      this.assertClickTargetSafe(targetDescriptor);
+      if (targetDescriptor.href) {
+        await this.assertNavigationUrl(frame.url() || state.page.url(), targetDescriptor.href);
+      }
+      const monitor = await this.runClickAndMonitor(state.page, async () => {
+        if (pointerType === "touch") {
+          if (frame !== state.page.mainFrame()) {
+            throw new AppError("FRAME_ACTION_UNSUPPORTED", "Touch clicks target the top-level viewport; use a selector or coordinates for a child frame.");
+          }
+          const point = await this.touchPoint(clickable);
+          await this.touchTap(state.page, point.x, point.y, signal);
+          return;
+        }
+        await clickable.click({ button: "left", count: clickCount });
+      }, signal, Boolean(targetDescriptor.href), frame);
+      await this.throwPendingNavigationError(state, signal);
+      return monitor;
+    } finally {
+      await targetHandle.dispose().catch(() => undefined);
+    }
+  }
+
+  private async clickDescriptorForSelector(frame: Frame, selector: string): Promise<ClickDescriptor & { href?: string; rect: { x: number; y: number; width: number; height: number } }> {
+    return frame.$eval(selector, (element) => {
+      const clickable = element.closest("a,button,input,select,textarea,[role=button]") ?? element;
       const htmlElement = clickable as HTMLElement & { type?: string; value?: string };
       const anchor = clickable.closest("a") as HTMLAnchorElement | null;
       return {
-        x: rect.x + rect.width / 2,
-        y: rect.y + rect.height / 2,
-        width: rect.width,
-        height: rect.height,
         tag: clickable.tagName.toLowerCase(),
         type: htmlElement.type?.toLowerCase() ?? "",
         role: clickable.getAttribute("role") ?? "",
+        focusable: clickable instanceof HTMLElement && (clickable.hasAttribute("tabindex") || /^(?:button|input|select|textarea|a)$/i.test(clickable.tagName)),
         label: [clickable.textContent, clickable.getAttribute("aria-label"), clickable.getAttribute("title"), htmlElement.value].filter(Boolean).join(" ").replace(/\s+/g, " ").trim().slice(0, 200),
-        href: anchor?.href ?? clickable.getAttribute("href") ?? undefined,
+        href: anchor?.href ?? (clickable as HTMLAnchorElement).href ?? clickable.getAttribute("href") ?? undefined,
+        rect: (() => {
+          const rect = clickable.getBoundingClientRect();
+          return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+        })(),
       };
-    }, target);
-    if (!targetBox || targetBox.width <= 0 || targetBox.height <= 0) {
-      throw new AppError("ELEMENT_NOT_FOUND", `No clickable element matched '${target.slice(0, 200)}'.`);
-    }
-    this.assertClickTargetSafe(targetBox);
-    if (targetBox.href) {
-      await this.assertNavigationUrl(state.page.url(), targetBox.href);
-    }
-    if (frame !== state.page.mainFrame()) {
-      throw new AppError("FRAME_ACTION_UNSUPPORTED", "Exact-text clicks in child frames require a selector or snapshot ref.");
-    }
-    const monitor = await this.runClickAndMonitor(state.page, () => state.page.mouse.click(targetBox.x, targetBox.y, { button: "left", count: clickCount }), signal);
-    await this.throwPendingNavigationError(state, signal);
-    return monitor;
+    });
   }
 
   private assertClickTargetSafe(target: ClickDescriptor): void {
@@ -3543,7 +4080,13 @@ export class BrowserService {
     }
   }
 
-  private async clickElement(state: PageState, frame: Frame, selector: string, button: "left" | "middle" | "right", clickCount: number, signal?: AbortSignal): Promise<ClickMonitorResult> {
+  private assertClickGeometry(target: ClickDescriptor & { rect: { width: number; height: number } }): void {
+    if ((target.rect.width <= 0 || target.rect.height <= 0) && !target.focusable) {
+      throw new AppError("ELEMENT_NOT_VISIBLE", "The browser target is not visible or cannot be clicked in the current viewport.", { retryable: true });
+    }
+  }
+
+  private async clickElement(state: PageState, frame: Frame, selector: string, button: "left" | "middle" | "right", clickCount: number, signal?: AbortSignal, expectNavigation = false, expectedRef?: string, pointerType: "mouse" | "touch" = "mouse"): Promise<ClickMonitorResult> {
     let dialogObserved = false;
     let removeDialogListener: (() => void) | undefined;
     const dialogOpened = new Promise<null>((resolve) => {
@@ -3555,7 +4098,125 @@ export class BrowserService {
       state.page.on("dialog", onDialog);
       removeDialogListener = () => state.page.off("dialog", onDialog);
     });
-    const click = this.runClickAndMonitor(state.page, () => frame.click(selector, { button, count: clickCount }), signal).then(
+    // Resolve and scroll the element immediately before the real click. A
+    // snapshot or descriptor may have been collected before a layout shift or
+    // animation; remeasuring the live node lets Puppeteer calculate a current
+    // clickable point. Element refs are revalidated on every retry so this
+    // cannot turn a stale identity check into a selector-only click.
+    const prepare = async (): Promise<boolean> => {
+      const initial = expectedRef
+        ? (await this.clickSnapshotRef(state, expectedRef, frame)).descriptor
+        : await this.clickDescriptorForSelector(frame, selector);
+      this.assertClickTargetSafe(initial);
+      this.assertClickGeometry(initial);
+      if (initial.href) {
+        await this.assertNavigationUrl(frame.url() || state.page.url(), initial.href);
+      }
+      if ((initial.rect.width <= 0 || initial.rect.height <= 0) && initial.focusable) {
+        await frame.$eval(selector, (element) => {
+          if (element instanceof HTMLElement) {
+            element.focus();
+          }
+        });
+        return true;
+      }
+      const targetHandle = await frame.$(selector);
+      if (!targetHandle) {
+        throw new AppError("ELEMENT_NOT_FOUND", "The requested browser element was not found.");
+      }
+      try {
+        const scrollIntoView = (targetHandle as unknown as { scrollIntoView?: () => Promise<void> }).scrollIntoView;
+        if (scrollIntoView) {
+          await scrollIntoView.call(targetHandle);
+        }
+      } finally {
+        await targetHandle.dispose().catch(() => undefined);
+      }
+      const current = expectedRef
+        ? (await this.clickSnapshotRef(state, expectedRef, frame)).descriptor
+        : await this.clickDescriptorForSelector(frame, selector);
+      this.assertClickTargetSafe(current);
+      this.assertClickGeometry(current);
+      if (current.href) {
+        await this.assertNavigationUrl(frame.url() || state.page.url(), current.href);
+      }
+      if ((current.rect.width <= 0 || current.rect.height <= 0) && current.focusable) {
+        await frame.$eval(selector, (element) => {
+          if (element instanceof HTMLElement) {
+            element.focus();
+          }
+        });
+        return true;
+      }
+      return false;
+    };
+    const pageMainFrame = typeof state.page.mainFrame === "function" ? state.page.mainFrame() : undefined;
+    const trigger = async (): Promise<void> => {
+      let lastError: unknown;
+      for (let attempt = 0; attempt < CLICK_RETRY_ATTEMPTS; attempt += 1) {
+        try {
+          throwIfAborted(signal);
+          const focused = await prepare();
+          if (focused) {
+            return;
+          }
+          if (pointerType === "touch") {
+            if (pageMainFrame && frame !== pageMainFrame) {
+              throw new AppError("FRAME_ACTION_UNSUPPORTED", "Touch clicks target the top-level viewport; use a selector or coordinates for a child frame.");
+            }
+            const targetHandle = await frame.$(selector);
+            if (!targetHandle) {
+              throw new AppError("ELEMENT_NOT_FOUND", "The requested browser element was not found.");
+            }
+            try {
+              const point = await this.touchPoint(targetHandle);
+              await this.touchTap(state.page, point.x, point.y, signal);
+            } finally {
+              await targetHandle.dispose().catch(() => undefined);
+            }
+          } else if (pageMainFrame && frame === pageMainFrame) {
+            const targetHandle = await frame.$(selector);
+            if (!targetHandle) {
+              throw new AppError("ELEMENT_NOT_FOUND", "The requested browser element was not found.");
+            }
+            try {
+              const clickablePoint = (targetHandle as unknown as { clickablePoint?: () => Promise<{ x: number; y: number }> }).clickablePoint;
+              if (!clickablePoint && typeof (targetHandle as unknown as { boundingBox?: unknown }).boundingBox !== "function") {
+                // Lightweight test doubles and older Puppeteer handles may
+                // expose selector clicking without geometry helpers. Keep the
+                // validated selector path available for those adapters.
+                await frame.click(selector, { button, count: clickCount });
+                return;
+              }
+              const svgPoint = await this.svgHitTestPoint(targetHandle);
+              const point = svgPoint ?? (clickablePoint
+                ? await clickablePoint.call(targetHandle)
+                : await (async () => {
+                  const bounds = await targetHandle.boundingBox();
+                  if (!bounds) {
+                    throw new AppError("ELEMENT_NOT_FOUND", "The requested browser element is detached or not visible.");
+                  }
+                  return { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 };
+                })());
+              await this.mouseClick(state.page, point.x, point.y, button, clickCount, signal);
+            } finally {
+              await targetHandle.dispose().catch(() => undefined);
+            }
+          } else {
+            await frame.click(selector, { button, count: clickCount });
+          }
+          return;
+        } catch (error) {
+          lastError = error;
+          if (attempt + 1 >= CLICK_RETRY_ATTEMPTS || !isTransientClickError(error)) {
+            throw error;
+          }
+          await wait(CLICK_RETRY_DELAY_MS, signal);
+        }
+      }
+      throw lastError;
+    };
+    const click = this.runClickAndMonitor(state.page, trigger, signal, expectNavigation, frame).then(
       (result) => result,
       (error: unknown) => {
         removeDialogListener?.();
@@ -3583,14 +4244,19 @@ export class BrowserService {
     return openedDialog;
   }
 
-  private async runClickAndMonitor(page: Page, trigger: () => Promise<void>, signal?: AbortSignal): Promise<ClickMonitorResult> {
+  private async runClickAndMonitor(page: Page, trigger: () => Promise<void>, signal?: AbortSignal, expectNavigation = true, navigationFrame?: Frame): Promise<ClickMonitorResult> {
     throwIfAborted(signal);
-    const beforeUrl = typeof page.url === "function" ? page.url() : "";
+    const beforeUrl = navigationFrame && typeof navigationFrame.url === "function" ? navigationFrame.url() : typeof page.url === "function" ? page.url() : "";
     let navigated = false;
+    let resolveNavigation!: () => void;
+    const navigationObserved = new Promise<void>((resolve) => {
+      resolveNavigation = resolve;
+    });
     const onFrameNavigated = (frame: Frame): void => {
       try {
-        if (frame === page.mainFrame()) {
+        if (frame === (navigationFrame ?? page.mainFrame())) {
           navigated = true;
+          resolveNavigation();
         }
       } catch {
         // Page disposal can race the navigation event; the click operation
@@ -3600,25 +4266,53 @@ export class BrowserService {
     page.on("framenavigated", onFrameNavigated);
     try {
       await trigger();
-      await wait(50, signal);
-      if (navigated) {
-        await page.waitForNetworkIdle({ idleTime: 100, timeout: Math.min(this.config.browser.actionTimeoutMs, 1_000), signal }).catch(() => {
-          throwIfAborted(signal);
-        });
+      // Puppeteer resolves the click promise before every navigation event is
+      // necessarily delivered. Keep the settle window before classifying the
+      // click so redirects and client-side navigation are not misreported.
+      await wait(expectNavigation ? NAVIGATION_CLICK_SETTLE_TIMEOUT_MS : CLICK_SETTLE_TIMEOUT_MS, signal);
+      if (expectNavigation && !navigated) {
+        await awaitWithAbort(settleWithTimeout(navigationObserved, NAVIGATION_CLICK_EVENT_TIMEOUT_MS), signal);
       }
-      const url = typeof page.url === "function" ? page.url() : "";
+      if (navigated) {
+        await this.waitForDocumentReady(navigationFrame ? navigationFrame as unknown as Page : page, signal);
+      }
+      const url = navigationFrame && typeof navigationFrame.url === "function" ? navigationFrame.url() : typeof page.url === "function" ? page.url() : "";
       return { navigated, urlChanged: url !== beforeUrl, url };
+    } catch (error) {
+      throw normalizeBrowserOperationError(error, signal);
     } finally {
       page.off("framenavigated", onFrameNavigated);
     }
   }
 
-  private async assertCurrentPageAllowed(page: Page): Promise<void> {
+  private async assertCurrentPageAllowed(page: Page, state?: PageState): Promise<void> {
     const url = page.url();
-    if (url === "about:blank") {
+    if (!state) {
+      if (url !== "about:blank") {
+        await this.policy.assertNavigationAllowedAsync(url);
+      }
       return;
     }
-    await this.policy.assertNavigationAllowedAsync(url);
+    await this.assertFrameUrlAllowed(state, url);
+  }
+
+  /**
+   * Revalidate the URL syntax/domain policy on every call, but avoid repeating
+   * DNS for the exact document/frame URL already admitted for this PageState.
+   * The CDP request guard still performs asynchronous checks for every new
+   * browser request, so this cache cannot authorize a later redirect or fetch.
+   */
+  private async assertFrameUrlAllowed(state: PageState, rawUrl: string): Promise<void> {
+    if (rawUrl === "about:blank") {
+      return;
+    }
+    const normalized = this.policy.assertNavigationAllowed(rawUrl).toString();
+    state.policyVerifiedUrls ??= new Set();
+    if (state.policyVerifiedUrls.has(normalized)) {
+      return;
+    }
+    await this.policy.assertNavigationAllowedAsync(normalized);
+    state.policyVerifiedUrls.add(normalized);
   }
 
   private async assertNavigationUrl(baseUrl: string, rawUrl: string): Promise<void> {
@@ -3632,6 +4326,22 @@ export class BrowserService {
     } catch (error) {
       throw new AppError("URL_INVALID", "The clicked link did not contain a valid URL.", { cause: error });
     }
+    try {
+      const base = new URL(baseUrl);
+      if (base.origin === resolved.origin && (base.protocol === "http:" || base.protocol === "https:")) {
+        // The current document already passed the asynchronous DNS policy
+        // gate. Same-origin link checks still enforce the synchronous domain,
+        // scheme, credential, and allowlist rules here; the request
+        // interception guard re-checks the actual navigation (including
+        // redirects) asynchronously at the CDP boundary. Avoiding a second
+        // DNS lookup removes a large fixed cost from ordinary public links.
+        return this.policy.assertNavigationAllowed(resolved.toString());
+      }
+    } catch (error) {
+      if (error instanceof AppError) {
+        throw error;
+      }
+    }
     return this.policy.assertNavigationAllowedAsync(resolved.toString());
   }
 
@@ -3641,6 +4351,7 @@ export class BrowserService {
     state.activeNavigationGeneration = generation;
     state.navigationError = undefined;
     state.mainFrameStatus = undefined;
+    this.clearTargetGuardNavigationError(state.page);
     return generation;
   }
 
@@ -3654,7 +4365,7 @@ export class BrowserService {
   }
 
   private throwNavigationError(state: PageState, generation = state.activeNavigationGeneration): void {
-    const error = this.takeNavigationError(state, generation);
+    const error = this.takeNavigationError(state, generation) ?? this.takeTargetGuardNavigationError(state.page);
     if (generation !== undefined && state.activeNavigationGeneration === generation) {
       state.activeNavigationGeneration = undefined;
     }
@@ -3669,7 +4380,7 @@ export class BrowserService {
   }
 
   private async inputTarget(state: PageState, target: string, text: string, clear: boolean, verify: boolean, frame: Frame = state.page.mainFrame(), signal?: AbortSignal): Promise<{ verified?: boolean }> {
-    const selector = await this.selectorFor(state, target, framePath(frame));
+    const selector = await this.selectorFor(state, target, framePath(frame), frame);
     const input = await frame.$(selector);
     if (!input) {
       throw new AppError("ELEMENT_NOT_FOUND", `No input matched '${target.slice(0, 200)}'.`);
@@ -3678,21 +4389,37 @@ export class BrowserService {
       throwIfAborted(signal);
       await input.focus();
       throwIfAborted(signal);
-      if (clear) {
+      // Chromium's keyboard path edits date/time controls as segmented fields;
+      // typing an ISO value can therefore produce a different value. Number
+      // controls can likewise retain the old value when a CDP select-all is
+      // delivered while the control is focused. Use bounded native setters
+      // only for validated replacement values; all other inputs retain the
+      // normal trusted keyboard path. These callbacks are not exposed as
+      // arbitrary page evaluation.
+      const nativeControlValueSet = clear && (
+        await this.setNativeTemporalInputValue(input, text, signal)
+        || await this.setNativeNumberInputValue(input, text, signal)
+      );
+      if (!nativeControlValueSet && clear) {
+        throwIfAborted(signal);
         const modifier = platform === "darwin" ? "Meta" : "Control";
         await state.page.keyboard.down(modifier);
         try {
+          throwIfAborted(signal);
           await state.page.keyboard.press("A");
           // Selecting all is not itself a mutation. Backspace commits the
           // deletion (and the browser's normal input event) even when the new
           // text is the empty string.
+          throwIfAborted(signal);
           await state.page.keyboard.press("Backspace");
         } finally {
           await state.page.keyboard.up(modifier).catch(() => undefined);
         }
       }
-      throwIfAborted(signal);
-      await state.page.keyboard.type(text);
+      if (!nativeControlValueSet) {
+        throwIfAborted(signal);
+        await state.page.keyboard.type(text);
+      }
       throwIfAborted(signal);
       if (!verify) {
         return {};
@@ -3707,6 +4434,54 @@ export class BrowserService {
     }
   }
 
+  private async setNativeTemporalInputValue(input: ElementHandle<Element>, text: string, signal?: AbortSignal): Promise<boolean> {
+    const inputType = await input.evaluate((element) => (
+      element instanceof HTMLInputElement ? element.type.toLowerCase() : ""
+    ));
+    if (!isCanonicalNativeTemporalInputValue(inputType, text)) {
+      return false;
+    }
+    throwIfAborted(signal);
+    await input.evaluate((element, value) => {
+      if (!(element instanceof HTMLInputElement)) {
+        return;
+      }
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+      if (!setter) {
+        throw new Error("The native input value setter is unavailable.");
+      }
+      setter.call(element, value);
+      element.dispatchEvent(new Event("input", { bubbles: true }));
+      element.dispatchEvent(new Event("change", { bubbles: true }));
+    }, text);
+    throwIfAborted(signal);
+    return true;
+  }
+
+  private async setNativeNumberInputValue(input: ElementHandle<Element>, text: string, signal?: AbortSignal): Promise<boolean> {
+    const inputType = await input.evaluate((element) => (
+      element instanceof HTMLInputElement ? element.type.toLowerCase() : ""
+    ));
+    if (inputType !== "number" || !/^-?(?:\d+(?:\.\d+)?|\.\d+)$/.test(text)) {
+      return false;
+    }
+    throwIfAborted(signal);
+    await input.evaluate((element, value) => {
+      if (!(element instanceof HTMLInputElement)) {
+        return;
+      }
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+      if (!setter) {
+        throw new Error("The native input value setter is unavailable.");
+      }
+      setter.call(element, value);
+      element.dispatchEvent(new Event("input", { bubbles: true }));
+      element.dispatchEvent(new Event("change", { bubbles: true }));
+    }, text);
+    throwIfAborted(signal);
+    return true;
+  }
+
   private async sendKeys(page: Page, keys: string[], signal?: AbortSignal): Promise<void> {
     for (const key of keys) {
       throwIfAborted(signal);
@@ -3717,8 +4492,11 @@ export class BrowserService {
         try {
           for (const modifier of parts) {
             throwIfAborted(signal);
-            await page.keyboard.down(normalizeKeyInput(modifier));
+            // A CDP key-down can be delivered before Puppeteer reports a
+            // transport error. Record the attempted modifier first so the
+            // cleanup path always sends the matching key-up.
             pressed.push(modifier);
+            await page.keyboard.down(normalizeKeyInput(modifier));
           }
           if (main) {
             throwIfAborted(signal);
@@ -3729,10 +4507,79 @@ export class BrowserService {
             await page.keyboard.up(normalizeKeyInput(modifier)).catch(() => undefined);
           }
         }
+        throwIfAborted(signal);
       } else {
         await page.keyboard.press(normalizeKeyInput(key));
+        throwIfAborted(signal);
       }
     }
+  }
+
+  private async touchTap(page: Page, x: number, y: number, signal?: AbortSignal): Promise<void> {
+    // Use Puppeteer's page-owned touchscreen so the start/end packets share
+    // the same rounded point, pressure, radius, modifiers, and active-touch
+    // bookkeeping as the rest of the input stack. A hand-built CDP packet
+    // with an empty touchEnd can be hit-tested against a different target in
+    // Chromium, especially for SVG and nested scrolling controls.
+    throwIfAborted(signal);
+    await page.touchscreen.tap(x, y);
+    throwIfAborted(signal);
+  }
+
+  private async mouseClick(page: Page, x: number, y: number, button: "left" | "middle" | "right", count: number, signal?: AbortSignal): Promise<void> {
+    throwIfAborted(signal);
+    // Puppeteer's convenience click queues move/down/up together. On a
+    // connected page that can synthesize the initial down against the old
+    // pointer target, which is observable on empty inline controls. Keep the
+    // sequence explicit so every event is delivered at the requested point.
+    await page.mouse.move(x, y);
+    for (let clickCount = 1; clickCount <= count; clickCount += 1) {
+      throwIfAborted(signal);
+      let pressed = false;
+      try {
+        await page.mouse.down({ button, clickCount } as unknown as { button: "left" | "middle" | "right" });
+        pressed = true;
+      } finally {
+        if (pressed) {
+          await page.mouse.up({ button, clickCount } as unknown as { button: "left" | "middle" | "right" }).catch(() => undefined);
+        }
+      }
+    }
+  }
+
+  private async touchPoint(handle: ElementHandle<Element>): Promise<{ x: number; y: number }> {
+    const bounds = await handle.boundingBox();
+    if (!bounds || bounds.width <= 0 || bounds.height <= 0) {
+      throw new AppError("ELEMENT_NOT_VISIBLE", "The touch target is not visible.", { retryable: true });
+    }
+    // A few SVG and replaced-inline controls put a transparent descendant at
+    // the geometric center. A point just inside the lower edge remains inside
+    // the target while reaching the target's own pointer hit region.
+    return {
+      x: bounds.x + bounds.width / 2,
+      y: bounds.y + Math.max(0.5, bounds.height - 1),
+    };
+  }
+
+  private async svgHitTestPoint(handle: ElementHandle<Element>): Promise<{ x: number; y: number } | undefined> {
+    if (typeof (handle as unknown as { evaluate?: unknown }).evaluate !== "function") return undefined;
+    return handle.evaluate((element) => {
+      if (!(element instanceof SVGElement)) return undefined;
+      const rect = element.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return undefined;
+      const candidates = [
+        [0.5, 0.5], [0.5, 0.2], [0.5, 0.8], [0.2, 0.5], [0.8, 0.5],
+        [0.25, 0.25], [0.75, 0.25], [0.25, 0.75], [0.75, 0.75],
+        [0.35, 0.65], [0.65, 0.65], [0.35, 0.35], [0.65, 0.35],
+      ];
+      for (const [xRatio, yRatio] of candidates) {
+        const x = rect.x + rect.width * xRatio;
+        const y = rect.y + rect.height * yRatio;
+        const hit = document.elementFromPoint(x, y);
+        if (hit === element || (hit && element.contains(hit))) return { x, y };
+      }
+      return undefined;
+    });
   }
 
   private async screenshotBase64(page: Page, fullPage: boolean, maxBytes: number, format: "png" | "jpeg" = "png", quality = 80, maxDimension?: number): Promise<ScreenshotCapture> {
@@ -3826,37 +4673,54 @@ export class BrowserService {
 
   private async resolveDialog(state: PageState, accept: boolean, text?: string, signal?: AbortSignal): Promise<unknown> {
     const previous = state.dialogResolutionPromise;
-    let release!: () => void;
-    const current = new Promise<void>((resolvePromise) => {
-      release = resolvePromise;
-    });
-    state.dialogResolutionPromise = current;
-    try {
-      if (previous) {
-        await awaitWithAbort(previous, signal);
+    if (previous) {
+      await awaitWithAbort(previous, signal);
+    }
+    throwIfAborted(signal);
+    const pending = state.dialogs[0];
+    if (!pending) {
+      throw new AppError("DIALOG_NOT_FOUND", "No JavaScript dialog is currently open.");
+    }
+
+    let settled = false;
+    const resolution = Promise.resolve().then(async () => {
+      if (accept) {
+        await pending.dialog.accept(text);
+      } else {
+        await pending.dialog.dismiss();
       }
-      throwIfAborted(signal);
-      const pending = state.dialogs.shift();
-      if (!pending) {
-        throw new AppError("DIALOG_NOT_FOUND", "No JavaScript dialog is currently open.");
-      }
-      try {
-        if (accept) {
-          await awaitWithAbort(pending.dialog.accept(text), signal);
-        } else {
-          await awaitWithAbort(pending.dialog.dismiss(), signal);
-        }
-      } catch (error) {
-        // Remove a dialog after a failed CDP resolution too. Chromium may
-        // have already handled it or the page may have closed; retaining it
-        // would permanently block the page's control lane.
+    }).then(
+      () => {
+        settled = true;
+      },
+      (error: unknown) => {
+        settled = true;
         throw error;
-      }
+      },
+    );
+    // Keep a rejection handler attached even when the caller cancels before
+    // Chromium settles the underlying dialog command.
+    const tracked = resolution.then(() => undefined, () => undefined);
+    state.dialogResolutionPromise = tracked;
+    try {
+      await awaitWithAbort(resolution, signal);
       return { resolved: true, type: pending.type, accepted: accept };
     } finally {
-      release();
-      if (state.dialogResolutionPromise === current) {
-        state.dialogResolutionPromise = undefined;
+      const clearPending = (): void => {
+        // A cancelled resolution may still be in flight. Keep the dialog
+        // blocking and serialize the next resolution until that command has
+        // actually settled.
+        if (state.dialogs[0] === pending) {
+          state.dialogs.shift();
+        }
+        if (state.dialogResolutionPromise === tracked) {
+          state.dialogResolutionPromise = undefined;
+        }
+      };
+      if (settled) {
+        clearPending();
+      } else {
+        void tracked.then(clearPending);
       }
     }
   }
@@ -4106,31 +4970,55 @@ export class BrowserService {
     return recovery;
   }
 
-  private async withOperationLock<T>(signal: AbortSignal | undefined, operation: (operationSignal: AbortSignal) => Promise<T>, queueTimeoutMs = this.config.browser.actionTimeoutMs, operationTimeoutMs?: number): Promise<T> {
+  private async withOperationLock<T>(signal: AbortSignal | undefined, operation: (operationSignal: AbortSignal) => Promise<T>, queueTimeoutMs = this.config.browser.actionTimeoutMs, operationTimeoutMs?: number, mode: "exclusive" | "read" = "exclusive"): Promise<T> {
     if (this.queuedOperations >= MAX_QUEUED_OPERATIONS) {
       throw new AppError("BROWSER_QUEUE_FULL", "The browser action queue is full; wait for an active operation to finish and retry.", { retryable: true, details: { hint: "Wait for the active browser operation to finish, then retry." } });
     }
     this.queuedOperations += 1;
+    const readMode = mode === "read";
     const requestSessionGeneration = this.sessionGeneration;
     const requestStartedAt = Date.now();
     const previous = this.operationTail;
+    const readDrain = this.readDrainPromise;
     let release!: () => void;
-    this.operationTail = new Promise<void>((resolvePromise) => {
-      release = resolvePromise;
-    });
+    if (!readMode) {
+      this.operationTail = new Promise<void>((resolvePromise) => {
+        release = resolvePromise;
+      });
+    }
     const queueSignal = combineSignals(signal, this.shutdownController.signal);
     let acquired = false;
     let deferRelease = false;
     let operationPromise: Promise<T> | undefined;
     try {
-      await waitForTurn(previous, queueSignal, queueTimeoutMs);
+      if (readMode) {
+        while (true) {
+          const readTurn = this.operationTail;
+          await waitForTurn(readTurn, queueSignal, queueTimeoutMs);
+          if (readTurn !== this.operationTail) {
+            continue;
+          }
+          await this.acquireReadPermit(queueSignal, queueTimeoutMs);
+          // A writer may publish a queue node while this read waits for a
+          // permit. Do not let that reader overtake the writer; hand the
+          // permit back and re-enter behind the writer instead.
+          if (readTurn !== this.operationTail) {
+            this.endReadOperation();
+            continue;
+          }
+          break;
+        }
+      } else {
+        await waitForTurn(previous, queueSignal, queueTimeoutMs);
+        await waitForTurn(readDrain, queueSignal, queueTimeoutMs);
+      }
       acquired = true;
       throwIfAborted(queueSignal);
       if (requestSessionGeneration !== this.sessionGeneration) {
         throw new AppError("SESSION_CLOSED", "The browser session was closed before this operation started.", { retryable: true });
       }
       const operationController = new AbortController();
-      this.activeOperationController = operationController;
+      this.activeOperationControllers.add(operationController);
       const operationSignal = combineSignals(queueSignal, operationController.signal) ?? operationController.signal;
       let operationTimedOut = false;
       let abortRequested = false;
@@ -4191,15 +5079,13 @@ export class BrowserService {
           clearTimeout(deadlineTimer);
         }
         removeAbortListener?.();
-        if (this.activeOperationController === operationController) {
-          this.activeOperationController = undefined;
+        this.activeOperationControllers.delete(operationController);
+        if (abortRequested && operationPromise) {
+          deferRelease = true;
+          recoveryAfterAbort ??= this.recoverAfterAbort(operationPromise);
+          await recoveryAfterAbort;
+          deferRelease = false;
         }
-      if (abortRequested && operationPromise) {
-        deferRelease = true;
-        recoveryAfterAbort ??= this.recoverAfterAbort(operationPromise);
-        await recoveryAfterAbort;
-        deferRelease = false;
-      }
       }
     } finally {
       this.queuedOperations -= 1;
@@ -4207,14 +5093,76 @@ export class BrowserService {
       // would let a later request run concurrently with the predecessor that
       // still owns the browser. Keep the node behind its predecessor even
       // when this request has already been cancelled.
-      if (acquired) {
-        if (!deferRelease) {
-          release();
+      if (readMode) {
+        if (acquired) {
+          this.endReadOperation();
         }
       } else {
-        void previous.then(release, release);
+        if (acquired) {
+          if (!deferRelease) {
+            release();
+          }
+        } else {
+          void Promise.all([previous, readDrain]).then(release, release);
+        }
       }
     }
+  }
+
+  private beginReadOperation(): void {
+    if (this.activeReadOperations === 0) {
+      this.readDrainPromise = new Promise<void>((resolvePromise) => {
+        this.readDrainRelease = resolvePromise;
+      });
+    }
+    this.activeReadOperations += 1;
+  }
+
+  private endReadOperation(): void {
+    this.activeReadOperations = Math.max(0, this.activeReadOperations - 1);
+    const next = this.readPermitWaiters.shift();
+    if (next) {
+      next();
+    } else if (this.activeReadOperations === 0) {
+      this.readDrainRelease?.();
+      this.readDrainRelease = undefined;
+    }
+  }
+
+  private async acquireReadPermit(signal: AbortSignal | undefined, timeoutMs: number): Promise<void> {
+    if (this.activeReadOperations < MAX_PARALLEL_READ_OPERATIONS && this.readPermitWaiters.length === 0) {
+      this.beginReadOperation();
+      return;
+    }
+    await new Promise<void>((resolvePromise, reject) => {
+      let settled = false;
+      const waiter = (): void => finish(resolvePromise);
+      const removeWaiter = (): void => {
+        const index = this.readPermitWaiters.indexOf(waiter);
+        if (index >= 0) {
+          this.readPermitWaiters.splice(index, 1);
+        }
+      };
+      const finish = (callback: () => void): void => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
+        removeWaiter();
+        callback();
+      };
+      const onAbort = (): void => finish(() => reject(new AppError("CANCELLED", "The browser action was cancelled.")));
+      const timer = setTimeout(() => finish(() => reject(new AppError("BROWSER_QUEUE_TIMEOUT", `The browser operation waited more than ${timeoutMs}ms for a read permit.`, { retryable: true, details: { timeoutMs } }))), Math.max(1, Math.floor(timeoutMs)));
+      this.readPermitWaiters.push(waiter);
+      if (signal?.aborted) {
+        onAbort();
+      } else {
+        signal?.addEventListener("abort", onAbort, { once: true });
+      }
+    });
+    this.beginReadOperation();
   }
 }
 
@@ -4364,6 +5312,21 @@ function isPuppeteerTimeoutError(error: unknown): boolean {
   return /waiting failed:\s*\d+ms exceeded/i.test(message);
 }
 
+function isElementVisibilityError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /(?:node|element) is either not visible|not an HTMLElement|element is not visible|outside (?:of )?the viewport|could not scroll into view|not clickable/i.test(message);
+}
+
+function isTransientClickError(error: unknown): boolean {
+  if (error instanceof AppError && ["STALE_REFERENCE", "FRAME_MISMATCH", "USE_UPLOAD_TOOL", "USE_SELECT_TOOL", "USE_PDF_TOOL"].includes(error.code)) {
+    return false;
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  return isElementVisibilityError(error)
+    || isMissingElementError(error)
+    || /(?:detached from document|not attached to the DOM)/i.test(message);
+}
+
 function normalizeBrowserOperationError(error: unknown, signal?: AbortSignal): unknown {
   if (error instanceof AppError) {
     return error;
@@ -4373,6 +5336,15 @@ function normalizeBrowserOperationError(error: unknown, signal?: AbortSignal): u
   }
   if (isPuppeteerTimeoutError(error)) {
     return new AppError("BROWSER_TIMEOUT", "The browser operation exceeded its timeout.", { retryable: true, cause: error });
+  }
+  if (isElementVisibilityError(error)) {
+    return new AppError("ELEMENT_NOT_VISIBLE", "The browser target is not visible or cannot be clicked in the current viewport.", { retryable: true, cause: error });
+  }
+  if (isMissingElementError(error)) {
+    return new AppError("ELEMENT_NOT_FOUND", "The requested browser element was not found.", { cause: error });
+  }
+  if (isInvalidSelectorError(error)) {
+    return new AppError("SELECTOR_INVALID", "The browser selector is invalid.", { cause: error });
   }
   return error;
 }
@@ -4530,6 +5502,53 @@ function sanitizeEvaluateResult(value: unknown): unknown {
   return { value: redacted, untrustedSource: "page" };
 }
 
+function isCanonicalNativeTemporalInputValue(inputType: string, value: string): boolean {
+  switch (inputType) {
+    case "date": {
+      const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+      if (!match) {
+        return false;
+      }
+      const year = Number(match[1]);
+      const month = Number(match[2]);
+      const day = Number(match[3]);
+      if (year < 1 || month < 1 || month > 12 || day < 1) {
+        return false;
+      }
+      const daysInMonth = [31, isLeapYear(year) ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1];
+      return day <= daysInMonth;
+    }
+    case "time":
+      return /^(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d{1,9})?)?$/.test(value);
+    case "month": {
+      const match = /^(\d{4})-(0[1-9]|1[0-2])$/.exec(value);
+      return match !== null && Number(match[1]) >= 1;
+    }
+    case "week": {
+      const match = /^(\d{4})-W(0[1-9]|[1-4]\d|5[0-3])$/.exec(value);
+      if (!match) {
+        return false;
+      }
+      const year = Number(match[1]);
+      return year >= 1 && Number(match[2]) <= isoWeeksInYear(year);
+    }
+    default:
+      return false;
+  }
+}
+
+function isLeapYear(year: number): boolean {
+  return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+}
+
+function isoWeeksInYear(year: number): number {
+  const firstDay = new Date(0);
+  firstDay.setUTCFullYear(year, 0, 1);
+  firstDay.setUTCHours(0, 0, 0, 0);
+  const weekday = firstDay.getUTCDay() || 7;
+  return weekday === 4 || (weekday === 3 && isLeapYear(year)) ? 53 : 52;
+}
+
 function boundAccessibilityNodes<T>(nodes: T[], maxChars: number): { nodes: T[]; truncated: boolean } {
   const limit = Number.isFinite(maxChars) ? Math.max(2, Math.floor(maxChars)) : 2;
   const bounded: T[] = [];
@@ -4598,6 +5617,11 @@ function isSelectorSyntaxError(error: unknown): boolean {
   return /(?:failed to execute ['"]?queryselector|not a valid selector|syntaxerror.*selector|invalid selector)/i.test(message);
 }
 
+function looksLikeExplicitSelector(target: string): boolean {
+  const normalized = target.trim();
+  return /^(?:[#.:[>+~*]|(?:pierce|aria|xpath)\/)/i.test(normalized);
+}
+
 function isNoHistoryNavigationError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return /history (?:entry|item).*not found|no history entry/i.test(message);
@@ -4635,6 +5659,11 @@ function framePath(frame: Frame): string {
   const identifier = `frame-${randomUUID().slice(0, 12)}`;
   FRAME_IDS.set(frame, identifier);
   return identifier;
+}
+
+function frameProtocolId(frame?: Frame): string | undefined {
+  const id = (frame as unknown as { _id?: unknown } | undefined)?._id;
+  return typeof id === "string" && id ? id : undefined;
 }
 
 function isFrameDetached(frame: Frame): boolean {
@@ -4776,11 +5805,11 @@ async function promiseSettledWithin(promise: Promise<unknown>, timeoutMs: number
 }
 
 async function wait(milliseconds: number, signal?: AbortSignal): Promise<void> {
-  if (milliseconds <= 0) {
-    return;
-  }
   if (signal?.aborted) {
     throw new AppError("CANCELLED", "The browser action was cancelled.");
+  }
+  if (milliseconds <= 0) {
+    return;
   }
   await new Promise<void>((resolvePromise, reject) => {
     const cleanup = (): void => signal?.removeEventListener("abort", abort);
