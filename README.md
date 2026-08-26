@@ -55,7 +55,9 @@ Talk to your harness normally. It can call `browser_navigate` → `browser_snaps
 
 ## Benchmarks
 
-Compared with [Browser Use MCP](https://github.com/browser-use/browser-use) · [![Browser Use GitHub stars](https://img.shields.io/github/stars/browser-use/browser-use?style=social)](https://github.com/browser-use/browser-use)
+Compared with [Browser Use MCP](https://github.com/browser-use/browser-use) · [![Browser Use GitHub stars](https://img.shields.io/github/stars/browser-use/browser-use?style=social)](https://github.com/browser-use/browser-use) 
+
+(Date Of Testing -Wednesday 26 August 2026-) 
 
 | Benchmark | Metric | SmoothOperator | Browser Use MCP |
 | --- | --- | ---: | ---: |
