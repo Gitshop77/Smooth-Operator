@@ -24,7 +24,7 @@ git clone https://github.com/Gitshop77/Smooth-Operator.git && cd Smooth-Operator
 
 The npm registry name is `smooth-operator-mcp` (plain `smooth-operator` is an unrelated library).
 
-Wizard (default): 7 prompts — mode (managed/private vs personal Chrome connect vs disabled), browser (any installed Chromium-based browser: Chrome/Brave/Edge/Chromium/Vivaldi/Arc/Opera, persisted as browser.executablePath), headless, allowed/blocked domains, allowEval, dataDir, browserUrl. Validation via zod. `launchPersonalChrome` spawns `chrome --remote-debugging-port=9222 --user-data-dir=~/.smooth-operator/personal-chrome`, polls `http://127.0.0.1:9222/json/version` (300ms×33). `--yes` uses defaults: managed, headless false, allowEval false, no domains. Persists to `~/.smooth-operator/config.json` (0600, symlink-safe, backup). Bare `smooth-operator install` prompts for the harness on a TTY (piped/CI prints usage); on re-run the wizard's choices are authoritative for mode/headless/domains/allowEval — previously persisted values for those keys are overwritten while unrelated settings merge.
+Wizard (default): 7 prompts — mode (managed/private vs personal Chrome connect vs disabled), browser (any installed Chromium-based browser: Chrome/Brave/Edge/Chromium/Vivaldi/Arc/Opera, persisted as browser.executablePath), headless, allowed domains, blocked domains, allowEval, and dataDir. Validation via zod. Personal-Chrome mode launches `chrome --remote-debugging-port=9222 --user-data-dir=~/.smooth-operator/personal-chrome`, polls `http://127.0.0.1:9222/json/version` (300ms×33), and derives `browserUrl`; the URL is not a prompt. `--yes` uses defaults: managed, headless false, allowEval false, no domains. Persists to `~/.smooth-operator/config.json` (0600, symlink-safe, backup). Bare `smooth-operator install` prompts for the harness on a TTY (piped/CI prints usage); on re-run the wizard's choices are authoritative for mode/headless/domains/allowEval — previously persisted values for those keys are overwritten while unrelated settings merge.
 
 ## Browser
 
@@ -142,7 +142,7 @@ tests/, docs/mcp-server.md, docs/harnesses.md
 ## Verify
 
 ~~~sh
-npm run lint && npm run typecheck && npm test && npm run test:coverage && npm run dead-code && npm run build
+npm run lint && npm run typecheck && npm test && npm run test:coverage && npm run dead-code && npm run build && npm run test:browser:live && npm run package:smoke:install && npm audit --audit-level=high && npm audit signatures
 ~~~
 
-Check `rg` for stale extension/provider/model refs. CI also runs live browser test with discovered Chrome.
+Check `rg` for stale extension/provider/model refs and removed benchmark commands. CI also runs the isolated live browser contract with discovered Chrome.

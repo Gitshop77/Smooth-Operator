@@ -1,4 +1,5 @@
 import { createServer, type Server } from "node:http";
+import type { ChildProcess } from "node:child_process";
 import { access, mkdtemp, rm } from "node:fs/promises";
 import { once } from "node:events";
 import { tmpdir } from "node:os";
@@ -15,6 +16,68 @@ import { ServerRuntime } from "@/server/runtime";
 import { testConfig } from "./helpers";
 
 const executablePath = process.env.SMOOTH_OPERATOR_TEST_BROWSER_EXECUTABLE ?? findChromeExecutable()?.path;
+const LIVE_ACTION_TIMEOUT_MS = 60_000;
+const LIVE_CONNECT_TIMEOUT_MS = 60_000;
+const PROFILE_CLEANUP_ATTEMPTS = 24;
+const PROFILE_CLEANUP_DELAY_MS = 250;
+
+async function waitForChildExit(child: ChildProcess | undefined, timeoutMs = 5_000): Promise<void> {
+  if (!child || child.exitCode !== null || child.signalCode !== null) {
+    return;
+  }
+  await new Promise<void>((resolve) => {
+    let settled = false;
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.off("close", finish);
+      child.off("error", finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, timeoutMs);
+    child.once("close", finish);
+    child.once("error", finish);
+  });
+}
+
+async function stopChild(child: ChildProcess | undefined): Promise<void> {
+  if (!child || child.exitCode !== null || child.signalCode !== null) {
+    return;
+  }
+  try {
+    child.kill("SIGTERM");
+  } catch {
+    // The browser may have exited between the state check and kill.
+  }
+  await waitForChildExit(child, 2_000);
+  if (child.exitCode === null && child.signalCode === null) {
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      // The browser may have exited between the state check and kill.
+    }
+    await waitForChildExit(child, 5_000);
+  }
+}
+
+async function removeDirectoryAfterBrowserExit(path: string): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < PROFILE_CLEANUP_ATTEMPTS; attempt += 1) {
+    try {
+      await rm(path, { recursive: true, force: true, maxRetries: 3, retryDelay: PROFILE_CLEANUP_DELAY_MS });
+      return;
+    } catch (error) {
+      lastError = error;
+      const code = (error as NodeJS.ErrnoException).code;
+      if (!["EBUSY", "EACCES", "EPERM", "ENOTEMPTY"].includes(code ?? "") || attempt + 1 >= PROFILE_CLEANUP_ATTEMPTS) {
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, PROFILE_CLEANUP_DELAY_MS));
+    }
+  }
+  throw lastError;
+}
 
 describe("live browser contract", () => {
   let fixture: Server;
@@ -77,10 +140,11 @@ describe("live browser contract", () => {
     }
     baseUrl = `http://127.0.0.1:${address.port}`;
     dataDir = await mkdtemp(join(tmpdir(), "smooth-operator-live-"));
+    const base = testConfig();
     const config = testConfig({
       dataDir,
-      browser: { ...testConfig().browser, mode: "launch", executablePath, headless: true },
-      security: { ...testConfig().security, allowedDomains: ["127.0.0.1"], allowedFileRoots: [dataDir] },
+      browser: { ...base.browser, mode: "launch", executablePath, headless: true, actionTimeoutMs: LIVE_ACTION_TIMEOUT_MS, connectTimeoutMs: LIVE_CONNECT_TIMEOUT_MS, cdpTimeoutMs: LIVE_CONNECT_TIMEOUT_MS },
+      security: { ...base.security, allowedDomains: ["127.0.0.1"], allowedFileRoots: [dataDir] },
     });
     service = new BrowserService(config, new SecurityPolicy(config), new Logger("error", {}, () => undefined));
   }, 30_000);
@@ -89,7 +153,7 @@ describe("live browser contract", () => {
     await service?.close();
     await new Promise<void>((resolve) => fixture?.close(() => resolve()));
     if (dataDir) {
-      await rm(dataDir, { recursive: true, force: true });
+      await removeDirectoryAfterBrowserExit(dataDir);
     }
   });
 
@@ -191,15 +255,16 @@ describe("live browser contract", () => {
   it("launches managed Chrome, protects its profile, and reattaches after restart", async () => {
     const managedDataDir = await mkdtemp(join(tmpdir(), "smooth-operator-managed-live-"));
     const profile = join(managedDataDir, "browser");
+    const base = testConfig();
     const config = testConfig({
       dataDir: managedDataDir,
-      browser: { ...testConfig().browser, mode: "managed", executablePath, headless: true, userDataDir: profile },
-      security: { ...testConfig().security, allowedDomains: ["127.0.0.1"], allowedFileRoots: [managedDataDir] },
+      browser: { ...base.browser, mode: "managed", executablePath, headless: true, userDataDir: profile, actionTimeoutMs: LIVE_ACTION_TIMEOUT_MS, connectTimeoutMs: LIVE_CONNECT_TIMEOUT_MS, cdpTimeoutMs: LIVE_CONNECT_TIMEOUT_MS },
+      security: { ...base.security, allowedDomains: ["127.0.0.1"], allowedFileRoots: [managedDataDir] },
     });
     const first = await ServerRuntime.create(config);
     let competing: ServerRuntime | undefined;
     let restarted: ServerRuntime | undefined;
-    let firstProcess: { kill(signal: string): void } | null | undefined;
+    let firstProcess: ChildProcess | null | undefined;
     try {
       await expect(first.listTabs()).resolves.toEqual(expect.any(Array));
       await expect(access(join(profile, "DevToolsActivePort"))).resolves.toBeUndefined();
@@ -208,7 +273,7 @@ describe("live browser contract", () => {
       await competing.close();
       competing = undefined;
 
-      const internal = first.browser as unknown as { browser?: { disconnect(): Promise<void>; process(): { kill(signal: string): void } | null } };
+      const internal = first.browser as unknown as { browser?: { disconnect(): Promise<void>; process(): ChildProcess | null } };
       firstProcess = internal.browser?.process() ?? undefined;
       await internal.browser?.disconnect();
       await first.close();
@@ -222,23 +287,8 @@ describe("live browser contract", () => {
       // The disconnected `first` browser is no longer managed by the service,
       // so kill its child process directly to release the profile directory
       // before teardown removes it.
-      try {
-        firstProcess?.kill("SIGKILL");
-      } catch {
-        // already gone
-      }
-      for (let attempt = 0; attempt < 10; attempt++) {
-        try {
-          await rm(managedDataDir, { recursive: true, force: true });
-          break;
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code === "ENOTEMPTY" && attempt < 9) {
-            await new Promise((resolve) => setTimeout(resolve, 250));
-            continue;
-          }
-          throw error;
-        }
-      }
+      await stopChild(firstProcess ?? undefined);
+      await removeDirectoryAfterBrowserExit(managedDataDir);
     }
   }, 60_000);
 });

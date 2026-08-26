@@ -1,10 +1,10 @@
 # SmoothOperator
 
-Give your AI a real Chrome. SmoothOperator is a tiny MCP server — your harness reasons, it clicks, types, and scrapes. No model keys. No hidden loop.
+Give your AI a real Chrome. SmoothOperator is a lightweight, production-grade MCP server for secure, reliable browser control. Your harness supplies the reasoning; SmoothOperator handles navigation, interaction, extraction, and browser lifecycle. No model keys. No hidden planner.
 
-## Install — one command
+## Install — directly to your harness
 
-Pick your harness. Run one line. Restart harness.
+Choose your harness, add SmoothOperator directly to it, and restart the harness.
 
 **From npm** (`smooth-operator-mcp`):
 ~~~sh
@@ -27,7 +27,7 @@ Or straight from GitHub:
 npm install -g github:Gitshop77/Smooth-Operator && smooth-operator install opencode
 ~~~
 
-Wizard asks 7 questions (browser mode, executable, headless, allowed/blocked domains, JavaScript, and data directory). Run `smooth-operator install` with no harness to pick one interactively (TTY only; piped/CI runs print usage and exit). `--yes` skips every prompt, so give it a target: `smooth-operator install opencode --yes`. Personal Chrome → wizard launches Chrome on `9222` and derives `browserUrl` for you.
+The wizard asks 7 focused questions covering browser mode, executable, headless operation, domain policy, page JavaScript, and the data directory. Run `smooth-operator install` with no harness to pick one interactively (TTY only; piped/CI runs print usage and exit). `--yes` applies the recommended defaults, so give it a target: `smooth-operator install opencode --yes`. Personal Chrome mode launches a dedicated debugging profile on `9222` and derives `browserUrl` automatically.
 
 Requires Node 22.23.2+ and Chrome. Profile at `~/.smooth-operator/browser` — sign in once.
 
@@ -35,35 +35,37 @@ Verify: `smooth-operator --help` and `server_health` / `browser_doctor` appear a
 
 ## What it does
 
-- Click, type, select, scroll, hover
-- Extract, find text, snapshot, screenshot, PDF, upload
-- Handle tabs, dialogs, cookies, storage
-- Search web (DuckDuckGo)
+- Navigate and interact with real websites: click, type, select, scroll, hover, and key input
+- Inspect pages with snapshots, accessibility trees, HTML, styles, text search, and bounded extraction
+- Work across tabs, frames, popups, shadow DOM, dialogs, cookies, storage, downloads, screenshots, and PDFs
+- Search the web through bounded DuckDuckGo retrieval
 
-Ask: *“Scrape pricing into a table”* / *“Fill this form with ~/resume.pdf”* / *“Download monthly report as PDF”*
+Ask: *“Scrape pricing into a table”*, *“Fill this form with ~/resume.pdf”*, or *“Download the monthly report as a PDF.”*
 
 ## How to use
 
-Talk to your harness normally. It will call `browser_navigate` → `browser_snapshot` → `browser_click` etc. Logins/CAPTCHAs pause for you in the Chrome window.
+Talk to your harness normally. It can call `browser_navigate` → `browser_snapshot` → `browser_click` and the rest of the MCP surface as needed. Logins and CAPTCHA challenges pause for human handoff in the Chrome window.
 
 ## Why
 
-- Zero config — headed, private, persistent Chrome
-- Private — `~/.smooth-operator`, 0600 permissions
-- Safe — domain policy, bounded outputs, JS off by default (`SMOOTH_OPERATOR_ALLOW_EVAL`)
-- Works — stdio default, HTTP optional
+- Zero setup — managed, headed, persistent Chrome by default
+- Secure by default — domain and file policy, bounded outputs, redaction, and JavaScript disabled unless explicitly enabled
+- Reliable — private profiles, stale-reference recovery, reconnect handling, and structured errors
+- Flexible — stdio by default, Streamable HTTP when you need it, plus connect and disabled modes
 
 ## Benchmarks
+
+Compared with [Browser Use MCP](https://github.com/browser-use/browser-use) · [![Browser Use GitHub stars](https://img.shields.io/github/stars/browser-use/browser-use?style=social)](https://github.com/browser-use/browser-use)
 
 | Benchmark | Metric | SmoothOperator | Browser Use MCP |
 | --- | --- | ---: | ---: |
 | Live Web (8 sites, 32 episodes) | URL success | **32/32** | 23/32 |
 | Live Web | Page-text quality | **26/32** | 21/32 |
 | Live Web | Combined success | **26/32** | 18/32 |
-| Live Web | Task latency mean / p95 | **1,357.697 / 2,957.241 ms** | 4,603.811 / 30,780.107 ms |
-| Live Web | Navigation p95 | **2,130.255 ms** | 4,320.076 ms |
-| Live Web | Click p95 | 919.812 ms | **142.231 ms** |
-| Live Web | MCP call p95 | **942.979 ms** | 2,095.407 ms |
+| Live Web | Task latency mean / p95 | **1,358 / 2,957 ms** | 4,604 / 30,780 ms |
+| Live Web | Navigation p95 | **2,130 ms** | 4,320 ms |
+| Live Web | Click p95 | 920 ms | **142 ms** |
+| Live Web | MCP call p95 | **943 ms** | 2,095 ms |
 | Live Web | Trace errors | **0** | 10 |
 | MiniWoB++ 0.14.3 (125 tasks) | Reward = 1 | **124/125** | 89/125 |
 | MiniWoB++ | Attempts | **125** | 125 |
