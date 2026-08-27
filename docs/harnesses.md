@@ -1,8 +1,8 @@
 # Harness installation
 
-## Interactive wizard (one-command)
+## Interactive wizard (directly to your harness)
 
-`smooth-operator install <harness>` is interactive by default — it asks 7 curated questions (browser mode, browser executable, headless, allowed domains, blocked domains, page JavaScript, and data directory) with recommended defaults in brackets. Omitting `<harness>` is allowed too: on a TTY the installer prompts for the target first (default `opencode`), while piped or CI environments print usage and exit instead. Use `smooth-operator install opencode --yes` to skip prompts and use recommended defaults. The wizard saves its choices to `~/.smooth-operator/config.json` (0600, symlink-safe) — mode, executable path, headless, domains, and allowEval are written exactly as answered on every run — and then registers the harness. Personal-Chrome mode derives `browserUrl` after launching the helper on port 9222; it is not a separate prompt.
+`smooth-operator install <harness>` is interactive by default — it asks 7 curated questions (browser mode, browser executable, headless, allowed domains, blocked domains, page JavaScript, and data directory) with recommended defaults in brackets. Omitting `<harness>` is allowed too: on a TTY the installer prompts for the target first (default `opencode`), while piped or CI environments print usage and exit instead. Use `smooth-operator install opencode --yes` to skip prompts and use recommended defaults. The wizard normalizes and validates its choices before saving them to `~/.smooth-operator/config.json` (0600, bounded, owner-only, and symlink-safe). Mode, executable path, headless, domains, and allowEval are authoritative on every run while unrelated settings are preserved, and the harness is then registered. Personal-Chrome mode derives `browserUrl` after launching the helper on port 9222; it is not a separate prompt.
 
 ### Personal Chrome (connect) helper
 

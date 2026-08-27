@@ -6,7 +6,7 @@ import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 
 import { createMcpHandler } from "@modelcontextprotocol/server";
-import { hostHeaderValidation, localhostHostValidation, localhostOriginValidation, originValidation, toNodeHandler } from "@modelcontextprotocol/node";
+import { toNodeHandler } from "@modelcontextprotocol/node";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 
 import { loadServerConfig } from "./config";
@@ -54,6 +54,7 @@ const HTTP_HANDLER_SHUTDOWN_TIMEOUT_MS = 5_000;
 const HTTP_REQUEST_TIMEOUT_MS = 120_000;
 const HTTP_HEADERS_TIMEOUT_MS = 15_000;
 const HTTP_BODY_READ_TIMEOUT_MS = 30_000;
+const LOCALHOST_HOSTNAMES = ["localhost", "127.0.0.1", "[::1]"] as const;
 
 export async function main(args = process.argv.slice(2)): Promise<void> {
   if (args[0] === "install") {
@@ -190,8 +191,8 @@ async function serveHttp(runtime: ServerRuntime, shutdown: (reason: string) => P
     onerror: (error) => runtime.logger.error("MCP HTTP error", safeErrorDiagnostic(error)),
   });
   const nodeHandler = toNodeHandler(handler, { onerror: (error) => runtime.logger.error("MCP HTTP adapter error", safeErrorDiagnostic(error)) });
-  const validateHost = config.http.allowRemote ? hostHeaderValidation(config.http.allowedHosts) : localhostHostValidation();
-  const validateOrigin = config.http.allowRemote ? originValidation(config.http.allowedOrigins) : localhostOriginValidation();
+  const allowedHostnames = config.http.allowRemote ? config.http.allowedHosts : LOCALHOST_HOSTNAMES;
+  const allowedOriginHostnames = config.http.allowRemote ? config.http.allowedOrigins : LOCALHOST_HOSTNAMES;
   const activeHttpRequests = new Set<Promise<void>>();
   const activeHttpStreams = new Set<Promise<void>>();
   let accepting = true;
@@ -207,7 +208,7 @@ async function serveHttp(runtime: ServerRuntime, shutdown: (reason: string) => P
     if (request.aborted) {
       return;
     }
-    if (!validateHost(request, response) || !validateOrigin(request, response)) {
+    if (!validateRequestHost(request, response, allowedHostnames) || !validateRequestOrigin(request, response, allowedOriginHostnames)) {
       return;
     }
     setCorsHeaders(request, response);
@@ -267,15 +268,20 @@ async function serveHttp(runtime: ServerRuntime, shutdown: (reason: string) => P
         if (response.destroyed || response.writableEnded) {
           return;
         }
+        if (response.headersSent) {
+          // A handler that already started a response cannot be given a
+          // second stable JSON body. Closing the connection avoids appending
+          // an error object to a partially streamed MCP response.
+          response.destroy();
+          return;
+        }
         const normalized = asAppError(error);
         const status = normalized.status >= 400 && normalized.status <= 599 ? normalized.status : 500;
-          if (!response.headersSent) {
-            if (status === 408 || status === 413 || status === 499) {
-              response.setHeader("connection", "close");
-              closeIncompleteRequestAfterResponse(request, response);
-            }
-          response.writeHead(status, { "content-type": "application/json" });
+        if (status === 408 || status === 413 || status === 499) {
+          response.setHeader("connection", "close");
+          closeIncompleteRequestAfterResponse(request, response);
         }
+        response.writeHead(status, { "content-type": "application/json" });
         if (response.writableEnded || response.destroyed) {
           return;
         }
@@ -351,6 +357,49 @@ function requestPathMatches(request: IncomingMessage, expectedPath: string): boo
   } catch {
     return false;
   }
+}
+
+function validateRequestHost(request: IncomingMessage, response: import("node:http").ServerResponse, allowedHostnames: readonly string[]): boolean {
+  const rawHost = request.headers.host;
+  if (typeof rawHost !== "string" || !rawHost || rawHost.length > 255 || /[\u0000-\u0020/?#@]/.test(rawHost)) {
+    return rejectHttpHeader(request, response, "Host header is not allowed.");
+  }
+  try {
+    const parsed = new URL(`http://${rawHost}`);
+    if (parsed.username || parsed.password || parsed.pathname !== "/" || parsed.search || parsed.hash || !allowedHostnames.includes(parsed.hostname)) {
+      return rejectHttpHeader(request, response, "Host header is not allowed.");
+    }
+  } catch {
+    return rejectHttpHeader(request, response, "Host header is not allowed.");
+  }
+  return true;
+}
+
+function validateRequestOrigin(request: IncomingMessage, response: import("node:http").ServerResponse, allowedOriginHostnames: readonly string[]): boolean {
+  const rawOrigin = request.headers.origin;
+  if (rawOrigin === undefined || rawOrigin === "") {
+    return true;
+  }
+  if (typeof rawOrigin !== "string" || rawOrigin.length > 2_048 || /[\u0000-\u0020\u007f]/.test(rawOrigin)) {
+    return rejectHttpHeader(request, response, "Origin header is not allowed.");
+  }
+  try {
+    const parsed = new URL(rawOrigin);
+    if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || parsed.username || parsed.password || parsed.pathname !== "/" || parsed.search || parsed.hash || !allowedOriginHostnames.includes(parsed.hostname)) {
+      return rejectHttpHeader(request, response, "Origin header is not allowed.");
+    }
+  } catch {
+    return rejectHttpHeader(request, response, "Origin header is not allowed.");
+  }
+  return true;
+}
+
+function rejectHttpHeader(request: IncomingMessage, response: import("node:http").ServerResponse, message: string): false {
+  response.setHeader("connection", "close");
+  closeIncompleteRequestAfterResponse(request, response);
+  response.writeHead(403, { "content-type": "application/json" });
+  response.end(JSON.stringify({ jsonrpc: "2.0", error: { code: -32_000, message }, id: null }));
+  return false;
 }
 
 function setCorsHeaders(request: IncomingMessage, response: import("node:http").ServerResponse): void {
@@ -495,7 +544,10 @@ function authorized(request: IncomingMessage, token: string | undefined): boolea
     return true;
   }
   const header = request.headers.authorization;
-  const match = header?.match(/^Bearer[ \t]+(.+)$/i);
+  if (typeof header !== "string") {
+    return false;
+  }
+  const match = header.match(/^Bearer[ \t]+(.+)$/i);
   if (!match) {
     return false;
   }

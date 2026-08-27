@@ -119,6 +119,21 @@ describe("harness installer", () => {
     }
   });
 
+  it("rejects a merged configuration that would exceed the persistence bound", async () => {
+    const directory = await makeDirectory("smooth-operator-installer-generated-large-");
+    const configPath = join(directory, "config.json");
+    const original = JSON.stringify({ mcpServers: {}, keep: "x".repeat(1_999_900) });
+    expect(Buffer.byteLength(original, "utf8")).toBeLessThan(2_000_000);
+    try {
+      await writeFile(configPath, original);
+      await expect(installHarness("claude-desktop", configOptions(configPath))).rejects.toThrow(/generated configuration.*2000000 bytes or smaller/);
+      expect(await readFile(configPath, "utf8")).toBe(original);
+      expect(await readdir(directory)).toEqual(["config.json"]);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("fails closed for a conflicting existing server and preserves unrelated data", async () => {
     const directory = await makeDirectory("smooth-operator-installer-conflict-");
     const configPath = join(directory, "config.json");

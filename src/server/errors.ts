@@ -3,6 +3,13 @@ import type { CallToolResult } from "@modelcontextprotocol/server";
 import { redactValue } from "./logger";
 
 type ErrorDetails = Record<string, unknown>;
+const ERROR_CODE_MAX_CHARS = 200;
+const ERROR_MESSAGE_MAX_CHARS = 4_000;
+const ERROR_DETAILS_MAX_BYTES = 8_000;
+const ERROR_DETAIL_VALUE_MAX_CHARS = 1_000;
+const ERROR_TRUNCATION_MARKER = "…[TRUNCATED]";
+const ERROR_CODE_PATTERN = /^[A-Z][A-Z0-9_]*$/;
+const UTF8_ENCODER = new TextEncoder();
 
 export class AppError extends Error {
   readonly code: string;
@@ -45,7 +52,11 @@ export function asAppError(error: unknown, fallbackCode = "INTERNAL_ERROR"): App
 /** Return bounded, redacted diagnostics. Omits `cause` which may contain secrets. */
 export function safeErrorDiagnostic(error: unknown): { code: string; message: string; retryable: boolean } {
   const normalized = asAppError(error);
-  return redactValue({ code: normalized.code, message: normalized.message, retryable: normalized.retryable }) as {
+  return {
+    code: safeErrorCode(normalized.code),
+    message: safeErrorMessage(normalized.message),
+    retryable: normalized.retryable,
+  } as {
     code: string;
     message: string;
     retryable: boolean;
@@ -60,13 +71,13 @@ export function safeErrorPayload(error: unknown): {
 } {
   const normalized = asAppError(error);
   const payload = {
-    code: normalized.code,
-    message: normalized.message,
+    code: safeErrorCode(normalized.code),
+    message: safeErrorMessage(normalized.message),
     retryable: normalized.retryable,
-    ...(normalized.details ? { details: normalized.details } : {}),
+    ...(normalized.details ? { details: boundErrorDetails(normalized.details) } : {}),
   };
 
-  return redactValue(payload) as typeof payload;
+  return payload as typeof payload;
 }
 
 export function toolError(error: unknown): CallToolResult {
@@ -112,4 +123,124 @@ export function requireField<T>(value: T | undefined, field: string): T {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function safeErrorCode(value: unknown): string {
+  if (typeof value !== "string") {
+    return "INTERNAL_ERROR";
+  }
+  const code = truncateUtf8(value, ERROR_CODE_MAX_CHARS);
+  return ERROR_CODE_PATTERN.test(code) ? code : "INTERNAL_ERROR";
+}
+
+function safeErrorMessage(value: unknown): string {
+  const redacted = redactValue(typeof value === "string" ? value : "An unexpected error occurred.");
+  const message = typeof redacted === "string" ? redacted : "An unexpected error occurred.";
+  return truncateWithMarker(message, ERROR_MESSAGE_MAX_CHARS);
+}
+
+function boundErrorDetails(value: unknown): ErrorDetails {
+  const safe = redactValue(value);
+  if (jsonByteLength(safe) <= ERROR_DETAILS_MAX_BYTES) {
+    return isRecord(safe) ? safe : { value: safe };
+  }
+  if (!isRecord(safe)) {
+    return {
+      truncated: true,
+      mcpOutputTruncated: true,
+      warning: "Error details were omitted because they exceeded the MCP response budget.",
+    };
+  }
+
+  const bounded = Object.create(null) as ErrorDetails;
+  const copyScalar = (key: string): void => {
+    const item = safe[key];
+    if (typeof item === "string") {
+      bounded[key] = truncateUtf8(item, ERROR_DETAIL_VALUE_MAX_CHARS);
+    } else if (typeof item === "number" || typeof item === "boolean" || item === null) {
+      bounded[key] = item;
+    }
+  };
+  for (const key of [
+    "classification", "status", "attempts", "maxAttempts", "retryAfterMs", "timeoutMs",
+    "failedIndex", "failedAction", "completedActions", "hint", "warning", "truncated",
+    "mcpOutputTruncated", "omittedItems", "resultsTruncated", "omittedResults",
+  ]) {
+    copyScalar(key);
+  }
+
+  for (const key of ["issues", "completedResults"]) {
+    const sourceItems = safe[key];
+    if (!Array.isArray(sourceItems)) {
+      continue;
+    }
+    const retained: unknown[] = [];
+    for (const item of sourceItems) {
+      const boundedItem = typeof item === "string"
+        ? truncateWithMarker(item, ERROR_DETAIL_VALUE_MAX_CHARS)
+        : jsonByteLength(item) <= ERROR_DETAIL_VALUE_MAX_CHARS ? item : { truncated: true };
+      const candidate = { ...bounded, [key]: [...retained, boundedItem] };
+      if (jsonByteLength(candidate) > ERROR_DETAILS_MAX_BYTES - 256) {
+        break;
+      }
+      retained.push(boundedItem);
+    }
+    bounded[key] = retained;
+    if (retained.length < sourceItems.length) {
+      if (key === "completedResults") {
+        bounded.resultsTruncated = true;
+        bounded.omittedResults = sourceItems.length - retained.length;
+      } else {
+        bounded.issuesTruncated = true;
+        bounded.omittedIssues = sourceItems.length - retained.length;
+      }
+    }
+  }
+
+  if (jsonByteLength(bounded) <= ERROR_DETAILS_MAX_BYTES) {
+    return bounded;
+  }
+  return {
+    truncated: true,
+    mcpOutputTruncated: true,
+    warning: "Error details were omitted because they exceeded the MCP response budget.",
+  };
+}
+
+function jsonByteLength(value: unknown): number {
+  try {
+    const json = JSON.stringify(value);
+    return json === undefined ? 0 : UTF8_ENCODER.encode(json).byteLength;
+  } catch {
+    return Number.POSITIVE_INFINITY;
+  }
+}
+
+function truncateWithMarker(value: string, maxBytes: number): string {
+  const bytes = UTF8_ENCODER.encode(value);
+  if (bytes.byteLength <= maxBytes) {
+    return value;
+  }
+  const markerBytes = UTF8_ENCODER.encode(ERROR_TRUNCATION_MARKER).byteLength;
+  return `${truncateUtf8(value, Math.max(0, maxBytes - markerBytes))}${ERROR_TRUNCATION_MARKER}`;
+}
+
+function truncateUtf8(value: string, maxBytes: number): string {
+  const bytes = UTF8_ENCODER.encode(value);
+  if (bytes.byteLength <= maxBytes) {
+    return value;
+  }
+  const decoder = new TextDecoder();
+  let low = 0;
+  let high = Math.min(bytes.byteLength, Math.max(0, Math.floor(maxBytes)));
+  while (low < high) {
+    const midpoint = Math.ceil((low + high) / 2);
+    const candidate = decoder.decode(bytes.slice(0, midpoint));
+    if (UTF8_ENCODER.encode(candidate).byteLength <= maxBytes) {
+      low = midpoint;
+    } else {
+      high = midpoint - 1;
+    }
+  }
+  return decoder.decode(bytes.slice(0, low));
 }

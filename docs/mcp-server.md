@@ -145,15 +145,15 @@ are answered only after the same Host and Origin checks.
 
 ## Browser lifecycle
 
-The server manages one headed, persistent private agent-Chrome session by
-default. On the first browser tool call it discovers an installed Google Chrome,
+The server manages one headed, persistent private Chromium-based browser session
+by default. On the first browser tool call it discovers an installed browser,
 launches it with `${SMOOTH_OPERATOR_DATA_DIR}/browser` as a non-default profile,
 and records its loopback DevTools endpoint for later reattachment. Sign in once
 in the visible window; its sessions persist in that private profile. The
 `browser_doctor` tool reports executable resolution and endpoint state without
 evaluating page content.
 
-Managed Chrome is headed by default for sign-in and human handoff. On CI or a
+The managed browser is headed by default for sign-in and human handoff. On CI or a
 displayless host, explicitly set `SMOOTH_OPERATOR_BROWSER_HEADLESS=true` or use
 Xvfb. The server never adds fingerprint spoofing, CAPTCHA solving, proxy
 rotation, or other evasion behavior.
@@ -283,7 +283,7 @@ variables include:
 | `SMOOTH_OPERATOR_BROWSER_MODE` | `managed` | `managed`, `disabled`, `connect`, or `launch` |
 | `SMOOTH_OPERATOR_BROWSER_URL` | `http://127.0.0.1:9222` | DevTools HTTP endpoint |
 | `SMOOTH_OPERATOR_BROWSER_EXECUTABLE` | unset | Managed-mode override; required for explicit launch mode |
-| `SMOOTH_OPERATOR_BROWSER_USER_DATA_DIR` | `${SMOOTH_OPERATOR_DATA_DIR}/browser` | Dedicated persistent agent-Chrome profile |
+| `SMOOTH_OPERATOR_BROWSER_USER_DATA_DIR` | `${SMOOTH_OPERATOR_DATA_DIR}/browser` | Dedicated persistent browser profile |
 | `SMOOTH_OPERATOR_BROWSER_HEADLESS` | `false` | Set `true` for CI/displayless managed or launch use |
 | `SMOOTH_OPERATOR_ALLOWED_DOMAINS` | unset | Comma-separated allowlist |
 | `SMOOTH_OPERATOR_BLOCKED_DOMAINS` | unset | Comma-separated denylist |
@@ -398,7 +398,9 @@ schema) is one aggregate budget across the returned title and snippet text,
 not a per-result multiplier. URL fields and fixed untrusted-data wrapper
 markers are outside that text budget. The response body is bounded before
 parsing, redirects are rejected, cancellation and timeout are propagated, and
-credentials/query secret placeholders are removed from result URLs.
+credentials/query secret placeholders are removed from result URLs. Transient
+provider failures use at most three bounded attempts; anti-bot responses are
+reported without attempting a bypass.
 
 ### Resources
 

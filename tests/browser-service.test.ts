@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { access, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -10,7 +10,7 @@ import { AppError } from "@/server/errors";
 import { Logger } from "@/server/logger";
 import { SecurityPolicy } from "@/server/policy";
 import type { BrowserAction } from "@/server/contracts";
-import type { Browser } from "puppeteer-core";
+import type { Browser, Page } from "puppeteer-core";
 
 import { testConfig } from "./helpers";
 
@@ -2158,6 +2158,206 @@ describe("browser service", () => {
     await service.close();
   });
 
+  it("advances the queue after an operation ignores its abort signal", async () => {
+    const service = new BrowserService(testConfig(), new SecurityPolicy(testConfig()), new Logger("error", {}, () => undefined));
+    const internal = service as unknown as {
+      withOperationLock<T>(signal: AbortSignal | undefined, operation: (signal: AbortSignal) => Promise<T>, queueTimeoutMs?: number, operationTimeoutMs?: number): Promise<T>;
+    };
+    const uncooperative = internal.withOperationLock(undefined, async () => new Promise<string>(() => undefined), 500, 25);
+    await expect(uncooperative).rejects.toMatchObject({ code: "BROWSER_TIMEOUT", details: { phase: "action", timeoutMs: 25 } });
+
+    await expect(internal.withOperationLock(undefined, async () => "after-timeout", 500, 500)).resolves.toBe("after-timeout");
+    expect(service.connectionStatus().queuedOperations).toBe(0);
+    await service.close();
+  });
+
+  it("bounds real-DOM extraction and markup before compatibility getters", async () => {
+    const service = new BrowserService(testConfig(), new SecurityPolicy(testConfig()), new Logger("error", {}, () => undefined));
+    const largeText = "x".repeat(1_000_000);
+    const container = {
+      nodeType: 1,
+      tagName: "DIV",
+      childNodes: [{ nodeType: 3, nodeValue: largeText, childNodes: [] }],
+      attributes: [],
+      getAttribute: () => null,
+    } as Record<string, unknown>;
+    const textarea = {
+      nodeType: 1,
+      tagName: "TEXTAREA",
+      childNodes: [{ nodeType: 3, nodeValue: "super-secret form value", childNodes: [] }],
+      attributes: [],
+      getAttribute: () => null,
+    } as Record<string, unknown>;
+    Object.defineProperty(container, "textContent", { get: () => { throw new Error("textContent must not be materialized"); } });
+    Object.defineProperty(container, "outerHTML", { get: () => { throw new Error("outerHTML must not be materialized"); } });
+    const frame = {
+      parentFrame: () => null,
+      $eval: async (selector: string, callback: (element: unknown, args: unknown) => unknown, args: unknown) => callback(selector === "#textarea" ? textarea : container, args),
+    };
+    const page = new EventEmitter() as EventEmitter & { isClosed(): boolean; url(): string };
+    page.isClosed = () => false;
+    page.url = () => "about:blank";
+    const state = { id: "page-1", page, challengeActive: false, domRevision: 1 };
+    const internal = service as unknown as {
+      executeOnPage(action: BrowserAction, signal?: AbortSignal): Promise<unknown>;
+      pageState(pageId?: string, signal?: AbortSignal): Promise<unknown>;
+      assertCurrentPageAllowed(page: unknown): Promise<void>;
+      assertSnapshotForAction(state: unknown, action: BrowserAction): void;
+      frameFor(state: unknown, frameId?: string): Promise<unknown>;
+      configurePage(state: unknown, signal?: AbortSignal): Promise<void>;
+      selectorFor(state: unknown, target: string, frameId?: string, frame?: unknown): Promise<string>;
+    };
+    internal.pageState = async () => state;
+    internal.assertCurrentPageAllowed = async () => undefined;
+    internal.assertSnapshotForAction = () => undefined;
+    internal.frameFor = async () => frame;
+    internal.configurePage = async () => undefined;
+    internal.selectorFor = async (_state, target) => target;
+
+    const extracted = await internal.executeOnPage({ action: "extract", selector: "#container", maxChars: 100 } as BrowserAction) as { text: string; truncated: boolean };
+    expect(extracted.text).toContain("x".repeat(100));
+    expect(extracted.truncated).toBe(true);
+
+    const markup = await internal.executeOnPage({ action: "get_html", selector: "#container", maxChars: 100 } as BrowserAction) as { html: string; truncated: boolean };
+    expect(markup.html).toContain("<div>");
+    expect(markup.truncated).toBe(true);
+
+    const safeMarkup = await internal.executeOnPage({ action: "get_html", selector: "#textarea", maxChars: 200 } as BrowserAction) as { html: string };
+    expect(safeMarkup.html).toContain("<textarea>");
+    expect(safeMarkup.html).not.toContain("super-secret");
+    await service.close();
+  });
+
+  it("finds normalized text across bounded text nodes without a descendant selector scan", async () => {
+    const service = new BrowserService(testConfig(), new SecurityPolicy(testConfig()), new Logger("error", {}, () => undefined));
+    const first = {
+      nodeType: 1,
+      tagName: "SPAN",
+      childNodes: [] as Array<Record<string, unknown>>,
+      children: [] as Array<Record<string, unknown>>,
+      getAttribute: () => null,
+      hasAttribute: () => false,
+      scrollIntoView: vi.fn(),
+    } as Record<string, unknown>;
+    const second = {
+      nodeType: 1,
+      tagName: "SPAN",
+      childNodes: [] as Array<Record<string, unknown>>,
+      children: [] as Array<Record<string, unknown>>,
+      getAttribute: () => null,
+      hasAttribute: () => false,
+    } as Record<string, unknown>;
+    const firstText = { nodeType: 3, nodeValue: " Hello ", parentElement: first } as Record<string, unknown>;
+    const secondText = { nodeType: 3, nodeValue: "world", parentElement: second } as Record<string, unknown>;
+    first.childNodes = [firstText];
+    second.childNodes = [secondText];
+    const body = {
+      nodeType: 1,
+      tagName: "BODY",
+      childNodes: [first, second],
+      children: [first, second],
+      getAttribute: () => null,
+      hasAttribute: () => false,
+    } as Record<string, unknown>;
+    const querySelectorAll = vi.fn(() => { throw new Error("body descendant selector scan is not allowed"); });
+    const fakeDocument = { body, querySelectorAll };
+    vi.stubGlobal("document", fakeDocument);
+    try {
+      const frame = {
+        parentFrame: () => null,
+        evaluate: async (callback: (needle: string, maxNodes: number) => unknown, needle: string, maxNodes: number) => callback(needle, maxNodes),
+      };
+      const page = { url: () => "about:blank" };
+      const state = { id: "page-1", page, challengeActive: false };
+      const internal = service as unknown as {
+        executeOnPage(action: BrowserAction, signal?: AbortSignal): Promise<unknown>;
+        pageState(pageId?: string, signal?: AbortSignal): Promise<unknown>;
+        assertCurrentPageAllowed(page: unknown): Promise<void>;
+        assertSnapshotForAction(state: unknown, action: BrowserAction): void;
+        frameFor(state: unknown, frameId?: string): Promise<unknown>;
+        configurePage(state: unknown, signal?: AbortSignal): Promise<void>;
+      };
+      internal.pageState = async () => state;
+      internal.assertCurrentPageAllowed = async () => undefined;
+      internal.assertSnapshotForAction = () => undefined;
+      internal.frameFor = async () => frame;
+      internal.configurePage = async () => undefined;
+
+      await expect(internal.executeOnPage({ action: "find_text", text: "hello   WORLD" } as BrowserAction)).resolves.toMatchObject({ tag: "span", text: expect.stringContaining("Hello") });
+      expect(first.scrollIntoView).toHaveBeenCalledTimes(1);
+      await expect(internal.executeOnPage({ action: "find_text", text: "not present" } as BrowserAction)).rejects.toMatchObject({ code: "TEXT_NOT_FOUND" });
+      expect(querySelectorAll).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+      await service.close();
+    }
+  });
+
+  it("associates a target created just after click completion with its opener", async () => {
+    const service = new BrowserService(testConfig(), new SecurityPolicy(testConfig()), new Logger("error", {}, () => undefined));
+    const openerTarget = {};
+    const page = new EventEmitter() as EventEmitter & { target(): object };
+    page.target = () => openerTarget;
+    const browserEmitter = new EventEmitter();
+    const browser = browserEmitter as unknown as Browser;
+    const popup = new EventEmitter() as EventEmitter & { isClosed(): boolean };
+    popup.isClosed = () => false;
+    const target = { type: () => "page", opener: () => openerTarget, page: async () => popup };
+    let clickCompleted!: () => void;
+    const click = new Promise<void>((resolve) => { clickCompleted = resolve; });
+    const internal = service as unknown as {
+      waitForPopup(page: unknown, browser: unknown, beforePages: Set<Page>, timeoutMs: number, signal?: AbortSignal, seed?: unknown, clickCompleted?: Promise<void>): Promise<{ popup?: Page }>;
+    };
+    const observed = internal.waitForPopup(page, browser, new Set<Page>(), 500, undefined, undefined, click);
+    clickCompleted();
+    setTimeout(() => browserEmitter.emit("targetcreated", target), 100);
+    await expect(observed).resolves.toMatchObject({ popup });
+    await service.close();
+  });
+
+  it("closes a popup whose page promise resolves after the observation deadline", async () => {
+    const service = new BrowserService(testConfig(), new SecurityPolicy(testConfig()), new Logger("error", {}, () => undefined));
+    const openerTarget = {};
+    const page = new EventEmitter() as EventEmitter & { target(): object };
+    page.target = () => openerTarget;
+    const browserEmitter = new EventEmitter();
+    const browser = browserEmitter as unknown as Browser;
+    let resolvePage!: (page: Page) => void;
+    const latePage = new EventEmitter() as EventEmitter & { isClosed(): boolean; close(): Promise<void> };
+    latePage.isClosed = () => false;
+    latePage.close = vi.fn(async () => undefined);
+    const target = { type: () => "page", opener: () => openerTarget, page: () => new Promise<Page>((resolve) => { resolvePage = resolve; }) };
+    const internal = service as unknown as {
+      waitForPopup(page: unknown, browser: unknown, beforePages: Set<Page>, timeoutMs: number): Promise<{ popup?: Page }>;
+    };
+    const observed = internal.waitForPopup(page, browser, new Set<Page>(), 25);
+    setTimeout(() => browserEmitter.emit("targetcreated", target), 5);
+    await expect(observed).resolves.toMatchObject({ popup: undefined });
+    resolvePage(latePage as unknown as Page);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(latePage.close).toHaveBeenCalledTimes(1);
+    await service.close();
+  });
+
+  it("caps download enumeration and reports pre-cancelled listing", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "smooth-operator-download-list-"));
+    const downloadDir = join(dataDir, "downloads");
+    await mkdir(downloadDir, { mode: 0o700 });
+    const service = new BrowserService(testConfig({ dataDir }), new SecurityPolicy(testConfig({ dataDir })), new Logger("error", {}, () => undefined));
+    const internal = service as unknown as { listDownloads(signal?: AbortSignal): Promise<unknown> };
+    try {
+      await Promise.all(Array.from({ length: 105 }, (_, index) => writeFile(join(downloadDir, `file-${String(index).padStart(3, "0")}.txt`), "x")));
+      const downloads = await internal.listDownloads() as unknown[];
+      expect(downloads).toHaveLength(100);
+      const cancelled = new AbortController();
+      cancelled.abort();
+      await expect(internal.listDownloads(cancelled.signal)).rejects.toMatchObject({ code: "CANCELLED" });
+    } finally {
+      await service.close();
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
   it("keeps a timed-out connection single-flight until its late handshake is closed", async () => {
     const config = testConfig({ browser: { ...testConfig().browser, mode: "connect", url: "http://127.0.0.1:9222", connectTimeoutMs: 25 } });
     const firstBrowser = { close: vi.fn(async () => undefined), disconnect: vi.fn(async () => undefined), on: () => undefined } as unknown as Browser;
@@ -2263,7 +2463,8 @@ describe("browser service", () => {
     };
 
     await internal.accessibilitySnapshot(state, 10, 1_000, true, frame);
-    expect(params).toEqual({ frameId: "child-frame-id" });
+    expect(params).toEqual({ frameId: "child-frame-id", depth: expect.any(Number) });
+    expect((params as { depth: number }).depth).toBeLessThanOrEqual(24);
     await service.close();
   });
 

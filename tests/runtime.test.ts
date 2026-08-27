@@ -1,4 +1,4 @@
-import { access, chmod, mkdir, mkdtemp, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -206,6 +206,50 @@ describe("runtime lifecycle", () => {
       await expect(access(join(profile, ".smooth-operator-profile.lock"))).resolves.toBeUndefined();
     }
     await rm(directory, { recursive: true, force: true });
+  });
+
+  it("does not remove a replacement profile lock during lease release", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "smooth-operator-runtime-lock-race-"));
+    const profile = join(directory, "browser");
+    const base = testConfig();
+    const runtime = await ServerRuntime.create(testConfig({
+      dataDir: directory,
+      browser: { ...base.browser, mode: "launch", executablePath: "/usr/bin/chromium", userDataDir: profile },
+    }));
+    const lockPath = join(profile, ".smooth-operator-profile.lock");
+    try {
+      const lease = (runtime as unknown as { browserProfileLease?: { release(): Promise<void> } }).browserProfileLease;
+      expect(lease).toBeDefined();
+      await unlink(lockPath);
+      await writeFile(lockPath, JSON.stringify({ pid: process.pid, token: "replacement" }));
+      await lease?.release();
+      await expect(access(lockPath)).resolves.toBeUndefined();
+    } finally {
+      await runtime.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("bounds shutdown while a profile lease acquisition is uncooperative", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "smooth-operator-runtime-close-pending-lock-"));
+    const profile = join(directory, "browser");
+    const base = testConfig();
+    const runtime = await ServerRuntime.create(testConfig({
+      dataDir: directory,
+      browser: { ...base.browser, mode: "launch", executablePath: "/usr/bin/chromium", userDataDir: profile },
+    }));
+    const internal = runtime as unknown as { profileLeasePromise?: Promise<void> };
+    internal.profileLeasePromise = new Promise<void>(() => undefined);
+    try {
+      const result = await Promise.race([
+        runtime.close().then(() => "closed" as const),
+        new Promise<"hung">((resolve) => setTimeout(() => resolve("hung"), 1_500)),
+      ]);
+      expect(result).toBe("closed");
+    } finally {
+      await runtime.close();
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it("retains an owned profile lease when browser shutdown fails", async () => {

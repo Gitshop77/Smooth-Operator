@@ -29,7 +29,7 @@ npm install -g github:Gitshop77/Smooth-Operator && smooth-operator install openc
 
 The wizard asks 7 focused questions covering browser mode, executable, headless operation, domain policy, page JavaScript, and the data directory. Run `smooth-operator install` with no harness to pick one interactively (TTY only; piped/CI runs print usage and exit). `--yes` applies the recommended defaults, so give it a target: `smooth-operator install opencode --yes`. Personal Chrome mode launches a dedicated debugging profile on `9222` and derives `browserUrl` automatically.
 
-Requires Node 22.23.2+ and Chrome. Profile at `~/.smooth-operator/browser` — sign in once.
+Requires Node 22.23.2+ and an installed Chromium-based browser. Profile at `~/.smooth-operator/browser` — sign in once.
 
 Verify: `smooth-operator --help` and `server_health` / `browser_doctor` appear after restart.
 
@@ -48,7 +48,7 @@ Talk to your harness normally. It can call `browser_navigate` → `browser_snaps
 
 ## Why
 
-- Zero setup — managed, headed, persistent Chrome by default
+- Zero setup — managed, headed, persistent browser by default
 - Secure by default — domain and file policy, bounded outputs, redaction, and JavaScript disabled unless explicitly enabled
 - Reliable — private profiles, stale-reference recovery, reconnect handling, and structured errors
 - Flexible — stdio by default, Streamable HTTP when you need it, plus connect and disabled modes
@@ -57,7 +57,7 @@ Talk to your harness normally. It can call `browser_navigate` → `browser_snaps
 
 Compared with [Browser Use MCP](https://github.com/browser-use/browser-use) · [![Browser Use GitHub stars](https://img.shields.io/github/stars/browser-use/browser-use?style=social)](https://github.com/browser-use/browser-use) 
 
-(Date Of Testing -Wednesday 26 August 2026-) 
+Tested: 26 August 2026
 
 | Benchmark | Metric | SmoothOperator | Browser Use MCP |
 | --- | --- | ---: | ---: |
@@ -74,3 +74,8 @@ Compared with [Browser Use MCP](https://github.com/browser-use/browser-use) · [
 | MiniWoB++ | MCP errors | **0** | 29 |
 | MiniWoB++ | Transport errors | **0** | **0** |
 | MiniWoB++ | Timeouts | **0** | **0** |
+| Browser Use benchmark | Muse Spark 1.2 · score | **64% · 100 tasks** | 12% · 60 tasks |
+
+*Task counts and scoring rules differ; comparison is directional.*
+
+[View the Browser Use benchmark](https://github.com/browser-use/benchmark)

@@ -169,6 +169,7 @@ interface PageState {
   viewportConfigured: boolean;
   viewportSession?: CDPSession;
   downloadConfigured: boolean;
+  downloadConfigurationError?: AppError;
   navigationGuardInstalled: boolean;
   networkRequestListener?: (request: HTTPRequest) => void;
   networkResponseListener?: (response: HTTPResponse) => void;
@@ -227,6 +228,7 @@ interface PopupObservation {
   popup?: Page;
   createdPages: Set<Page>;
   pendingPagePromises: Set<Promise<void>>;
+  abandoned?: boolean;
 }
 
 interface DevToolsVersion {
@@ -268,7 +270,15 @@ const MAX_ACTION_PLAN_STEPS = 100;
 // limits actual Chromium work separately.
 const MAX_QUEUED_OPERATIONS = 1_024;
 const MAX_PARALLEL_READ_OPERATIONS = 8;
-const NEW_TAB_DETECTION_TIMEOUT_MS = 1_000;
+// Popup observation is bounded by the enclosing action signal. This short
+// post-click grace period catches targetcreated/page events that are delivered
+// just after Puppeteer resolves the click without making a click with no popup
+// wait for the whole action deadline.
+const POPUP_POST_CLICK_SETTLE_TIMEOUT_MS = 300;
+const MAX_DOM_TRAVERSAL_NODES = 20_000;
+const MAX_TEXT_SCAN_CHARS = 500_000;
+const MAX_MARKUP_EVIDENCE_CHARS = 120_000;
+const MAX_DOWNLOAD_ENTRIES = 100;
 const TARGET_GUARD_MAX_REQUEST_IDS = 128;
 const CLICK_SETTLE_TIMEOUT_MS = 10;
 const CLICK_RETRY_ATTEMPTS = 3;
@@ -653,108 +663,239 @@ export class BrowserService {
     const frame = await this.frameFor(state, options.frameId);
     const domRevisionAtStart = state.domRevision;
     const maxChars = Math.min(options.maxChars ?? 40_000, this.config.browser.maxHtmlChars);
-    const result: SnapshotEvaluation = await frame.evaluate((limit) => {
+    const result: SnapshotEvaluation = await frame.evaluate(({ limit, maxNodes }) => {
+      type StackEntry = { element: Element; hidden: boolean };
+      const hiddenTags = new Set(["script", "style", "noscript", "template"]);
+      const interactiveTags = new Set(["a", "button", "input", "select", "textarea", "summary"]);
       const uniqueIds = new Set<string>();
       const duplicateIds = new Set<string>();
-      for (const element of Array.from(document.querySelectorAll("[id]"))) {
-        const id = (element as HTMLElement).id;
-        if (!id) {
-          continue;
-        }
-        if (uniqueIds.has(id)) {
-          uniqueIds.delete(id);
-          duplicateIds.add(id);
-        } else if (!duplicateIds.has(id)) {
-          uniqueIds.add(id);
-        }
-      }
-      const interactiveSelector = "a,button,input,select,textarea,[role], [onclick], [tabindex], label[for], summary,[contenteditable=true]";
-      const allInteractive = Array.from(document.querySelectorAll(interactiveSelector));
       const visibleInteractive: Element[] = [];
+      const headings: string[] = [];
       let visibleInteractiveCount = 0;
-      for (const element of allInteractive) {
+      let visitedNodes = 0;
+      let traversalTruncated = false;
+      let idScanComplete = true;
+
+      const boundedText = (root: Node | null, textLimit: number, nodeLimit = 2_000): { text: string; truncated: boolean } => {
+        if (!root || textLimit <= 0) {
+          return { text: "", truncated: Boolean(root) && textLimit <= 0 };
+        }
+        const stack: Array<{ node: Node; hidden: boolean }> = [{ node: root, hidden: false }];
+        const output: string[] = [];
+        let length = 0;
+        let visited = 0;
+        let truncated = false;
+        while (stack.length > 0) {
+          const current = stack.pop();
+          if (!current) {
+            break;
+          }
+          visited += 1;
+          if (visited > nodeLimit) {
+            truncated = true;
+            break;
+          }
+          if (current.node.nodeType === 3) {
+            if (current.hidden) {
+              continue;
+            }
+            const raw = current.node.nodeValue ?? "";
+            const remaining = textLimit - length;
+            if (remaining <= 0) {
+              truncated = true;
+              break;
+            }
+            const part = raw.slice(0, remaining);
+            output.push(part);
+            length += part.length;
+            if (part.length < raw.length) {
+              truncated = true;
+              break;
+            }
+            continue;
+          }
+          if (current.node.nodeType !== 1) {
+            continue;
+          }
+          const element = current.node as Element;
+          const tag = element.tagName.toLowerCase();
+          if (hiddenTags.has(tag)) {
+            continue;
+          }
+          const style = element.getAttribute("style") ?? "";
+          const locallyHidden = current.hidden
+            || element.hasAttribute("hidden")
+            || element.getAttribute("aria-hidden") === "true"
+            || /(?:^|[;\s])(display|visibility)\s*:\s*(?:none|hidden)\b|(?:^|[;\s])opacity\s*:\s*0(?:[;\s]|$)/i.test(style);
+          const children = element.childNodes;
+          for (let index = children.length - 1; index >= 0; index -= 1) {
+            const child = children[index];
+            if (child) {
+              stack.push({ node: child, hidden: locallyHidden });
+            }
+          }
+        }
+        return { text: output.join(""), truncated };
+      };
+
+      const isInteractive = (element: Element): boolean => {
+        const tag = element.tagName.toLowerCase();
+        return interactiveTags.has(tag)
+          || element.hasAttribute("role")
+          || element.hasAttribute("onclick")
+          || element.hasAttribute("tabindex")
+          || (tag === "label" && element.hasAttribute("for"))
+          || element.getAttribute("contenteditable") === "true";
+      };
+
+      const isVisible = (element: Element, hidden: boolean): boolean => {
+        if (hidden) {
+          return false;
+        }
         const htmlElement = element as HTMLElement;
         const rect = htmlElement.getBoundingClientRect();
-        const style = window.getComputedStyle(htmlElement);
-        if (rect.width <= 0 || rect.height <= 0 || style.visibility === "hidden" || style.display === "none" || Number.parseFloat(style.opacity || "1") <= 0 || style.pointerEvents === "none") {
+        const style = window.getComputedStyle(element);
+        return rect.width > 0
+          && rect.height > 0
+          && style.visibility !== "hidden"
+          && style.display !== "none"
+          && Number.parseFloat(style.opacity || "1") > 0
+          && style.pointerEvents !== "none";
+      };
+
+      const root = document.body;
+      const stack: StackEntry[] = root ? [{ element: root, hidden: false }] : [];
+      while (stack.length > 0) {
+        const current = stack.pop();
+        if (!current) {
+          break;
+        }
+        visitedNodes += 1;
+        if (visitedNodes > maxNodes) {
+          traversalTruncated = true;
+          idScanComplete = false;
+          break;
+        }
+        const { element, hidden } = current;
+        const tag = element.tagName.toLowerCase();
+        if (hiddenTags.has(tag)) {
           continue;
         }
-        visibleInteractiveCount += 1;
-        if (visibleInteractive.length < 250) {
-          visibleInteractive.push(element);
+        const style = element.getAttribute("style") ?? "";
+        const locallyHidden = hidden
+          || element.hasAttribute("hidden")
+          || element.getAttribute("aria-hidden") === "true"
+          || /(?:^|[;\s])(display|visibility)\s*:\s*(?:none|hidden)\b|(?:^|[;\s])opacity\s*:\s*0(?:[;\s]|$)/i.test(style);
+        const id = element.getAttribute("id") ?? "";
+        if (id) {
+          if (uniqueIds.has(id)) {
+            uniqueIds.delete(id);
+            duplicateIds.add(id);
+          } else if (!duplicateIds.has(id)) {
+            uniqueIds.add(id);
+          }
+        }
+        if (!locallyHidden && isInteractive(element) && isVisible(element, locallyHidden)) {
+          visibleInteractiveCount += 1;
+          if (visibleInteractive.length < 250) {
+            visibleInteractive.push(element);
+          }
+        }
+        if (/^h[1-6]$/.test(tag) && !locallyHidden && headings.length < 100) {
+          const headingText = boundedText(element, 500, 256).text.trim();
+          if (headingText) {
+            headings.push(headingText);
+          }
+        }
+        const children = element.children;
+        for (let index = children.length - 1; index >= 0; index -= 1) {
+          const child = children[index];
+          if (child) {
+            stack.push({ element: child, hidden: locallyHidden });
+          }
         }
       }
-      const interactive = visibleInteractive
-        .map((element, index) => {
-          const htmlElement = element as HTMLElement & { disabled?: boolean; type?: string };
-          const rect = htmlElement.getBoundingClientRect();
-          let selector = "body";
-          if (htmlElement.id && uniqueIds.has(htmlElement.id) && !duplicateIds.has(htmlElement.id)) {
-            selector = `#${CSS.escape(htmlElement.id)}`;
-          } else {
-            const parts: string[] = [];
-            let current: Element | null = element;
-            while (current && current !== document.body && parts.length < 8) {
-              const tag = current.tagName.toLowerCase();
-              const parent: HTMLElement | null = current.parentElement;
-              if (!parent) {
-                parts.unshift(tag);
-                break;
-              }
-              const currentTagName = current.tagName;
-              const siblings = Array.from(parent.children).filter((child: Element) => child.tagName === currentTagName);
-              const siblingIndex = siblings.indexOf(current) + 1;
-              parts.unshift(`${tag}:nth-of-type(${siblingIndex})`);
-              current = parent;
+      if (traversalTruncated) {
+        idScanComplete = false;
+      }
+
+      const interactive = visibleInteractive.map((element, index) => {
+        const htmlElement = element as HTMLElement & { disabled?: boolean; type?: string };
+        const rect = htmlElement.getBoundingClientRect();
+        let selector = "body";
+        if (idScanComplete && htmlElement.id && htmlElement.id.length <= 500 && uniqueIds.has(htmlElement.id) && !duplicateIds.has(htmlElement.id)) {
+          selector = `#${CSS.escape(htmlElement.id)}`;
+        } else {
+          const parts: string[] = [];
+          let current: Element | null = element;
+          while (current && current !== document.body && parts.length < 8) {
+            const tag = current.tagName.toLowerCase();
+            const parent: HTMLElement | null = current.parentElement;
+            if (!parent) {
+              parts.unshift(tag);
+              break;
             }
-            selector = parts.join(" > ") || "body";
+            const currentTagName = current.tagName;
+            let siblingIndex = 0;
+            let currentIndex = 0;
+            for (let childIndex = 0; childIndex < parent.children.length; childIndex += 1) {
+              const child = parent.children[childIndex];
+              if (!child) {
+                continue;
+              }
+              if (child.tagName === currentTagName) {
+                siblingIndex += 1;
+                if (child === current) {
+                  currentIndex = siblingIndex;
+                }
+              }
+            }
+            parts.unshift(`${tag}:nth-of-type(${currentIndex || 1})`);
+            current = parent;
           }
-          const anchor = element.closest("a") as HTMLAnchorElement | null;
-          // Geometry is deliberately excluded: sticky headers, lazy ads, and
-          // scrolling can move the same DOM node between snapshot and action.
-          const signature = [
-            element.tagName.toLowerCase(),
-            element.getAttribute("id") ?? "",
-            element.getAttribute("name") ?? "",
-            element.getAttribute("role") ?? "",
-            element.getAttribute("aria-label") ?? "",
-            element.getAttribute("placeholder") ?? "",
-            element.getAttribute("disabled") ?? "",
-            element.getAttribute("aria-disabled") ?? "",
-            htmlElement.type ?? "",
-            (htmlElement.innerText || element.getAttribute("value") || element.textContent || "").replace(/\s+/g, " ").trim().slice(0, 500),
-            anchor?.href ?? "",
-          ].join("\u001f");
-          return {
-            ref: `e${index + 1}`,
-            index,
-            selector,
-            signature,
-            tag: element.tagName.toLowerCase(),
-            role: element.getAttribute("role") ?? undefined,
-            text: /^(INPUT|TEXTAREA|SELECT)$/.test(element.tagName)
-              ? (element.getAttribute("aria-label") || element.getAttribute("placeholder") || "").trim().slice(0, 500)
-              : (htmlElement.innerText || "").trim().slice(0, 500),
-            ariaLabel: element.getAttribute("aria-label") ?? undefined,
-            type: htmlElement.type ?? undefined,
-            valuePresent: /^(INPUT|TEXTAREA|SELECT)$/.test(element.tagName) && "value" in htmlElement && String((htmlElement as HTMLInputElement).value ?? "").length > 0,
-            disabled: Boolean(htmlElement.disabled || element.getAttribute("aria-disabled") === "true"),
-            rect: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) },
-          };
-        });
-      const root = document.body;
-      const fullText = root?.innerText ?? "";
-      const text = fullText.slice(0, limit);
-      const headings = Array.from(document.querySelectorAll("h1,h2,h3,h4,h5,h6"))
-        .map((heading) => (heading.textContent ?? "").trim())
-        .filter(Boolean)
-        .slice(0, 100);
+          selector = parts.join(" > ") || "body";
+        }
+        const anchor = element.closest("a") as HTMLAnchorElement | null;
+        const boundedElementText = boundedText(element, 500, 512).text.replace(/\s+/g, " ").trim().slice(0, 500);
+        // Geometry is deliberately excluded: sticky headers, lazy ads, and
+        // scrolling can move the same DOM node between snapshot and action.
+        const signature = [
+          element.tagName.toLowerCase(),
+          (element.getAttribute("id") ?? "").slice(0, 500),
+          (element.getAttribute("name") ?? "").slice(0, 500),
+          (element.getAttribute("role") ?? "").slice(0, 500),
+          (element.getAttribute("aria-label") ?? "").slice(0, 500),
+          (element.getAttribute("placeholder") ?? "").slice(0, 500),
+          element.getAttribute("disabled") ?? "",
+          element.getAttribute("aria-disabled") ?? "",
+          String(htmlElement.type ?? "").slice(0, 100),
+          boundedElementText,
+          (anchor?.href ?? "").slice(0, 4_096),
+        ].join("\u001f");
+        return {
+          ref: `e${index + 1}`,
+          index,
+          selector,
+          signature,
+          tag: element.tagName.toLowerCase(),
+          role: element.getAttribute("role") ?? undefined,
+          text: /^(INPUT|TEXTAREA|SELECT)$/.test(element.tagName)
+            ? (element.getAttribute("aria-label") || element.getAttribute("placeholder") || "").trim().slice(0, 500)
+            : boundedElementText,
+          ariaLabel: element.getAttribute("aria-label")?.slice(0, 500) ?? undefined,
+          type: htmlElement.type?.slice(0, 100) ?? undefined,
+          valuePresent: /^(INPUT|TEXTAREA|SELECT)$/.test(element.tagName) && "value" in htmlElement && String((htmlElement as HTMLInputElement).value ?? "").length > 0,
+          disabled: Boolean(htmlElement.disabled || element.getAttribute("aria-disabled") === "true"),
+          rect: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) },
+        };
+      });
+      const textResult = boundedText(root, limit, maxNodes);
       return {
-        text,
-        textTruncated: fullText.length > limit,
+        text: textResult.text,
+        textTruncated: textResult.truncated,
         headings,
         interactive,
-        interactiveTruncated: visibleInteractiveCount > visibleInteractive.length,
+        interactiveTruncated: traversalTruncated || visibleInteractiveCount > visibleInteractive.length,
         viewport: { width: window.innerWidth, height: window.innerHeight },
         document: { width: document.documentElement.scrollWidth, height: document.documentElement.scrollHeight },
         readyState: document.readyState,
@@ -765,7 +906,7 @@ export class BrowserService {
           maxY: Math.max(0, document.documentElement.scrollHeight - window.innerHeight),
         },
       };
-    }, maxChars);
+    }, { limit: Math.max(0, maxChars), maxNodes: MAX_DOM_TRAVERSAL_NODES });
     throwIfAborted(options.signal);
     const snapshotId = randomUUID();
     let frameId: string;
@@ -841,7 +982,7 @@ export class BrowserService {
           return await this.executeDialogAction(pendingState, action, combineSignals(signal, this.shutdownController.signal, timeoutController.signal));
         } catch (error) {
           if (timeoutController.signal.aborted && !signal?.aborted && !this.shutdownController.signal.aborted) {
-            throw new AppError("BROWSER_TIMEOUT", `The browser operation exceeded its ${Math.max(1, Math.floor(timeoutMs))}ms action deadline.`, { retryable: true, details: { timeoutMs: Math.max(1, Math.floor(timeoutMs)) }, cause: error });
+            throw new AppError("BROWSER_TIMEOUT", `The browser operation exceeded its ${Math.max(1, Math.floor(timeoutMs))}ms action deadline.`, { retryable: true, details: { phase: "action", timeoutMs: Math.max(1, Math.floor(timeoutMs)) }, cause: error });
           }
           throw error;
         } finally {
@@ -1067,11 +1208,35 @@ export class BrowserService {
             const clickable = element.closest("a,button,input,select,textarea,[role=button]") ?? element;
             const htmlElement = clickable as HTMLElement & { type?: string; value?: string };
             const anchor = clickable.closest("a") as HTMLAnchorElement | null;
+            const boundedText = (root: Node): string => {
+              const stack: Node[] = [root];
+              let output = "";
+              let visited = 0;
+              while (stack.length > 0 && output.length < 200) {
+                const node = stack.pop();
+                if (!node) break;
+                visited += 1;
+                if (visited > 512) break;
+                if (node.nodeType === 3) {
+                  output += (node.nodeValue ?? "").slice(0, 200 - output.length);
+                  continue;
+                }
+                if (node.nodeType !== 1) continue;
+                const element = node as Element;
+                if (["script", "style", "noscript", "template"].includes(element.tagName.toLowerCase())) continue;
+                const children = element.childNodes;
+                for (let index = children.length - 1; index >= 0; index -= 1) {
+                  const child = children[index];
+                  if (child) stack.push(child);
+                }
+              }
+              return output;
+            };
             return {
               tag: clickable.tagName.toLowerCase(),
               type: htmlElement.type?.toLowerCase() ?? "",
               role: clickable.getAttribute("role") ?? "",
-              label: [clickable.textContent, clickable.getAttribute("aria-label"), clickable.getAttribute("title"), htmlElement.value].filter(Boolean).join(" ").replace(/\s+/g, " ").trim().slice(0, 200),
+              label: [boundedText(clickable), clickable.getAttribute("aria-label"), clickable.getAttribute("title"), htmlElement.value].filter(Boolean).join(" ").replace(/\s+/g, " ").trim().slice(0, 200),
               href: anchor?.href ?? clickable.getAttribute("href") ?? undefined,
             };
           }, { x: coordinateX, y: coordinateY });
@@ -1209,7 +1374,7 @@ export class BrowserService {
           for (; iterations < maxScrolls; iterations += 1) {
             throwIfAborted(signal);
             if (scrollDeadline - Date.now() <= 0) {
-              throw new AppError("WAIT_TIMEOUT", "Scroll-to-bottom exceeded its action timeout.", { retryable: true });
+              throw new AppError("WAIT_TIMEOUT", "Scroll-to-bottom exceeded its action timeout.", { retryable: true, details: { phase: "wait", timeoutMs: action.timeoutMs ?? this.config.browser.actionTimeoutMs } });
             }
             const before = await page.evaluate(() => {
               const height = Math.max(document.documentElement.scrollHeight, document.body?.scrollHeight ?? 0);
@@ -1219,7 +1384,7 @@ export class BrowserService {
             await page.evaluate((top) => window.scrollTo({ top, behavior: "instant" as ScrollBehavior }), targetY);
             const remaining = scrollDeadline - Date.now();
             if (remaining <= 0) {
-              throw new AppError("WAIT_TIMEOUT", "Scroll-to-bottom exceeded its action timeout.", { retryable: true });
+              throw new AppError("WAIT_TIMEOUT", "Scroll-to-bottom exceeded its action timeout.", { retryable: true, details: { phase: "wait", timeoutMs: action.timeoutMs ?? this.config.browser.actionTimeoutMs } });
             }
             // Lazy content only needs a short quiet window here. A 500ms
             // fixed settle cost per iteration dominates small MiniWoB++
@@ -1363,10 +1528,46 @@ export class BrowserService {
         const text = requireField(action.text ?? action.query, "text");
         const timeoutMs = action.timeoutMs ?? this.config.browser.actionTimeoutMs;
         try {
-          await frame.waitForFunction((needle) => document.body?.innerText.includes(needle), { timeout: timeoutMs, signal }, text);
+          await frame.waitForFunction((needle, maxNodes) => {
+            const target = needle.normalize("NFKC").replace(/\s+/g, " ").trim().toLowerCase();
+            if (!target || !document.body) return false;
+            const hiddenTags = new Set(["script", "style", "noscript", "template"]);
+            const stack: Array<{ node: Node; hidden: boolean }> = [{ node: document.body, hidden: false }];
+            let visited = 0;
+            let rolling = "";
+            while (stack.length > 0) {
+              const entry = stack.pop();
+              if (!entry) break;
+              visited += 1;
+              if (visited > maxNodes) return false;
+              if (entry.node.nodeType === 3) {
+                if (entry.hidden) continue;
+                const normalized = (entry.node.nodeValue ?? "").normalize("NFKC").replace(/\s+/g, " ").toLowerCase();
+                const combined = `${rolling}${normalized}`;
+                if (normalized.includes(target) || combined.includes(target)) return true;
+                rolling = combined.slice(-Math.max(1_024, target.length * 2));
+                continue;
+              }
+              if (entry.node.nodeType !== 1) continue;
+              const element = entry.node as Element;
+              const tag = element.tagName.toLowerCase();
+              if (hiddenTags.has(tag)) continue;
+              const style = element.getAttribute("style") ?? "";
+              const locallyHidden = entry.hidden
+                || element.hasAttribute("hidden")
+                || element.getAttribute("aria-hidden") === "true"
+                || /(?:^|[;\s])(display|visibility)\s*:\s*(?:none|hidden)\b|(?:^|[;\s])opacity\s*:\s*0(?:[;\s]|$)/i.test(style);
+              const children = element.childNodes;
+              for (let index = children.length - 1; index >= 0; index -= 1) {
+                const child = children[index];
+                if (child) stack.push({ node: child, hidden: locallyHidden });
+              }
+            }
+            return false;
+          }, { timeout: timeoutMs, signal }, text, MAX_DOM_TRAVERSAL_NODES);
         } catch (error) {
           if (isPuppeteerTimeoutError(error)) {
-            throw new AppError("WAIT_TIMEOUT", `The text '${text.slice(0, 200)}' did not appear within ${timeoutMs}ms.`, { retryable: true });
+            throw new AppError("WAIT_TIMEOUT", `The text '${text.slice(0, 200)}' did not appear within ${timeoutMs}ms.`, { retryable: true, details: { phase: "wait", timeoutMs } });
           }
           throw error;
         }
@@ -1379,7 +1580,17 @@ export class BrowserService {
         return { url: safeUrl(page.url()) };
       }
       case "wait_for_network_idle":
-        await page.waitForNetworkIdle({ idleTime: 500, timeout: action.timeoutMs ?? this.config.browser.actionTimeoutMs, signal });
+        {
+          const timeoutMs = action.timeoutMs ?? this.config.browser.actionTimeoutMs;
+          try {
+            await page.waitForNetworkIdle({ idleTime: 500, timeout: timeoutMs, signal });
+          } catch (error) {
+            if (isPuppeteerTimeoutError(error)) {
+              throw new AppError("WAIT_TIMEOUT", `The page did not become network-idle within ${timeoutMs}ms.`, { retryable: true, details: { phase: "wait", timeoutMs }, cause: error });
+            }
+            throw error;
+          }
+        }
         return { idle: true };
       case "enable_network_log":
         state.networkEnabled = true;
@@ -1415,12 +1626,84 @@ export class BrowserService {
       }
       case "find_text": {
         const text = requireField(action.text ?? action.query, "text");
-        const match = await frame.evaluate((needle) => {
-          const elements = Array.from(document.querySelectorAll("body *"));
-          const element = elements.find((candidate) => (candidate.textContent ?? "").includes(needle));
-          element?.scrollIntoView({ block: "center" });
-          return element ? { tag: element.tagName.toLowerCase(), text: (element.textContent ?? "").trim().slice(0, 1_000) } : undefined;
-        }, text);
+        const match = await frame.evaluate((needle, maxNodes) => {
+          const target = needle.normalize("NFKC").replace(/\s+/g, " ").trim().toLowerCase();
+          if (!target) return undefined;
+          const hiddenTags = new Set(["script", "style", "noscript", "template"]);
+          const readText = (root: Element | null): string => {
+            if (!root) return "";
+            const maybeChildNodes = (root as unknown as { childNodes?: unknown }).childNodes;
+            if (!maybeChildNodes) return String((root as unknown as { textContent?: unknown }).textContent ?? "").slice(0, 1_000);
+            const stack: Node[] = [root];
+            let output = "";
+            let visited = 0;
+            while (stack.length > 0 && output.length < 1_000) {
+              const node = stack.pop();
+              if (!node) break;
+              visited += 1;
+              if (visited > 512) break;
+              if (node.nodeType === 3) {
+                output += (node.nodeValue ?? "").slice(0, 1_000 - output.length);
+                continue;
+              }
+              if (node.nodeType !== 1) continue;
+              const children = (node as Element).childNodes;
+              for (let index = children.length - 1; index >= 0; index -= 1) {
+                const child = children[index];
+                if (child) stack.push(child);
+              }
+            }
+            return output.slice(0, 1_000);
+          };
+          const stack: Array<{ node: Node; hidden: boolean }> = document.body
+            ? [{ node: document.body, hidden: false }]
+            : [];
+          let visited = 0;
+          let rolling = "";
+          let rollingElement: Element | null = null;
+          while (stack.length > 0) {
+            const entry = stack.pop();
+            if (!entry) break;
+            visited += 1;
+            if (visited > maxNodes) break;
+            const { node, hidden } = entry;
+            if (node.nodeType === 3) {
+              if (hidden) continue;
+              const raw = node.nodeValue ?? "";
+              const normalized = raw.normalize("NFKC").replace(/\s+/g, " ").toLowerCase();
+              const parent = node.parentElement;
+              const directMatch = normalized.includes(target);
+              const combined = `${rolling}${normalized}`;
+              const spanningMatch = combined.includes(target);
+              if (directMatch || spanningMatch) {
+                const element = directMatch ? parent : rollingElement ?? parent;
+                if (element) {
+                  element.scrollIntoView?.({ block: "center" });
+                  return { tag: element.tagName.toLowerCase(), text: readText(element).trim() };
+                }
+              }
+              const keep = Math.max(1_024, target.length * 2);
+              rolling = combined.slice(-keep);
+              rollingElement = parent;
+              continue;
+            }
+            if (node.nodeType !== 1) continue;
+            const element = node as Element;
+            const tag = element.tagName.toLowerCase();
+            if (hiddenTags.has(tag)) continue;
+            const style = element.getAttribute("style") ?? "";
+            const locallyHidden = hidden
+              || element.hasAttribute("hidden")
+              || element.getAttribute("aria-hidden") === "true"
+              || /(?:^|[;\s])(display|visibility)\s*:\s*(?:none|hidden)\b|(?:^|[;\s])opacity\s*:\s*0(?:[;\s]|$)/i.test(style);
+            const children = element.childNodes;
+            for (let index = children.length - 1; index >= 0; index -= 1) {
+              const child = children[index];
+              if (child) stack.push({ node: child, hidden: locallyHidden });
+            }
+          }
+          return undefined;
+        }, text, MAX_DOM_TRAVERSAL_NODES);
         if (!match) {
           throw new AppError("TEXT_NOT_FOUND", `Text '${text.slice(0, 100)}' was not found.`);
         }
@@ -1452,59 +1735,226 @@ export class BrowserService {
         const resolvedSelector = selector ? await this.selectorFor(state, selector, action.frameId, frame) : undefined;
         const includeLinks = action.includeLinks === true;
         const extracted = (resolvedSelector
-          ? await frame.$eval(resolvedSelector, (element, options: { start: number; limit: number; includeLinks: boolean }) => {
-            const fullText = element.textContent ?? "";
-            const value = fullText.slice(options.start, options.start + options.limit);
+          ? await frame.$eval(resolvedSelector, (element, options: { start: number; limit: number; includeLinks: boolean; maxNodes: number }) => {
+            const hiddenTags = new Set(["script", "style", "noscript", "template"]);
+            const boundedText = (root: Node | null): { value: string; totalLength: number; truncated: boolean } => {
+              if (!root) {
+                return { value: "", totalLength: 0, truncated: false };
+              }
+              // Test adapters and older DOM shims may expose textContent but
+              // not childNodes. Keep that compatibility path bounded too;
+              // real browser pages use the incremental walker below.
+              if (!("childNodes" in root)) {
+                const raw = String((root as Element).textContent ?? "");
+                const value = raw.slice(options.start, options.start + options.limit);
+                return { value, totalLength: raw.length, truncated: options.start + value.length < raw.length };
+              }
+              const stack: Node[] = [root];
+              let visited = 0;
+              let totalLength = 0;
+              let value = "";
+              let truncated = false;
+              while (stack.length > 0) {
+                const node = stack.pop();
+                if (!node) {
+                  break;
+                }
+                visited += 1;
+                if (visited > options.maxNodes) {
+                  truncated = true;
+                  break;
+                }
+                if (node.nodeType === 3) {
+                  const raw = node.nodeValue ?? "";
+                  const nodeEnd = totalLength + raw.length;
+                  if (value.length < options.limit && nodeEnd > options.start) {
+                    const startInNode = Math.max(0, options.start - totalLength);
+                    value += raw.slice(startInNode, startInNode + options.limit - value.length);
+                  }
+                  totalLength = nodeEnd;
+                  if (value.length >= options.limit && nodeEnd > options.start + options.limit) {
+                    truncated = true;
+                    break;
+                  }
+                  continue;
+                }
+                if (node.nodeType !== 1) {
+                  continue;
+                }
+                const childElement = node as Element;
+                if (hiddenTags.has(childElement.tagName.toLowerCase())) {
+                  continue;
+                }
+                const children = childElement.childNodes;
+                for (let index = children.length - 1; index >= 0; index -= 1) {
+                  const child = children[index];
+                  if (child) {
+                    stack.push(child);
+                  }
+                }
+              }
+              return { value, totalLength, truncated: truncated || options.start + value.length < totalLength };
+            };
+            const boundedElementText = (root: Node): string => boundedText(root).value.slice(0, 500);
+            const collectLinks = (root: Node): Array<{ text: string; href: string }> => {
+              const links: Array<{ text: string; href: string }> = [];
+              if (!("childNodes" in root)) {
+                const fallback = (root as Element).querySelectorAll?.("a") ?? [];
+                for (const candidate of Array.from(fallback).slice(0, 100)) {
+                  const rawHref = (candidate as HTMLAnchorElement).href || candidate.getAttribute("href") || "";
+                  try {
+                    const url = new URL(rawHref);
+                    if (url.protocol !== "http:" && url.protocol !== "https:") continue;
+                    url.username = "";
+                    url.password = "";
+                    links.push({ text: String(candidate.textContent ?? "").trim().slice(0, 500), href: url.toString() });
+                  } catch {
+                    // Ignore malformed or non-HTTP links.
+                  }
+                }
+                return links;
+              }
+              const stack: Node[] = [root];
+              let visited = 0;
+              while (stack.length > 0 && links.length < 100) {
+                const node = stack.pop();
+                if (!node) break;
+                visited += 1;
+                if (visited > options.maxNodes) break;
+                if (node.nodeType !== 1) continue;
+                const candidate = node as Element;
+                if (candidate.tagName.toLowerCase() === "a") {
+                  const anchor = candidate as HTMLAnchorElement;
+                  const rawHref = anchor.href || candidate.getAttribute("href") || "";
+                  try {
+                    const url = new URL(rawHref);
+                    if (url.protocol === "http:" || url.protocol === "https:") {
+                      url.username = "";
+                      url.password = "";
+                      links.push({ text: boundedElementText(candidate).trim(), href: url.toString() });
+                    }
+                  } catch {
+                    // Ignore malformed or non-HTTP links.
+                  }
+                }
+                const children = candidate.childNodes;
+                for (let index = children.length - 1; index >= 0; index -= 1) {
+                  const child = children[index];
+                  if (child) stack.push(child);
+                }
+              }
+              return links;
+            };
+            const slice = boundedText(element);
             const tagName = element.tagName.toLowerCase();
             const inputType = tagName === "input" ? String((element as HTMLInputElement).type ?? "text").toLowerCase() : "";
             const formValue = tagName === "textarea" || tagName === "select"
               || (tagName === "input" && !["password", "hidden", "file"].includes(inputType))
               ? String((element as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement).value ?? "").slice(0, options.limit)
               : undefined;
-            const links = options.includeLinks
-              ? [element, ...Array.from(element.querySelectorAll("a"))].slice(0, 100).map((candidate) => {
-                const rawHref = (candidate as HTMLAnchorElement).href;
-                try {
-                  const url = new URL(rawHref);
-                  if (url.protocol !== "http:" && url.protocol !== "https:") {
-                    return undefined;
-                  }
-                  url.username = "";
-                  url.password = "";
-                  return { text: (candidate.textContent ?? "").trim().slice(0, 500), href: url.toString() };
-                } catch {
-                  return undefined;
-                }
-              }).filter((link): link is { text: string; href: string } => Boolean(link))
-              : undefined;
-            return { value, formValue, totalLength: fullText.length, truncated: options.start + value.length < fullText.length, links };
-          }, { start: offset, limit: maxChars, includeLinks }).catch((error: unknown) => {
+            const links = options.includeLinks ? collectLinks(element) : undefined;
+            return { value: slice.value, formValue, totalLength: slice.totalLength, truncated: slice.truncated, links };
+          }, { start: offset, limit: maxChars, includeLinks, maxNodes: MAX_DOM_TRAVERSAL_NODES }).catch((error: unknown) => {
             if (isMissingElementError(error)) {
               throw new AppError("ELEMENT_NOT_FOUND", `No element matched '${resolvedSelector}'.`, { cause: error });
             }
             throw normalizeBrowserOperationError(error, signal);
           })
-          : await frame.evaluate(({ start, limit, includeLinks }) => {
-            const fullText = document.body?.innerText ?? "";
-            const value = fullText.slice(start, start + limit);
-            const links = includeLinks
-              ? Array.from(document.querySelectorAll("a")).slice(0, 100).map((candidate) => {
-                const rawHref = (candidate as HTMLAnchorElement).href;
-                try {
-                  const url = new URL(rawHref);
-                  if (url.protocol !== "http:" && url.protocol !== "https:") {
-                    return undefined;
-                  }
-                  url.username = "";
-                  url.password = "";
-                  return { text: (candidate.textContent ?? "").trim().slice(0, 500), href: url.toString() };
-                } catch {
-                  return undefined;
+          : await frame.evaluate(({ start, limit, includeLinks, maxNodes }) => {
+            const hiddenTags = new Set(["script", "style", "noscript", "template"]);
+            const boundedText = (root: Node | null): { value: string; totalLength: number; truncated: boolean } => {
+              if (!root) return { value: "", totalLength: 0, truncated: false };
+              const stack: Node[] = [root];
+              let visited = 0;
+              let totalLength = 0;
+              let value = "";
+              let truncated = false;
+              while (stack.length > 0) {
+                const node = stack.pop();
+                if (!node) break;
+                visited += 1;
+                if (visited > maxNodes) {
+                  truncated = true;
+                  break;
                 }
-              }).filter((link): link is { text: string; href: string } => Boolean(link))
-              : undefined;
-            return { value, totalLength: fullText.length, truncated: start + value.length < fullText.length, links };
-          }, { start: offset, limit: maxChars, includeLinks })) as {
+                if (node.nodeType === 3) {
+                  const raw = node.nodeValue ?? "";
+                  const nodeEnd = totalLength + raw.length;
+                  if (value.length < limit && nodeEnd > start) {
+                    const startInNode = Math.max(0, start - totalLength);
+                    value += raw.slice(startInNode, startInNode + limit - value.length);
+                  }
+                  totalLength = nodeEnd;
+                  if (value.length >= limit && nodeEnd > start + limit) {
+                    truncated = true;
+                    break;
+                  }
+                  continue;
+                }
+                if (node.nodeType !== 1) continue;
+                const element = node as Element;
+                if (hiddenTags.has(element.tagName.toLowerCase())) continue;
+                const children = element.childNodes;
+                for (let index = children.length - 1; index >= 0; index -= 1) {
+                  const child = children[index];
+                  if (child) stack.push(child);
+                }
+              }
+              return { value, totalLength, truncated: truncated || start + value.length < totalLength };
+            };
+            const links: Array<{ text: string; href: string }> = [];
+            if (includeLinks && document.body) {
+              const stack: Node[] = [document.body];
+              let visited = 0;
+              while (stack.length > 0 && links.length < 100) {
+                const node = stack.pop();
+                if (!node) break;
+                visited += 1;
+                if (visited > maxNodes) break;
+                if (node.nodeType !== 1) continue;
+                const element = node as Element;
+                if (element.tagName.toLowerCase() === "a") {
+                  const anchor = element as HTMLAnchorElement;
+                  const rawHref = anchor.href || element.getAttribute("href") || "";
+                  try {
+                    const url = new URL(rawHref);
+                    if (url.protocol === "http:" || url.protocol === "https:") {
+                      url.username = "";
+                      url.password = "";
+                      const textStack: Node[] = [element];
+                      let linkText = "";
+                      let textNodes = 0;
+                      while (textStack.length > 0 && linkText.length < 500 && textNodes < 512) {
+                        const textNode = textStack.pop();
+                        if (!textNode) break;
+                        textNodes += 1;
+                        if (textNode.nodeType === 3) {
+                          linkText += (textNode.nodeValue ?? "").slice(0, 500 - linkText.length);
+                          continue;
+                        }
+                        if (textNode.nodeType !== 1) continue;
+                        const children = (textNode as Element).childNodes;
+                        for (let index = children.length - 1; index >= 0; index -= 1) {
+                          const child = children[index];
+                          if (child) textStack.push(child);
+                        }
+                      }
+                      links.push({ text: linkText.trim(), href: url.toString() });
+                    }
+                  } catch {
+                    // Ignore malformed or non-HTTP links.
+                  }
+                }
+                const children = element.childNodes;
+                for (let index = children.length - 1; index >= 0; index -= 1) {
+                  const child = children[index];
+                  if (child) stack.push(child);
+                }
+              }
+            }
+            const slice = boundedText(document.body);
+            return { value: slice.value, totalLength: slice.totalLength, truncated: slice.truncated, links: includeLinks ? links : undefined };
+          }, { start: offset, limit: maxChars, includeLinks, maxNodes: MAX_DOM_TRAVERSAL_NODES })) as {
             value: string;
             formValue?: string;
             totalLength: number;
@@ -1537,29 +1987,118 @@ export class BrowserService {
         const selector = action.selector ?? action.target ?? (action.index !== undefined ? `e${action.index + 1}` : undefined);
         const maxChars = Math.min(action.maxChars ?? this.config.browser.maxHtmlChars, this.config.browser.maxHtmlChars);
         const result = selector
-          ? await frame.$eval(await this.selectorFor(state, selector, action.frameId, frame), (element, limit) => {
-            const clone = element.cloneNode(true) as Element;
-            if (clone.tagName.toLowerCase() === "script") {
-              clone.textContent = "";
-            }
-            for (const script of Array.from(clone.querySelectorAll("script"))) {
-              script.remove();
-            }
-            for (const node of [clone, ...Array.from(clone.querySelectorAll("*"))]) {
-              if (node.tagName.toLowerCase() === "input") {
-                node.removeAttribute("value");
+          ? await frame.$eval(await this.selectorFor(state, selector, action.frameId, frame), (element, limit: number) => {
+            const serialize = (root: Node | null): { html: string; truncated: boolean } => {
+              if (!root) {
+                return { html: "", truncated: false };
               }
-              if (node.tagName.toLowerCase() === "textarea") {
-                node.textContent = "";
+              // Keep compatibility with small test/adapter DOM shims without
+              // taking this fallback on real browser nodes.
+              if (!("childNodes" in root)) {
+                const raw = String((root as Element).outerHTML ?? "");
+                return { html: raw.slice(0, limit), truncated: raw.length > limit };
               }
-              for (const attribute of Array.from(node.attributes)) {
-                if (/^(?:value|srcdoc|autocomplete|on[a-z]+|data-)/i.test(attribute.name)) {
-                  node.removeAttribute(attribute.name);
+              const capacity = Math.max(1, limit + 1);
+              let html = "";
+              let truncated = false;
+              const append = (value: string): void => {
+                if (truncated || !value) return;
+                const remaining = capacity - html.length;
+                if (remaining <= 0) {
+                  truncated = true;
+                  return;
+                }
+                if (value.length > remaining) {
+                  html += value.slice(0, remaining);
+                  truncated = true;
+                } else {
+                  html += value;
+                }
+              };
+              const appendEscaped = (value: string, attribute = false): void => {
+                let index = 0;
+                while (index < value.length && !truncated) {
+                  const character = value[index] ?? "";
+                  const escaped = character === "&" ? "&amp;"
+                    : character === "<" ? "&lt;"
+                      : character === ">" ? "&gt;"
+                        : attribute && character === "\"" ? "&quot;"
+                          : attribute && character === "'" ? "&#39;"
+                            : character;
+                  append(escaped);
+                  index += 1;
+                }
+                if (index < value.length) {
+                  truncated = true;
+                }
+              };
+              const voidTags = new Set(["area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"]);
+              const stack: Array<{ node: Node; closing?: string; suppressText?: boolean }> = [{ node: root }];
+              let visited = 0;
+              while (stack.length > 0 && !truncated) {
+                const entry = stack.pop();
+                if (!entry) break;
+                visited += 1;
+                if (visited > 20_000) {
+                  truncated = true;
+                  break;
+                }
+                if (entry.closing) {
+                  append(entry.closing);
+                  continue;
+                }
+                const node = entry.node;
+                if (node.nodeType === 3) {
+                  if (entry.suppressText) {
+                    continue;
+                  }
+                  appendEscaped(node.nodeValue ?? "");
+                  continue;
+                }
+                if (node.nodeType !== 1) {
+                  continue;
+                }
+                const current = node as Element;
+                const tag = current.tagName.toLowerCase().slice(0, 100);
+                if (tag === "script") {
+                  continue;
+                }
+                append(`<${tag}`);
+                const attributes = current.attributes;
+                const attributeCount = Math.min(attributes.length, 40);
+                for (let index = 0; index < attributeCount && !truncated; index += 1) {
+                  const attribute = attributes[index];
+                  if (!attribute || /^(?:value|srcdoc|autocomplete|on[a-z]+|data-)/i.test(attribute.name)) {
+                    continue;
+                  }
+                  append(` ${attribute.name.slice(0, 100)}="`);
+                  appendEscaped(attribute.value.slice(0, 500), true);
+                  append("\"");
+                  if (attribute.value.length > 500) {
+                    truncated = true;
+                  }
+                }
+                if (attributes.length > attributeCount) {
+                  truncated = true;
+                }
+                append(">");
+                if (voidTags.has(tag)) {
+                  continue;
+                }
+                const suppressText = entry.suppressText === true || tag === "textarea";
+                stack.push({ node, closing: `</${tag}>` });
+                const children = current.childNodes;
+                for (let index = children.length - 1; index >= 0; index -= 1) {
+                  const child = children[index];
+                  if (child) stack.push({ node: child, suppressText });
                 }
               }
-            }
-            const html = clone.outerHTML;
-            return { html: html.slice(0, limit + 1), truncated: html.length > limit };
+              if (stack.length > 0) {
+                truncated = true;
+              }
+              return { html: html.slice(0, limit), truncated: truncated || html.length > limit };
+            };
+            return serialize(element);
           }, maxChars).catch((error: unknown) => {
             // Only a genuine miss may degrade to ELEMENT_NOT_FOUND below;
             // execution/timeout/cancellation failures must surface as-is.
@@ -1568,26 +2107,91 @@ export class BrowserService {
             }
             throw normalizeBrowserOperationError(error, signal);
           })
-          : await frame.evaluate((limit) => {
-            const clone = document.documentElement.cloneNode(true) as Element;
-            for (const script of Array.from(clone.querySelectorAll("script"))) {
-              script.remove();
-            }
-            for (const node of [clone, ...Array.from(clone.querySelectorAll("*"))]) {
-              if (node.tagName.toLowerCase() === "input") {
-                node.removeAttribute("value");
+          : await frame.evaluate((limit: number) => {
+            const root = document.documentElement;
+            if (!root) return { html: "", truncated: false };
+            const capacity = Math.max(1, limit + 1);
+            let html = "";
+            let truncated = false;
+            const append = (value: string): void => {
+              if (truncated || !value) return;
+              const remaining = capacity - html.length;
+              if (remaining <= 0) {
+                truncated = true;
+                return;
               }
-              if (node.tagName.toLowerCase() === "textarea") {
-                node.textContent = "";
+              if (value.length > remaining) {
+                html += value.slice(0, remaining);
+                truncated = true;
+              } else {
+                html += value;
               }
-              for (const attribute of Array.from(node.attributes)) {
-                if (/^(?:value|srcdoc|autocomplete|on[a-z]+|data-)/i.test(attribute.name)) {
-                  node.removeAttribute(attribute.name);
+            };
+            const appendEscaped = (value: string, attribute = false): void => {
+              let index = 0;
+              while (index < value.length && !truncated) {
+                const character = value[index] ?? "";
+                append(character === "&" ? "&amp;"
+                  : character === "<" ? "&lt;"
+                    : character === ">" ? "&gt;"
+                      : attribute && character === "\"" ? "&quot;"
+                        : attribute && character === "'" ? "&#39;"
+                          : character);
+                index += 1;
+              }
+              if (index < value.length) truncated = true;
+            };
+            const voidTags = new Set(["area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"]);
+            const stack: Array<{ node: Node; closing?: string; suppressText?: boolean }> = [{ node: root }];
+            let visited = 0;
+            while (stack.length > 0 && !truncated) {
+              const entry = stack.pop();
+              if (!entry) break;
+              visited += 1;
+              if (visited > 20_000) {
+                truncated = true;
+                break;
+              }
+              if (entry.closing) {
+                append(entry.closing);
+                continue;
+              }
+              const node = entry.node;
+              if (node.nodeType === 3) {
+                if (entry.suppressText) {
+                  continue;
                 }
+                appendEscaped(node.nodeValue ?? "");
+                continue;
+              }
+              if (node.nodeType !== 1) continue;
+              const element = node as Element;
+              const tag = element.tagName.toLowerCase().slice(0, 100);
+              if (tag === "script") continue;
+              append(`<${tag}`);
+              const attributes = element.attributes;
+              const attributeCount = Math.min(attributes.length, 40);
+              for (let index = 0; index < attributeCount && !truncated; index += 1) {
+                const attribute = attributes[index];
+                if (!attribute || /^(?:value|srcdoc|autocomplete|on[a-z]+|data-)/i.test(attribute.name)) continue;
+                append(` ${attribute.name.slice(0, 100)}="`);
+                appendEscaped(attribute.value.slice(0, 500), true);
+                append("\"");
+                if (attribute.value.length > 500) truncated = true;
+              }
+              if (attributes.length > attributeCount) truncated = true;
+              append(">");
+              if (voidTags.has(tag)) continue;
+              const suppressText = entry.suppressText === true || tag === "textarea";
+              stack.push({ node, closing: `</${tag}>` });
+              const children = element.childNodes;
+              for (let index = children.length - 1; index >= 0; index -= 1) {
+                const child = children[index];
+                if (child) stack.push({ node: child, suppressText });
               }
             }
-            const html = clone.outerHTML;
-            return { html: html.slice(0, limit + 1), truncated: html.length > limit };
+            if (stack.length > 0) truncated = true;
+            return { html: html.slice(0, limit), truncated: truncated || html.length > limit };
           }, maxChars);
         if (!result?.html) {
           throw new AppError("ELEMENT_NOT_FOUND", selector ? `No element matched '${selector}'.` : "The page did not expose HTML.");
@@ -1651,10 +2255,45 @@ export class BrowserService {
         return { saved: wrapUntrustedText("saved_file_path", redactSecretPlaceholders(await this.serverRelativePath(outputPath)), 1_024) };
       }
       case "list_downloads":
-        return this.listDownloads();
+        if (state.downloadConfigurationError && !state.downloadConfigured) {
+          throw state.downloadConfigurationError;
+        }
+        return this.listDownloads(signal);
       case "dropdown_options": {
         const selector = await this.selectorFor(state, targetForAction(action, "selector"), action.frameId, frame);
-        const options = await frame.$$eval(selector, (elements) => elements.flatMap((element) => Array.from((element as HTMLSelectElement).options ?? []).slice(0, 200).map((option) => ({ value: option.value, label: option.textContent?.trim() ?? "", selected: option.selected }))).slice(0, 200));
+        const options = await frame.$$eval(selector, (elements) => {
+          const boundedText = (root: Node): string => {
+            const stack: Node[] = [root];
+            let output = "";
+            let visited = 0;
+            while (stack.length > 0 && output.length < 500) {
+              const node = stack.pop();
+              if (!node) break;
+              visited += 1;
+              if (visited > 512) break;
+              if (node.nodeType === 3) {
+                output += (node.nodeValue ?? "").slice(0, 500 - output.length);
+                continue;
+              }
+              if (node.nodeType !== 1) continue;
+              const children = (node as Element).childNodes;
+              for (let index = children.length - 1; index >= 0; index -= 1) {
+                const child = children[index];
+                if (child) stack.push(child);
+              }
+            }
+            return output.trim().slice(0, 500);
+          };
+          const output: Array<{ value: string; label: string; selected: boolean }> = [];
+          for (const element of elements.slice(0, 50)) {
+            for (const option of Array.from((element as HTMLSelectElement).options ?? []).slice(0, 200)) {
+              if (output.length >= 200) break;
+              output.push({ value: option.value.slice(0, 500), label: boundedText(option), selected: option.selected });
+            }
+            if (output.length >= 200) break;
+          }
+          return output;
+        });
         return options.map((option) => ({
           value: wrapUntrustedText("option_value", redactSecretPlaceholders(option.value), 500),
           label: wrapUntrustedText("option_label", redactSecretPlaceholders(option.label), 500),
@@ -1672,11 +2311,47 @@ export class BrowserService {
           throw new AppError("STALE_PAGE_SLICE", "The requested page slice revision is stale. Extract the page again and retry.", { retryable: true, details: { expectedRevision: revisionAtStart, providedRevision: revision, hint: "Capture browser_extract again and use its new revision." } });
         }
         const maxChars = Math.min(action.maxChars ?? 40_000, this.config.browser.maxHtmlChars);
-        const result = await frame.evaluate(({ start, limit }) => {
-          const fullText = document.body?.innerText ?? "";
-          const text = fullText.slice(start, start + limit);
-          return { text, totalLength: fullText.length, hasMore: start + text.length < fullText.length };
-        }, { start: offset, limit: maxChars });
+        const result = await frame.evaluate(({ start, limit, maxNodes }) => {
+          const root = document.body;
+          if (!root) return { text: "", totalLength: 0, hasMore: false };
+          const hiddenTags = new Set(["script", "style", "noscript", "template"]);
+          const stack: Node[] = [root];
+          let visited = 0;
+          let totalLength = 0;
+          let text = "";
+          let scanTruncated = false;
+          while (stack.length > 0) {
+            const node = stack.pop();
+            if (!node) break;
+            visited += 1;
+            if (visited > maxNodes) {
+              scanTruncated = true;
+              break;
+            }
+            if (node.nodeType === 3) {
+              const raw = node.nodeValue ?? "";
+              const nodeEnd = totalLength + raw.length;
+              if (text.length < limit && nodeEnd > start) {
+                const startInNode = Math.max(0, start - totalLength);
+                text += raw.slice(startInNode, startInNode + limit - text.length);
+              }
+              totalLength = nodeEnd;
+              if (text.length >= limit && nodeEnd > start + limit) {
+                return { text, totalLength, hasMore: true };
+              }
+              continue;
+            }
+            if (node.nodeType !== 1) continue;
+            const element = node as Element;
+            if (hiddenTags.has(element.tagName.toLowerCase())) continue;
+            const children = element.childNodes;
+            for (let index = children.length - 1; index >= 0; index -= 1) {
+              const child = children[index];
+              if (child) stack.push(child);
+            }
+          }
+          return { text, totalLength, hasMore: scanTruncated || start + text.length < totalLength };
+        }, { start: offset, limit: maxChars, maxNodes: MAX_DOM_TRAVERSAL_NODES });
         if (state.domRevision !== revisionAtStart) {
           throw new AppError("STALE_PAGE_SLICE", "The page changed while its text slice was being collected. Retry with a fresh revision.", { retryable: true, details: { hint: "Capture browser_extract again and use its new revision." } });
         }
@@ -1687,15 +2362,54 @@ export class BrowserService {
           this.benchmarkCounters.pageEvaluations += 1;
         }
         const query = requireField(action.query ?? action.text, "query");
-        const matches = await frame.evaluate((needle) => {
-          const text = document.body?.innerText ?? "";
-          const lower = text.toLowerCase();
-          const target = needle.toLowerCase();
+        const matches = await frame.evaluate((needle, options: { maxNodes: number; maxChars: number }) => {
+          const root = document.body;
+          if (!root) return { matches: [], totalMatches: 0, scanTruncated: false };
+          const target = needle.normalize("NFKC").replace(/\s+/g, " ").trim().toLowerCase();
+          if (!target) return { matches: [], totalMatches: 0, scanTruncated: false };
+          const hiddenTags = new Set(["script", "style", "noscript", "template"]);
+          const stack: Node[] = [root];
+          let visited = 0;
+          let text = "";
+          let scanTruncated = false;
+          while (stack.length > 0) {
+            const node = stack.pop();
+            if (!node) break;
+            visited += 1;
+            if (visited > options.maxNodes) {
+              scanTruncated = true;
+              break;
+            }
+            if (node.nodeType === 3) {
+              const remaining = options.maxChars - text.length;
+              if (remaining <= 0) {
+                scanTruncated = true;
+                break;
+              }
+              const raw = node.nodeValue ?? "";
+              text += raw.slice(0, remaining);
+              if (raw.length > remaining) {
+                scanTruncated = true;
+                break;
+              }
+              continue;
+            }
+            if (node.nodeType !== 1) continue;
+            const element = node as Element;
+            if (hiddenTags.has(element.tagName.toLowerCase())) continue;
+            const children = element.childNodes;
+            for (let index = children.length - 1; index >= 0; index -= 1) {
+              const child = children[index];
+              if (child) stack.push(child);
+            }
+          }
+          const normalizedText = text.normalize("NFKC").replace(/\s+/g, " ");
+          const lower = normalizedText.toLowerCase();
           const output: string[] = [];
           let index = lower.indexOf(target);
           let totalMatches = 0;
           while (index >= 0 && output.length < 20) {
-            output.push(text.slice(Math.max(0, index - 120), Math.min(text.length, index + needle.length + 120)));
+            output.push(normalizedText.slice(Math.max(0, index - 120), Math.min(normalizedText.length, index + target.length + 120)));
             totalMatches += 1;
             index = lower.indexOf(target, index + target.length);
           }
@@ -1703,14 +2417,40 @@ export class BrowserService {
             totalMatches += 1;
             index = lower.indexOf(target, index + target.length);
           }
-          return { matches: output, totalMatches };
-        }, query);
-        return { query, matches: matches.matches.map((match) => wrapUntrustedText("page_match", redactSecretPlaceholders(match), 500)), totalMatches: matches.totalMatches, matchesTruncated: matches.totalMatches > matches.matches.length };
+          return { matches: output, totalMatches, scanTruncated };
+        }, query, { maxNodes: MAX_DOM_TRAVERSAL_NODES, maxChars: MAX_TEXT_SCAN_CHARS });
+        return { query, matches: matches.matches.map((match) => wrapUntrustedText("page_match", redactSecretPlaceholders(match), 500)), totalMatches: matches.totalMatches, matchesTruncated: matches.totalMatches > matches.matches.length || matches.scanTruncated };
       }
       case "find_elements": {
         const selector = targetForAction(action, "selector");
         const safeSelector = await this.selectorFor(state, selector, action.frameId, frame);
         function collectFindElements(matches: Element[], fallbackSelector: string): Array<{ tag: string; selector: string; rect: { x: number; y: number; width: number; height: number }; text: string; attributes: Record<string, string>; omittedAttributes: number }> {
+          const boundedText = (root: Element): string => {
+            const maybeChildNodes = (root as unknown as { childNodes?: unknown }).childNodes;
+            if (!maybeChildNodes) {
+              return String((root as unknown as { textContent?: unknown }).textContent ?? "").trim().slice(0, 300);
+            }
+            const stack: Node[] = [root];
+            let output = "";
+            let visited = 0;
+            while (stack.length > 0 && output.length < 300) {
+              const node = stack.pop();
+              if (!node) break;
+              visited += 1;
+              if (visited > 512) break;
+              if (node.nodeType === 3) {
+                output += (node.nodeValue ?? "").slice(0, 300 - output.length);
+                continue;
+              }
+              if (node.nodeType !== 1) continue;
+              const children = (node as Element).childNodes;
+              for (let index = children.length - 1; index >= 0; index -= 1) {
+                const child = children[index];
+                if (child) stack.push(child);
+              }
+            }
+            return output.trim().slice(0, 300);
+          };
           return matches.slice(0, 50).map((element) => {
           let elementSelector = fallbackSelector;
           let usedUniqueId = false;
@@ -1719,7 +2459,10 @@ export class BrowserService {
             const id = element.getAttribute("id");
             if (id) {
               try {
-                if (document.querySelectorAll(`#${CSS.escape(id)}`).length === 1) {
+                // getElementById is a targeted lookup and avoids turning a
+                // large find_elements result into another full selector scan.
+                // Snapshot refs still verify their signature before use.
+                if (document.getElementById(id) === element) {
                   elementSelector = `#${CSS.escape(id)}`;
                   usedUniqueId = true;
                 }
@@ -1738,9 +2481,15 @@ export class BrowserService {
                   break;
                 }
                 const currentTagName = current.tagName;
-                const siblings = Array.from(parent.children as HTMLCollectionOf<Element>).filter((child: Element) => child.tagName === currentTagName);
-                const index = siblings.indexOf(current) + 1;
-                parts.unshift(`${tag}:nth-of-type(${index})`);
+                let siblingIndex = 0;
+                let currentIndex = 0;
+                for (let childIndex = 0; childIndex < parent.children.length; childIndex += 1) {
+                  const child = parent.children[childIndex];
+                  if (!child || child.tagName !== currentTagName) continue;
+                  siblingIndex += 1;
+                  if (child === current) currentIndex = siblingIndex;
+                }
+                parts.unshift(`${tag}:nth-of-type(${currentIndex || 1})`);
                 current = parent;
               }
               elementSelector = parts.join(" > ").slice(0, 500) || fallbackSelector;
@@ -1758,20 +2507,26 @@ export class BrowserService {
           // are still wrapped, truncated, and never treated as executable.
           const safeAttributes = new Set(["id", "class", "role", "type", "name", "placeholder", "title", "tabindex", "style", "fill", "stroke", "x", "y", "x1", "x2", "y1", "y2", "r", "cx", "cy", "width", "height", "points", "transform", "font-size"]);
           const safeDataAttributes = new Set(["data-color", "data-index", "data-sides", "data-result", "data-key", "data-type", "data-item", "data-id", "data-start", "data-end", "data-duration", "data-output", "data-value", "data-position", "data-price"]);
-          for (const [index, attribute] of Array.from(element.attributes).entries()) {
+          const attributeCount = element.attributes.length;
+          const inspectedAttributes = Math.min(attributeCount, 40);
+          for (let index = 0; index < inspectedAttributes; index += 1) {
+            const attribute = element.attributes[index];
+            if (!attribute) continue;
             const name = attribute.name.toLowerCase();
             const allowed = safeAttributes.has(name) || safeDataAttributes.has(name) || /^aria-[a-z0-9_-]+$/i.test(name);
-            if (index >= 40 || !allowed) {
+            if (!allowed) {
               omittedAttributes += 1;
               continue;
             }
             attributes[name.slice(0, 100)] = attribute.value.slice(0, 200);
+            if (attribute.value.length > 200) omittedAttributes += 1;
           }
+          omittedAttributes += Math.max(0, attributeCount - inspectedAttributes);
           return {
             tag: element.tagName.toLowerCase(),
             selector: elementSelector,
             rect: { x: boundedX, y: boundedY, width: boundedWidth, height: boundedHeight },
-            text: (element.textContent ?? "").trim().slice(0, 300),
+            text: boundedText(element),
             attributes,
             omittedAttributes,
           };
@@ -1796,7 +2551,7 @@ export class BrowserService {
       case "list_frames":
         return this.listFrames(state);
       case "accessibility_snapshot":
-        return this.accessibilitySnapshot(state, action.maxNodes ?? 500, action.maxChars ?? 40_000, action.interestingOnly ?? true, frame);
+        return this.accessibilitySnapshot(state, action.maxNodes ?? 500, action.maxChars ?? 40_000, action.interestingOnly ?? true, frame, signal);
       case "get_computed_style": {
         const selector = await this.selectorFor(state, targetForAction(action, "selector"), action.frameId, frame);
         return frame.$eval(selector, (element) => {
@@ -3164,10 +3919,10 @@ export class BrowserService {
       }
       this.assertStateLive(state);
     }
-    if (!state.downloadConfigured) {
+    if (!state.downloadConfigured && !state.downloadConfigurationError) {
       try {
         const downloadPath = resolve(this.config.dataDir, "downloads");
-        await mkdir(downloadPath, { recursive: true, mode: 0o700 });
+        await awaitWithAbort(mkdir(downloadPath, { recursive: true, mode: 0o700 }), signal);
         try {
           // Puppeteer exposes the context at runtime, while its stable public
           // BrowserContext type does not yet declare this CDP-backed helper.
@@ -3176,21 +3931,29 @@ export class BrowserService {
             throw new AppError("DOWNLOAD_CONFIGURATION_FAILED", "The connected browser does not expose context download behavior.");
           }
           if (!this.configuredDownloadContexts.has(context)) {
-            await context.setDownloadBehavior({ policy: "allow", downloadPath });
+            await awaitWithAbort(context.setDownloadBehavior({ policy: "allow", downloadPath }), signal);
             this.configuredDownloadContexts.add(context);
           }
           state.downloadConfigured = true;
+          state.downloadConfigurationError = undefined;
         } catch {
+          throwIfAborted(signal);
           // Older Chromium versions expose only the page-scoped command.
-          const client = await state.page.createCDPSession();
+          const client = await awaitWithAbort(state.page.createCDPSession(), signal);
           try {
-            await client.send("Page.setDownloadBehavior", { behavior: "allow", downloadPath });
+            await awaitWithAbort(client.send("Page.setDownloadBehavior", { behavior: "allow", downloadPath }), signal);
             state.downloadConfigured = true;
+            state.downloadConfigurationError = undefined;
           } finally {
-            await client.detach().catch(() => undefined);
+            await settleWithTimeout(client.detach().catch(() => undefined), 500);
           }
         }
       } catch (error) {
+        throwIfAborted(signal);
+        const classified = error instanceof AppError && error.code === "DOWNLOAD_CONFIGURATION_FAILED"
+          ? error
+          : new AppError("DOWNLOAD_CONFIGURATION_FAILED", "The browser download directory could not be configured. Retry after reconnecting the browser.", { retryable: true, cause: error });
+        state.downloadConfigurationError = classified;
         this.logger.warn("Browser download behavior could not be configured", { pageId: state.id, error: String(error) });
       }
     }
@@ -3492,40 +4255,51 @@ export class BrowserService {
     return summaries.filter((summary): summary is FrameSummary => summary !== undefined);
   }
 
-  private async accessibilitySnapshot(state: PageState, maxNodes: number, maxChars: number, interestingOnly: boolean, frame?: Frame): Promise<unknown> {
-    const client = await state.page.createCDPSession();
+  private async accessibilitySnapshot(state: PageState, maxNodes: number, maxChars: number, interestingOnly: boolean, frame?: Frame, signal?: AbortSignal): Promise<unknown> {
+    const client = await awaitWithAbort(state.page.createCDPSession(), signal);
     try {
       const frameId = frameProtocolId(frame);
-      const response = await client.send("Accessibility.getFullAXTree", frameId ? { frameId } : {}) as unknown as { nodes?: Array<Record<string, unknown>> };
+      const nodeLimit = Number.isFinite(maxNodes) ? Math.max(1, Math.min(5_000, Math.floor(maxNodes))) : 500;
+      // The protocol's full-tree call otherwise materializes an unbounded AX
+      // tree. A shallow, bounded request keeps wide/hostile documents from
+      // monopolizing the CDP connection; the response is still capped below.
+      const depth = Math.min(24, Math.max(1, Math.ceil(Math.log2(nodeLimit + 1)) + 2));
+      const response = await awaitWithAbort(client.send("Accessibility.getFullAXTree", { ...(frameId ? { frameId } : {}), depth }), signal) as unknown as { nodes?: Array<Record<string, unknown>> };
       const sourceNodes = Array.isArray(response.nodes) ? response.nodes : [];
-      const nodes = sourceNodes
-        .filter((node) => !interestingOnly || isInterestingAxNode(node))
-        .slice(0, Math.max(1, Math.floor(maxNodes)))
-        .map((node, index) => {
-          const role = axValue(node.role);
-          const name = axValue(node.name);
-          const value = axValue(node.value);
-          const properties = Array.isArray(node.properties)
-            ? node.properties.slice(0, 20).reduce<Record<string, string>>((result, property) => {
-              if (property && typeof property === "object") {
-                const item = property as Record<string, unknown>;
-                const key = typeof item.name === "string" ? item.name : "";
-                const itemValue = axValue(item.value);
-                if (key && itemValue) {
-                  result[key.slice(0, 200)] = wrapUntrustedText("accessibility_property", redactSecretPlaceholders(itemValue), 200);
-                }
+      const nodes: Array<Record<string, unknown>> = [];
+      let sourceTruncated = false;
+      for (const node of sourceNodes) {
+        if (interestingOnly && !isInterestingAxNode(node)) {
+          continue;
+        }
+        if (nodes.length >= nodeLimit) {
+          sourceTruncated = true;
+          break;
+        }
+        const role = axValue(node.role);
+        const name = axValue(node.name);
+        const value = axValue(node.value);
+        const properties = Array.isArray(node.properties)
+          ? node.properties.slice(0, 20).reduce<Record<string, string>>((result, property) => {
+            if (property && typeof property === "object") {
+              const item = property as Record<string, unknown>;
+              const key = typeof item.name === "string" ? item.name : "";
+              const itemValue = axValue(item.value);
+              if (key && itemValue) {
+                result[key.slice(0, 200)] = wrapUntrustedText("accessibility_property", redactSecretPlaceholders(itemValue), 200);
               }
-              return result;
-            }, {})
-            : {};
-          return {
-            ref: `ax-${index + 1}`,
-            role: role ? role.slice(0, 200) : "unknown",
-            name: wrapUntrustedText("accessibility_name", redactSecretPlaceholders(name.slice(0, 500)), 500),
-            ...(value ? { value: wrapUntrustedText("accessibility_value", redactSecretPlaceholders(value.slice(0, 500)), 500) } : {}),
-            properties,
-          };
+            }
+            return result;
+          }, {})
+          : {};
+        nodes.push({
+          ref: `ax-${nodes.length + 1}`,
+          role: role ? role.slice(0, 200) : "unknown",
+          name: wrapUntrustedText("accessibility_name", redactSecretPlaceholders(name.slice(0, 500)), 500),
+          ...(value ? { value: wrapUntrustedText("accessibility_value", redactSecretPlaceholders(value.slice(0, 500)), 500) } : {}),
+          properties,
         });
+      }
       const boundedNodes = boundAccessibilityNodes(nodes, maxChars);
       return {
         pageId: state.id,
@@ -3533,10 +4307,10 @@ export class BrowserService {
         // let clients act on an id that PageState never recorded.
         ...(state.snapshotId ? { snapshotId: state.snapshotId } : {}),
         nodes: boundedNodes.nodes,
-        truncated: sourceNodes.length > nodes.length || boundedNodes.truncated,
+        truncated: sourceTruncated || boundedNodes.truncated,
       };
     } finally {
-      await client.detach().catch(() => undefined);
+      await settleWithTimeout(Promise.resolve().then(() => client.detach()).catch(() => undefined), 500);
     }
   }
 
@@ -3603,6 +4377,37 @@ export class BrowserService {
       const currentSignature = await frame.$eval(stored.selector, (element) => {
         const htmlElement = element as HTMLElement & { type?: string };
         const anchor = element.closest("a") as HTMLAnchorElement | null;
+        const boundedText = (root: Node): string => {
+          const hiddenTags = new Set(["script", "style", "noscript", "template"]);
+          const stack: Array<{ node: Node; hidden: boolean }> = [{ node: root, hidden: false }];
+          let output = "";
+          let visited = 0;
+          while (stack.length > 0 && output.length < 500) {
+            const entry = stack.pop();
+            if (!entry) break;
+            visited += 1;
+            if (visited > 512) break;
+            if (entry.node.nodeType === 3) {
+              if (!entry.hidden) output += (entry.node.nodeValue ?? "").slice(0, 500 - output.length);
+              continue;
+            }
+            if (entry.node.nodeType !== 1) continue;
+            const current = entry.node as Element;
+            if (hiddenTags.has(current.tagName.toLowerCase())) continue;
+            const style = current.getAttribute("style") ?? "";
+            const hidden = entry.hidden
+              || current.hasAttribute("hidden")
+              || current.getAttribute("aria-hidden") === "true"
+              || /(?:^|[;\s])(display|visibility)\s*:\s*(?:none|hidden)\b|(?:^|[;\s])opacity\s*:\s*0(?:[;\s]|$)/i.test(style);
+            const children = current.childNodes;
+            for (let index = children.length - 1; index >= 0; index -= 1) {
+              const child = children[index];
+              if (child) stack.push({ node: child, hidden });
+            }
+          }
+          return output;
+        };
+        const text = boundedText(element).replace(/\s+/g, " ").trim().slice(0, 500);
         return [
           element.tagName.toLowerCase(),
           element.getAttribute("id") ?? "",
@@ -3613,8 +4418,8 @@ export class BrowserService {
           element.getAttribute("disabled") ?? "",
           element.getAttribute("aria-disabled") ?? "",
           htmlElement.type ?? "",
-          (htmlElement.innerText || element.getAttribute("value") || element.textContent || "").replace(/\s+/g, " ").trim().slice(0, 500),
-          anchor?.href ?? "",
+          text || element.getAttribute("value") || "",
+          (anchor?.href ?? "").slice(0, 4_096),
         ].join("\u001f");
       }).catch(() => undefined);
       if (!currentSignature || currentSignature !== stored.signature) {
@@ -3654,6 +4459,38 @@ export class BrowserService {
       const htmlElement = clickable as HTMLElement & { type?: string; value?: string };
       const anchor = clickable.closest("a") as HTMLAnchorElement | null;
       const rect = clickable.getBoundingClientRect();
+      const boundedText = (root: Node): string => {
+        const hiddenTags = new Set(["script", "style", "noscript", "template"]);
+        const stack: Array<{ node: Node; hidden: boolean }> = [{ node: root, hidden: false }];
+        let output = "";
+        let visited = 0;
+        while (stack.length > 0 && output.length < 500) {
+          const entry = stack.pop();
+          if (!entry) break;
+          visited += 1;
+          if (visited > 512) break;
+          if (entry.node.nodeType === 3) {
+            if (!entry.hidden) output += (entry.node.nodeValue ?? "").slice(0, 500 - output.length);
+            continue;
+          }
+          if (entry.node.nodeType !== 1) continue;
+          const current = entry.node as Element;
+          if (hiddenTags.has(current.tagName.toLowerCase())) continue;
+          const style = current.getAttribute("style") ?? "";
+          const hidden = entry.hidden
+            || current.hasAttribute("hidden")
+            || current.getAttribute("aria-hidden") === "true"
+            || /(?:^|[;\s])(display|visibility)\s*:\s*(?:none|hidden)\b|(?:^|[;\s])opacity\s*:\s*0(?:[;\s]|$)/i.test(style);
+          const children = current.childNodes;
+          for (let index = children.length - 1; index >= 0; index -= 1) {
+            const child = children[index];
+            if (child) stack.push({ node: child, hidden });
+          }
+        }
+        return output;
+      };
+      const elementText = boundedText(element).replace(/\s+/g, " ").trim().slice(0, 500);
+      const clickableText = boundedText(clickable).replace(/\s+/g, " ").trim().slice(0, 200);
       return {
         signature: [
           element.tagName.toLowerCase(),
@@ -3665,14 +4502,14 @@ export class BrowserService {
           element.getAttribute("disabled") ?? "",
           element.getAttribute("aria-disabled") ?? "",
           htmlElement.type ?? "",
-          (htmlElement.innerText || element.getAttribute("value") || element.textContent || "").replace(/\s+/g, " ").trim().slice(0, 500),
-          anchor?.href ?? "",
+          elementText || element.getAttribute("value") || "",
+          (anchor?.href ?? "").slice(0, 4_096),
         ].join("\u001f"),
         tag: clickable.tagName.toLowerCase(),
         type: htmlElement.type?.toLowerCase() ?? "",
         role: clickable.getAttribute("role") ?? "",
         focusable: clickable instanceof HTMLElement && (clickable.hasAttribute("tabindex") || /^(?:button|input|select|textarea|a)$/i.test(clickable.tagName)),
-        label: [clickable.textContent, clickable.getAttribute("aria-label"), clickable.getAttribute("title"), htmlElement.value].filter(Boolean).join(" ").replace(/\s+/g, " ").trim().slice(0, 200),
+        label: [clickableText, clickable.getAttribute("aria-label"), clickable.getAttribute("title"), htmlElement.value].filter(Boolean).join(" ").replace(/\s+/g, " ").trim().slice(0, 200),
         href: anchor?.href ?? (clickable as HTMLAnchorElement).href ?? clickable.getAttribute("href") ?? undefined,
         rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
       };
@@ -3688,7 +4525,7 @@ export class BrowserService {
     if (this.targetGuardUnavailable) {
       throw new AppError("POPUP_BLOCKED", "Opening a new tab is unavailable because the browser target policy guard could not be installed.", { retryable: true });
     }
-    const beforePages = new Set(await browser.pages());
+    const beforePages = new Set(await awaitWithAbort(browser.pages(), signal));
     const beforeUrl = state.page.url();
     let selector: string | undefined;
     try {
@@ -3704,35 +4541,94 @@ export class BrowserService {
         const anchor = element.closest("a") as HTMLAnchorElement | null;
         return anchor?.href ?? (element as HTMLAnchorElement).href ?? element.getAttribute("href");
       }).catch(() => undefined)
-      : await state.page.evaluate((needle) => {
-        const element = Array.from(document.querySelectorAll("body *")).find((candidate) => {
-          const htmlElement = candidate as HTMLElement;
-          return (htmlElement.innerText || candidate.textContent || "").trim() === needle;
-        });
-        const clickable = element?.closest("a,button,[role=button],[onclick]") as HTMLElement | null;
-        const anchor = clickable?.closest("a") as HTMLAnchorElement | null;
-        return anchor?.href ?? clickable?.getAttribute("href");
-      }, target).catch(() => undefined);
+      : await state.page.evaluate((needle, maxNodes) => {
+        const normalizedTarget = needle.normalize("NFKC").replace(/\s+/g, " ").trim().toLowerCase();
+        if (!normalizedTarget || !document.body) return undefined;
+        const hiddenTags = new Set(["script", "style", "noscript", "template"]);
+        const boundedText = (root: Element): string => {
+          const stack: Node[] = [root];
+          let output = "";
+          let visited = 0;
+          while (stack.length > 0 && output.length < 2_000) {
+            const node = stack.pop();
+            if (!node) break;
+            visited += 1;
+            if (visited > 2_000) break;
+            if (node.nodeType === 3) {
+              output += (node.nodeValue ?? "").slice(0, 2_000 - output.length);
+              continue;
+            }
+            if (node.nodeType !== 1) continue;
+            const children = (node as Element).childNodes;
+            for (let index = children.length - 1; index >= 0; index -= 1) {
+              const child = children[index];
+              if (child) stack.push(child);
+            }
+          }
+          return output;
+        };
+        const stack: Array<{ element: Element; hidden: boolean }> = [{ element: document.body, hidden: false }];
+        let visited = 0;
+        while (stack.length > 0) {
+          const entry = stack.pop();
+          if (!entry) break;
+          visited += 1;
+          if (visited > maxNodes) break;
+          const { element, hidden } = entry;
+          const tag = element.tagName.toLowerCase();
+          if (hiddenTags.has(tag)) continue;
+          const style = element.getAttribute("style") ?? "";
+          const locallyHidden = hidden
+            || element.hasAttribute("hidden")
+            || element.getAttribute("aria-hidden") === "true"
+            || /(?:^|[;\s])(display|visibility)\s*:\s*(?:none|hidden)\b|(?:^|[;\s])opacity\s*:\s*0(?:[;\s]|$)/i.test(style);
+          if (element !== document.body && !locallyHidden && (element.children.length === 0 || element.children.length <= 8)) {
+            const candidateText = boundedText(element).normalize("NFKC").replace(/\s+/g, " ").trim().toLowerCase();
+            if (candidateText === normalizedTarget) {
+              const clickable = element.closest("a,button,[role=button],[onclick]");
+              const anchor = clickable?.closest("a") as HTMLAnchorElement | null;
+              if (anchor?.href || clickable?.getAttribute("href")) {
+                return anchor?.href ?? clickable?.getAttribute("href");
+              }
+            }
+          }
+          const children = element.children;
+          for (let index = 0; index < children.length; index += 1) {
+            const child = children[index];
+            if (child) stack.push({ element: child, hidden: locallyHidden });
+          }
+        }
+        return undefined;
+      }, target, MAX_DOM_TRAVERSAL_NODES).catch(() => undefined);
     if (!href) {
       return undefined;
     }
     throwIfAborted(signal);
     const popupSeed: PopupObservation = { createdPages: new Set<Page>(), pendingPagePromises: new Set<Promise<void>>() };
+    let clickCompleted!: () => void;
+    const clickCompletion = new Promise<void>((resolve) => {
+      clickCompleted = resolve;
+    });
     const popupPromise = this.waitForPopup(
       state.page,
       browser,
       beforePages,
-      Math.min(this.config.browser.actionTimeoutMs, NEW_TAB_DETECTION_TIMEOUT_MS),
+      this.config.browser.actionTimeoutMs,
       signal,
       popupSeed,
+      clickCompletion,
     );
     let popupObservation: PopupObservation | undefined;
     try {
       // Perform the real click first so target=_blank, window.open, POST forms,
       // and page handlers retain their browser semantics.
-      await this.clickTarget(state, target, "left", 1, signal);
+      try {
+        await this.clickTarget(state, target, "left", 1, signal);
+      } finally {
+        clickCompleted();
+      }
       popupObservation = await popupPromise;
-      await Promise.allSettled([...popupObservation.pendingPagePromises]);
+      await awaitWithAbort(Promise.allSettled([...popupObservation.pendingPagePromises]).then(() => undefined), signal);
       const popupCandidate = popupObservation.popup && !isPageClosed(popupObservation.popup) && !beforePages.has(popupObservation.popup) ? popupObservation.popup : undefined;
       const opened = popupCandidate ?? [...popupObservation.createdPages].find((candidate) => !isPageClosed(candidate) && !beforePages.has(candidate));
       if (opened) {
@@ -3774,7 +4670,7 @@ export class BrowserService {
       if (!popupObservation) {
         popupObservation = await popupPromise.catch(() => popupSeed);
       }
-      await Promise.allSettled([...popupObservation.pendingPagePromises]);
+      await settleWithTimeout(Promise.allSettled([...popupObservation.pendingPagePromises]).then(() => undefined), 500);
       await this.disposeOpenedPages(popupObservation.createdPages);
       throw error;
     }
@@ -3797,16 +4693,24 @@ export class BrowserService {
       }));
   }
 
-  private waitForPopup(page: Page, browser: Browser, beforePages: Set<Page>, timeoutMs: number, signal?: AbortSignal, seed?: PopupObservation): Promise<PopupObservation> {
+  private waitForPopup(page: Page, browser: Browser, beforePages: Set<Page>, timeoutMs: number, signal?: AbortSignal, seed?: PopupObservation, clickCompleted?: Promise<void>): Promise<PopupObservation> {
     return new Promise((resolve, reject) => {
       let settled = false;
+      let postClickTimer: ReturnType<typeof setTimeout> | undefined;
       const observation = seed ?? { createdPages: new Set<Page>(), pendingPagePromises: new Set<Promise<void>>() };
-      const finish = (popup?: Page): void => {
+      const finish = (popup?: Page, abandon = false): void => {
         if (settled) {
           return;
         }
+        if (abandon) {
+          observation.abandoned = true;
+        }
         settled = true;
         clearTimeout(timer);
+        if (postClickTimer) {
+          clearTimeout(postClickTimer);
+          postClickTimer = undefined;
+        }
         page.off("popup", onPopup);
         page.off("close", onPageClose);
         browser.off("targetcreated", onTargetCreated);
@@ -3818,7 +4722,12 @@ export class BrowserService {
           return;
         }
         settled = true;
+        observation.abandoned = true;
         clearTimeout(timer);
+        if (postClickTimer) {
+          clearTimeout(postClickTimer);
+          postClickTimer = undefined;
+        }
         page.off("popup", onPopup);
         page.off("close", onPageClose);
         browser.off("targetcreated", onTargetCreated);
@@ -3845,6 +4754,10 @@ export class BrowserService {
         }
         try {
           const pending = target.page().then((popup) => {
+            if (popup && observation.abandoned) {
+              void closePageSafely(popup);
+              return;
+            }
             if (popup && !beforePages.has(popup) && !isPageClosed(popup)) {
               observation.createdPages.add(popup);
               finish(popup);
@@ -3856,9 +4769,13 @@ export class BrowserService {
           return;
         }
       };
-      const timer = setTimeout(() => finish(), timeoutMs);
+      const timer = setTimeout(() => finish(undefined, true), Math.max(1, Math.floor(timeoutMs)));
       const onAbort = (): void => fail(new AppError("CANCELLED", "The browser action was cancelled."));
       const onPageClose = (): void => finish();
+      const armPostClickTimer = (): void => {
+        if (settled) return;
+        postClickTimer = setTimeout(() => finish(), POPUP_POST_CLICK_SETTLE_TIMEOUT_MS);
+      };
       if (signal?.aborted) {
         fail(new AppError("CANCELLED", "The browser action was cancelled."));
         return;
@@ -3867,6 +4784,11 @@ export class BrowserService {
       page.on("popup", onPopup);
       page.on("close", onPageClose);
       browser.on("targetcreated", onTargetCreated);
+      // The click completion promise is resolved by openLinkInNewTab in a
+      // finally block, so even a failed/cancelled click cannot leave this
+      // watcher alive. Events arriving during the grace period remain
+      // associated with this source page.
+      clickCompleted?.then(armPostClickTimer, armPostClickTimer).catch(() => undefined);
     });
   }
 
@@ -3913,7 +4835,7 @@ export class BrowserService {
         }
         await wait(Math.min(100, Math.max(1, deadline - Date.now())), signal);
       }
-      throw new AppError("WAIT_TIMEOUT", `The URL did not match '${pattern}' within ${timeoutMs}ms.`, { retryable: true });
+      throw new AppError("WAIT_TIMEOUT", `The URL did not match '${pattern}' within ${timeoutMs}ms.`, { retryable: true, details: { phase: "wait", timeoutMs } });
     }
     await new Promise<void>((resolvePromise, reject) => {
       let settled = false;
@@ -3938,7 +4860,7 @@ export class BrowserService {
         }
       };
       const onAbort = (): void => finish(() => reject(new AppError("CANCELLED", "The browser action was cancelled.")));
-      const timer = setTimeout(() => finish(() => reject(new AppError("WAIT_TIMEOUT", `The URL did not match '${pattern}' within ${timeoutMs}ms.`, { retryable: true }))), timeoutMs);
+      const timer = setTimeout(() => finish(() => reject(new AppError("WAIT_TIMEOUT", `The URL did not match '${pattern}' within ${timeoutMs}ms.`, { retryable: true, details: { phase: "wait", timeoutMs } }))), timeoutMs);
       page.on("framenavigated", onNavigated);
       signal?.addEventListener("abort", onAbort, { once: true });
       onNavigated();
@@ -3981,28 +4903,88 @@ export class BrowserService {
     if (button !== "left") {
       throw new AppError("INVALID_ACTION", "Exact visible-text clicks support only the left mouse button; use a selector or coordinates for other buttons.");
     }
-    const targetHandle = await frame.evaluateHandle((needle) => {
-      const candidates = Array.from(document.querySelectorAll("body *")).reverse();
-      const element = candidates.find((candidate) => {
-        const htmlElement = candidate as HTMLElement;
-        if ((htmlElement.innerText || candidate.textContent || "").trim() !== needle) {
-          return false;
+    const targetHandle = await frame.evaluateHandle((needle, maxNodes) => {
+      const normalizedTarget = needle.normalize("NFKC").replace(/\s+/g, " ").trim().toLowerCase();
+      if (!normalizedTarget || !document.body) return null;
+      const hiddenTags = new Set(["script", "style", "noscript", "template"]);
+      const boundedText = (root: Element): string => {
+        const maybeChildNodes = (root as unknown as { childNodes?: unknown }).childNodes;
+        if (!maybeChildNodes) return String((root as unknown as { textContent?: unknown }).textContent ?? "").slice(0, 2_000);
+        const stack: Node[] = [root];
+        let output = "";
+        let visited = 0;
+        while (stack.length > 0 && output.length < 2_000) {
+          const node = stack.pop();
+          if (!node) break;
+          visited += 1;
+          if (visited > 2_000) break;
+          if (node.nodeType === 3) {
+            output += (node.nodeValue ?? "").slice(0, 2_000 - output.length);
+            continue;
+          }
+          if (node.nodeType !== 1) continue;
+          const children = (node as Element).childNodes;
+          for (let index = children.length - 1; index >= 0; index -= 1) {
+            const child = children[index];
+            if (child) stack.push(child);
+          }
         }
-        const clickable = htmlElement.closest("a,button,input,select,textarea,[role=button],[onclick]");
-        if (!clickable) {
-          return candidate instanceof SVGElement;
+        return output.slice(0, 2_000);
+      };
+      const isVisible = (element: Element): boolean => {
+        const style = window.getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return style.display !== "none" && style.visibility !== "hidden" && Number.parseFloat(style.opacity || "1") > 0 && rect.width > 0 && rect.height > 0;
+      };
+      // Check descendants before their containers. This preserves the old
+      // reverse-descendant preference (important for SVG containers whose
+      // aggregate text matches a smaller text node) without materializing a
+      // selector result for the whole body.
+      const stack: Array<{ element: Element; hidden: boolean; afterChildren: boolean }> = [{ element: document.body, hidden: false, afterChildren: false }];
+      let visited = 0;
+      while (stack.length > 0) {
+        const entry = stack.pop();
+        if (!entry) break;
+        if (!entry.afterChildren) {
+          visited += 1;
+          if (visited > maxNodes) break;
         }
-        const style = window.getComputedStyle(clickable);
-        const rect = clickable.getBoundingClientRect();
-        return style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0" && rect.width > 0 && rect.height > 0;
-      });
-      const htmlElement = element as HTMLElement | undefined;
-      const clickable = htmlElement?.closest("a,button,input,select,textarea,[role=button],[onclick]");
-      // MiniWoB++ uses SVG text/shapes with listeners attached by D3 rather
-      // than semantic HTML controls. Preserve exact-text matching but allow
-      // an SVG target itself when it has no HTML ancestor.
-      return clickable ?? (element instanceof SVGElement ? element : null);
-    }, target);
+        const { element, hidden, afterChildren } = entry;
+        const tag = element.tagName.toLowerCase();
+        if (hiddenTags.has(tag)) continue;
+        const style = element.getAttribute("style") ?? "";
+        const locallyHidden = hidden
+          || element.hasAttribute("hidden")
+          || element.getAttribute("aria-hidden") === "true"
+          || /(?:^|[;\s])(display|visibility)\s*:\s*(?:none|hidden)\b|(?:^|[;\s])opacity\s*:\s*0(?:[;\s]|$)/i.test(style);
+        if (element !== document.body && !locallyHidden && afterChildren) {
+          const isClickable = Boolean(element.closest("a,button,input,select,textarea,[role=button],[onclick]")) || typeof SVGElement !== "undefined" && element instanceof SVGElement;
+          // Leaf nodes cover the normal exact-text path without repeatedly
+          // reading a large ancestor's text. Small clickable containers cover
+          // labels split across a handful of inline children.
+          if (element.children.length === 0 || (isClickable && element.children.length <= 8)) {
+            const candidateText = boundedText(element).normalize("NFKC").replace(/\s+/g, " ").trim().toLowerCase();
+            if (candidateText === normalizedTarget) {
+              const clickable = element.closest("a,button,input,select,textarea,[role=button],[onclick]");
+              if ((clickable && isVisible(clickable)) || (!clickable && typeof SVGElement !== "undefined" && element instanceof SVGElement && isVisible(element))) {
+                // MiniWoB++ uses SVG text/shapes with listeners attached by
+                // D3 rather than semantic HTML controls. Preserve exact-text
+                // matching but allow an SVG target without an HTML ancestor.
+                return clickable ?? (typeof SVGElement !== "undefined" && element instanceof SVGElement ? element : null);
+              }
+            }
+          }
+        }
+        if (afterChildren) continue;
+        const children = element.children;
+        stack.push({ element, hidden: locallyHidden, afterChildren: true });
+        for (let index = children.length - 1; index >= 0; index -= 1) {
+          const child = children[index];
+          if (child) stack.push({ element: child, hidden: locallyHidden, afterChildren: false });
+        }
+      }
+      return null;
+    }, target, MAX_DOM_TRAVERSAL_NODES);
     const clickable = targetHandle.asElement() as ElementHandle<Element> | null;
     if (!clickable) {
       await targetHandle.dispose().catch(() => undefined);
@@ -4013,13 +4995,34 @@ export class BrowserService {
         const htmlElement = element as HTMLElement & { type?: string; value?: string };
         const anchor = element.closest("a") as HTMLAnchorElement | null;
         const rect = element.getBoundingClientRect();
+        const stack: Node[] = [element];
+        let labelText = "";
+        let visited = 0;
+        while (stack.length > 0 && labelText.length < 200) {
+          const node = stack.pop();
+          if (!node) break;
+          visited += 1;
+          if (visited > 512) break;
+          if (node.nodeType === 3) {
+            labelText += (node.nodeValue ?? "").slice(0, 200 - labelText.length);
+            continue;
+          }
+          if (node.nodeType !== 1) continue;
+          const current = node as Element;
+          if (["script", "style", "noscript", "template"].includes(current.tagName.toLowerCase())) continue;
+          const children = current.childNodes;
+          for (let index = children.length - 1; index >= 0; index -= 1) {
+            const child = children[index];
+            if (child) stack.push(child);
+          }
+        }
         return {
           width: rect.width,
           height: rect.height,
           tag: element.tagName.toLowerCase(),
           type: htmlElement.type?.toLowerCase() ?? "",
           role: element.getAttribute("role") ?? "",
-          label: [element.textContent, element.getAttribute("aria-label"), element.getAttribute("title"), htmlElement.value].filter(Boolean).join(" ").replace(/\s+/g, " ").trim().slice(0, 200),
+          label: [labelText, element.getAttribute("aria-label"), element.getAttribute("title"), htmlElement.value].filter(Boolean).join(" ").replace(/\s+/g, " ").trim().slice(0, 200),
           href: anchor?.href ?? element.getAttribute("href") ?? undefined,
         };
       });
@@ -4053,12 +5056,33 @@ export class BrowserService {
       const clickable = element.closest("a,button,input,select,textarea,[role=button]") ?? element;
       const htmlElement = clickable as HTMLElement & { type?: string; value?: string };
       const anchor = clickable.closest("a") as HTMLAnchorElement | null;
+      const stack: Node[] = [clickable];
+      let labelText = "";
+      let visited = 0;
+      while (stack.length > 0 && labelText.length < 200) {
+        const node = stack.pop();
+        if (!node) break;
+        visited += 1;
+        if (visited > 512) break;
+        if (node.nodeType === 3) {
+          labelText += (node.nodeValue ?? "").slice(0, 200 - labelText.length);
+          continue;
+        }
+        if (node.nodeType !== 1) continue;
+        const current = node as Element;
+        if (["script", "style", "noscript", "template"].includes(current.tagName.toLowerCase())) continue;
+        const children = current.childNodes;
+        for (let index = children.length - 1; index >= 0; index -= 1) {
+          const child = children[index];
+          if (child) stack.push(child);
+        }
+      }
       return {
         tag: clickable.tagName.toLowerCase(),
         type: htmlElement.type?.toLowerCase() ?? "",
         role: clickable.getAttribute("role") ?? "",
         focusable: clickable instanceof HTMLElement && (clickable.hasAttribute("tabindex") || /^(?:button|input|select|textarea|a)$/i.test(clickable.tagName)),
-        label: [clickable.textContent, clickable.getAttribute("aria-label"), clickable.getAttribute("title"), htmlElement.value].filter(Boolean).join(" ").replace(/\s+/g, " ").trim().slice(0, 200),
+        label: [labelText, clickable.getAttribute("aria-label"), clickable.getAttribute("title"), htmlElement.value].filter(Boolean).join(" ").replace(/\s+/g, " ").trim().slice(0, 200),
         href: anchor?.href ?? (clickable as HTMLAnchorElement).href ?? clickable.getAttribute("href") ?? undefined,
         rect: (() => {
           const rect = clickable.getBoundingClientRect();
@@ -4426,7 +5450,29 @@ export class BrowserService {
       }
       const value = await input.evaluate((element) => {
         const htmlElement = element as HTMLInputElement | HTMLTextAreaElement | HTMLElement;
-        return "value" in htmlElement ? String(htmlElement.value) : htmlElement.innerText;
+        if ("value" in htmlElement) {
+          return String(htmlElement.value).slice(0, 16_384);
+        }
+        const stack: Node[] = [element];
+        let text = "";
+        let visited = 0;
+        while (stack.length > 0 && text.length < 16_384) {
+          const node = stack.pop();
+          if (!node) break;
+          visited += 1;
+          if (visited > 4_096) break;
+          if (node.nodeType === 3) {
+            text += (node.nodeValue ?? "").slice(0, 16_384 - text.length);
+            continue;
+          }
+          if (node.nodeType !== 1) continue;
+          const children = (node as Element).childNodes;
+          for (let index = children.length - 1; index >= 0; index -= 1) {
+            const child = children[index];
+            if (child) stack.push(child);
+          }
+        }
+        return text;
       });
       return { verified: clear ? value === text : value.endsWith(text) };
     } finally {
@@ -4728,21 +5774,96 @@ export class BrowserService {
   private async detectChallenge(state: PageState, signal?: AbortSignal): Promise<unknown> {
     throwIfAborted(signal);
     try {
-      const evidence = await state.page.evaluate(() => ({
-        title: document.title,
-        text: (document.body?.innerText ?? "").slice(0, 200_000),
-        html: document.documentElement.outerHTML.slice(0, 500_000),
-        frameSources: Array.from(document.querySelectorAll("iframe[src]"), (frame) => frame.getAttribute("src") ?? "").slice(0, 100),
-        visibleMarkers: Array.from(document.querySelectorAll("iframe,form,div,section"))
-          .filter((element) => {
-            const htmlElement = element as HTMLElement;
-            const rect = htmlElement.getBoundingClientRect();
-            const style = window.getComputedStyle(htmlElement);
-            return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
-          })
-          .slice(0, 200)
-          .map((element) => [element.tagName, element.id, element.getAttribute("class"), element.getAttribute("name"), element.getAttribute("src"), element.getAttribute("data-sitekey")].filter(Boolean).join(" ")),
-      }));
+      const evidence = await awaitWithAbort(state.page.evaluate((limits: { maxNodes: number; textChars: number; htmlChars: number }) => {
+        const hiddenTags = new Set(["script", "style", "noscript", "template"]);
+        const boundedText = (root: Node | null): string => {
+          if (!root) return "";
+          const stack: Array<{ node: Node; hidden: boolean }> = [{ node: root, hidden: false }];
+          let output = "";
+          let visited = 0;
+          while (stack.length > 0 && output.length < limits.textChars) {
+            const entry = stack.pop();
+            if (!entry) break;
+            visited += 1;
+            if (visited > limits.maxNodes) break;
+            if (entry.node.nodeType === 3) {
+              if (!entry.hidden) output += (entry.node.nodeValue ?? "").slice(0, limits.textChars - output.length);
+              continue;
+            }
+            if (entry.node.nodeType !== 1) continue;
+            const element = entry.node as Element;
+            const tag = element.tagName.toLowerCase();
+            if (hiddenTags.has(tag)) continue;
+            const style = element.getAttribute("style") ?? "";
+            const locallyHidden = entry.hidden
+              || element.hasAttribute("hidden")
+              || element.getAttribute("aria-hidden") === "true"
+              || /(?:^|[;\s])(display|visibility)\s*:\s*(?:none|hidden)\b|(?:^|[;\s])opacity\s*:\s*0(?:[;\s]|$)/i.test(style);
+            const children = element.childNodes;
+            for (let index = children.length - 1; index >= 0; index -= 1) {
+              const child = children[index];
+              if (child) stack.push({ node: child, hidden: locallyHidden });
+            }
+          }
+          return output.slice(0, limits.textChars);
+        };
+        const htmlParts: string[] = [];
+        const frameSources: string[] = [];
+        const visibleMarkers: string[] = [];
+        let htmlLength = 0;
+        const appendMarkup = (value: string): void => {
+          if (htmlLength >= limits.htmlChars) return;
+          const remaining = limits.htmlChars - htmlLength;
+          const part = value.slice(0, remaining);
+          htmlParts.push(part);
+          htmlLength += part.length;
+        };
+        const root = document.documentElement;
+        const stack: Array<{ element: Element; hidden: boolean }> = root ? [{ element: root, hidden: false }] : [];
+        let visited = 0;
+        while (stack.length > 0) {
+          const entry = stack.pop();
+          if (!entry) break;
+          visited += 1;
+          if (visited > limits.maxNodes) break;
+          const { element, hidden } = entry;
+          const tag = element.tagName.toLowerCase();
+          if (hiddenTags.has(tag)) continue;
+          const style = element.getAttribute("style") ?? "";
+          const locallyHidden = hidden
+            || element.hasAttribute("hidden")
+            || element.getAttribute("aria-hidden") === "true"
+            || /(?:^|[;\s])(display|visibility)\s*:\s*(?:none|hidden)\b|(?:^|[;\s])opacity\s*:\s*0(?:[;\s]|$)/i.test(style);
+          const id = element.getAttribute("id") ?? "";
+          const className = element.getAttribute("class") ?? "";
+          const name = element.getAttribute("name") ?? "";
+          const src = element.getAttribute("src") ?? "";
+          const siteKey = element.getAttribute("data-sitekey") ?? "";
+          appendMarkup(`<${tag} id="${id.slice(0, 500)}" class="${className.slice(0, 2_000)}" name="${name.slice(0, 500)}" src="${src.slice(0, 4_096)}" data-sitekey="${siteKey.slice(0, 1_000)}">`);
+          if (tag === "iframe" && src && frameSources.length < 100) {
+            frameSources.push(src.slice(0, 4_096));
+          }
+          if (!locallyHidden && ["iframe", "form", "div", "section"].includes(tag) && visibleMarkers.length < 200) {
+            const rect = (element as HTMLElement).getBoundingClientRect();
+            const computed = window.getComputedStyle(element);
+            if (rect.width > 0 && rect.height > 0 && computed.display !== "none" && computed.visibility !== "hidden") {
+              visibleMarkers.push([element.tagName, id, className, name, src, siteKey].filter(Boolean).join(" ").slice(0, 4_000));
+            }
+          }
+          const children = element.children;
+          for (let index = children.length - 1; index >= 0; index -= 1) {
+            const child = children[index];
+            if (child) stack.push({ element: child, hidden: locallyHidden });
+          }
+        }
+        return {
+          title: document.title.slice(0, 8_000),
+          text: boundedText(document.body),
+          html: htmlParts.join("").slice(0, limits.htmlChars),
+          frameSources,
+          visibleMarkers,
+        };
+      }, { maxNodes: MAX_DOM_TRAVERSAL_NODES, textChars: 100_000, htmlChars: MAX_MARKUP_EVIDENCE_CHARS }), signal);
       throwIfAborted(signal);
       const classification = classifyChallenge({ ...evidence, status: state.mainFrameStatus });
       if (classification.status === "present") {
@@ -4769,6 +5890,9 @@ export class BrowserService {
 
   private async waitForHuman(state: PageState, timeoutMs: number, pollMs: number, signal?: AbortSignal): Promise<unknown> {
     const startedAt = Date.now();
+    const boundedTimeoutMs = Number.isFinite(timeoutMs) ? Math.max(0, Math.floor(timeoutMs)) : 0;
+    const boundedPollMs = Number.isFinite(pollMs) ? Math.max(1, Math.floor(pollMs)) : 1_000;
+    const deadline = startedAt + boundedTimeoutMs;
     throwIfAborted(signal);
     const initial = await this.detectChallenge(state, signal);
     let last: unknown = initial;
@@ -4778,58 +5902,69 @@ export class BrowserService {
     if (isChallengeAbsent(initial)) {
       return { status: "resolved", resolution: "no_challenge_at_start", pageId: state.id, waitedMs: 0, initial, final: initial };
     }
-    while (Date.now() - startedAt <= timeoutMs) {
+    while (Date.now() < deadline) {
       throwIfAborted(signal);
       last = await this.detectChallenge(state, signal);
       if (isChallengeUnknown(last)) {
-        await wait(pollMs, signal);
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) break;
+        await wait(Math.min(boundedPollMs, remaining), signal);
         continue;
       }
       if (isChallengeAbsent(last)) {
         return { status: "resolved", resolution: "challenge_cleared", pageId: state.id, waitedMs: Date.now() - startedAt, initial, final: last };
       }
-      await wait(pollMs, signal);
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      await wait(Math.min(boundedPollMs, remaining), signal);
     }
-    return { status: "timed_out", resolution: "timeout", pageId: state.id, waitedMs: Date.now() - startedAt, initial, final: last };
+    return { status: "timed_out", resolution: "timeout", pageId: state.id, waitedMs: Math.max(0, Date.now() - startedAt), initial, final: last };
   }
 
-  private listDownloads(): Promise<unknown> {
+  private async listDownloads(signal?: AbortSignal): Promise<unknown> {
     const downloadDir = resolve(this.config.dataDir, "downloads");
-    return readdir(downloadDir, { withFileTypes: true })
-      .then(async (entries) => {
-        const listed = await Promise.all(entries
+    try {
+      throwIfAborted(signal);
+      const entries = await awaitWithAbort(readdir(downloadDir, { withFileTypes: true }), signal);
+      const candidates = entries
         .filter((entry) => entry.isFile())
         .sort((left, right) => left.name.localeCompare(right.name))
-        .slice(0, 100)
-        .map(async (entry) => {
-          const filePath = join(downloadDir, entry.name);
-          try {
-            const fileStat = await stat(filePath);
-            const partial = /\.(?:crdownload|part|tmp)$/i.test(entry.name);
-            const relativePath = await this.serverRelativePath(filePath);
-            return {
-              name: wrapUntrustedText("download_name", redactSecretPlaceholders(entry.name), 512),
-              path: wrapUntrustedText("download_path", redactSecretPlaceholders(relativePath), 1_024),
-              size: Math.min(fileStat.size, Number.MAX_SAFE_INTEGER),
-              extension: wrapUntrustedText("download_extension", redactSecretPlaceholders(extname(entry.name).slice(1, 128)), 128),
-              modifiedAt: wrapUntrustedText("download_modified_at", redactSecretPlaceholders(fileStat.mtime.toISOString()), 128),
-              status: partial ? "in_progress" : "complete",
-            };
-          } catch (error) {
-            if (isMissingFile(error)) {
-              return undefined;
-            }
-            throw error;
+        .slice(0, MAX_DOWNLOAD_ENTRIES);
+      const listed: Array<Record<string, unknown>> = [];
+      for (const entry of candidates) {
+        throwIfAborted(signal);
+        const filePath = join(downloadDir, entry.name);
+        try {
+          const fileStat = await awaitWithAbort(stat(filePath), signal);
+          const partial = /\.(?:crdownload|part|tmp)$/i.test(entry.name);
+          const relativePath = await awaitWithAbort(this.serverRelativePath(filePath), signal);
+          listed.push({
+            name: wrapUntrustedText("download_name", redactSecretPlaceholders(entry.name), 512),
+            path: wrapUntrustedText("download_path", redactSecretPlaceholders(relativePath), 1_024),
+            size: Math.min(fileStat.size, Number.MAX_SAFE_INTEGER),
+            extension: wrapUntrustedText("download_extension", redactSecretPlaceholders(extname(entry.name).slice(1, 128)), 128),
+            modifiedAt: wrapUntrustedText("download_modified_at", redactSecretPlaceholders(fileStat.mtime.toISOString()), 128),
+            status: partial ? "in_progress" : "complete",
+          });
+        } catch (error) {
+          if (isMissingFile(error)) {
+            continue;
           }
-        }));
-        return listed.filter((entry): entry is NonNullable<typeof entry> => entry !== undefined);
-      })
-      .catch((error: unknown) => {
-        if (isMissingFile(error)) {
-          return [];
+          throw error;
         }
-        throw new AppError("DOWNLOADS_UNAVAILABLE", "Downloaded files could not be listed.", { cause: error });
-      });
+      }
+      throwIfAborted(signal);
+      return listed;
+    } catch (error) {
+      throwIfAborted(signal);
+      if (isMissingFile(error)) {
+        return [];
+      }
+      if (error instanceof AppError && error.code === "DOWNLOADS_UNAVAILABLE") {
+        throw error;
+      }
+      throw new AppError("DOWNLOADS_UNAVAILABLE", "Downloaded files could not be listed. Verify the browser download directory and retry.", { retryable: true, cause: error });
+    }
   }
 
   private async stageUploadFile(rawPath: string, signal?: AbortSignal): Promise<{ path: string; displayName: string; size: number }> {
@@ -5038,7 +6173,7 @@ export class BrowserService {
           const timedOut = operationTimedOut;
           operationController.abort();
           reject(timedOut
-            ? new AppError("BROWSER_TIMEOUT", `The browser operation exceeded its ${Math.max(1, Math.floor(operationTimeoutMs ?? 0))}ms action deadline.`, { retryable: true, details: { timeoutMs: Math.max(1, Math.floor(operationTimeoutMs ?? 0)) } })
+            ? new AppError("BROWSER_TIMEOUT", `The browser operation exceeded its ${Math.max(1, Math.floor(operationTimeoutMs ?? 0))}ms action deadline.`, { retryable: true, details: { phase: "action", timeoutMs: Math.max(1, Math.floor(operationTimeoutMs ?? 0)) } })
             : new AppError("CANCELLED", "The browser action was cancelled."));
         };
         if (queueSignal?.aborted) {
@@ -5054,7 +6189,7 @@ export class BrowserService {
           if (!abortRequested) {
             abortRequested = true;
             operationController.abort();
-            rejectAbort(new AppError("BROWSER_TIMEOUT", `The browser operation exceeded its ${Math.max(1, Math.floor(operationTimeoutMs ?? 0))}ms action deadline.`, { retryable: true, details: { timeoutMs: Math.max(1, Math.floor(operationTimeoutMs ?? 0)) } }));
+            rejectAbort(new AppError("BROWSER_TIMEOUT", `The browser operation exceeded its ${Math.max(1, Math.floor(operationTimeoutMs ?? 0))}ms action deadline.`, { retryable: true, details: { phase: "action", timeoutMs: Math.max(1, Math.floor(operationTimeoutMs ?? 0)) } }));
           }
         }
       }, operationBudgetMs);
@@ -5071,7 +6206,7 @@ export class BrowserService {
       } catch (error) {
         const normalized = normalizeBrowserOperationError(error, operationSignal);
         if (operationTimedOut && !queueSignal?.aborted) {
-          throw new AppError("BROWSER_TIMEOUT", `The browser operation exceeded its ${Math.max(1, Math.floor(operationTimeoutMs ?? 0))}ms action deadline.`, { retryable: true, details: { timeoutMs: Math.max(1, Math.floor(operationTimeoutMs ?? 0)) }, cause: error });
+          throw new AppError("BROWSER_TIMEOUT", `The browser operation exceeded its ${Math.max(1, Math.floor(operationTimeoutMs ?? 0))}ms action deadline.`, { retryable: true, details: { phase: "action", timeoutMs: Math.max(1, Math.floor(operationTimeoutMs ?? 0)) }, cause: error });
         }
         throw normalized;
       } finally {
@@ -5154,7 +6289,7 @@ export class BrowserService {
         callback();
       };
       const onAbort = (): void => finish(() => reject(new AppError("CANCELLED", "The browser action was cancelled.")));
-      const timer = setTimeout(() => finish(() => reject(new AppError("BROWSER_QUEUE_TIMEOUT", `The browser operation waited more than ${timeoutMs}ms for a read permit.`, { retryable: true, details: { timeoutMs } }))), Math.max(1, Math.floor(timeoutMs)));
+      const timer = setTimeout(() => finish(() => reject(new AppError("BROWSER_QUEUE_TIMEOUT", `The browser operation waited more than ${timeoutMs}ms for a read permit.`, { retryable: true, details: { phase: "queue", timeoutMs } }))), Math.max(1, Math.floor(timeoutMs)));
       this.readPermitWaiters.push(waiter);
       if (signal?.aborted) {
         onAbort();
@@ -5169,7 +6304,7 @@ export class BrowserService {
 async function awaitBrowserConnection(connection: Promise<Browser>, timeoutMs: number): Promise<Browser> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   let timedOut = false;
-  const timeoutError = new AppError("BROWSER_CONNECT_TIMEOUT", `The browser connection did not complete within ${timeoutMs}ms.`, { retryable: true });
+  const timeoutError = new AppError("BROWSER_CONNECT_TIMEOUT", `The browser connection did not complete within ${timeoutMs}ms.`, { retryable: true, details: { phase: "connect", timeoutMs } });
   const deadline = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
       timedOut = true;
@@ -5214,7 +6349,7 @@ async function closeConnectedBrowser(browser: Browser, owned: boolean, logger: L
 }
 
 async function closePageSafely(page: Page): Promise<void> {
-  await Promise.resolve().then(() => page.close()).catch(() => undefined);
+  await settleWithTimeout(Promise.resolve().then(() => page.close()).catch(() => undefined), 500);
 }
 
 async function waitForElementState(
@@ -5249,7 +6384,7 @@ async function waitForElementState(
       return;
     } catch (error) {
       if (isPuppeteerTimeoutError(error)) {
-        throw new AppError("WAIT_TIMEOUT", `The selector '${selector.slice(0, 200)}' did not become ${state} within ${timeoutMs}ms.`, { retryable: true, cause: error });
+        throw new AppError("WAIT_TIMEOUT", `The selector '${selector.slice(0, 200)}' did not become ${state} within ${timeoutMs}ms.`, { retryable: true, details: { phase: "wait", timeoutMs, state }, cause: error });
       }
       throw error;
     }
@@ -5288,7 +6423,7 @@ async function waitForElementState(
     }
     const remaining = deadline - Date.now();
     if (remaining <= 0) {
-      throw new AppError("WAIT_TIMEOUT", `The selector '${selector.slice(0, 200)}' did not become ${state} within ${timeoutMs}ms.`, { retryable: true });
+      throw new AppError("WAIT_TIMEOUT", `The selector '${selector.slice(0, 200)}' did not become ${state} within ${timeoutMs}ms.`, { retryable: true, details: { phase: "wait", timeoutMs, state } });
     }
     await wait(Math.min(100, remaining), signal);
   }
@@ -5725,7 +6860,7 @@ async function waitForTurn(previous: Promise<void>, signal: AbortSignal | undefi
       }
       settled = true;
       signal?.removeEventListener("abort", onAbort);
-      reject(new AppError("BROWSER_QUEUE_TIMEOUT", `The browser operation waited more than ${timeoutMs}ms for its turn.`, { retryable: true, details: { timeoutMs } }));
+      reject(new AppError("BROWSER_QUEUE_TIMEOUT", `The browser operation waited more than ${timeoutMs}ms for its turn.`, { retryable: true, details: { phase: "queue", timeoutMs } }));
     }, Math.max(1, Math.floor(timeoutMs)));
     const settle = (callback: () => void): void => {
       if (settled) {

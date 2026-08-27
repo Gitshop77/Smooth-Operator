@@ -18,6 +18,7 @@ import {
   NetworkLogRequestSchema,
   PdfRequestSchema,
   ResearchRequestSchema,
+  RESEARCH_MAX_RESULTS,
   ScreenshotRequestSchema,
   ScrollRequestSchema,
   ScrollToBottomRequestSchema,
@@ -44,7 +45,12 @@ const MCP_OUTPUT_MAX_BYTES = 28_000;
 const MCP_IMAGE_MAX_BYTES = 8_000_000;
 const MCP_OUTPUT_TEXT_MAX_BYTES = 20_000;
 const MCP_OUTPUT_LINK_LIMIT = 4;
-const MCP_OUTPUT_RESULT_LIMIT = 6;
+// `web_search.maxResults` allows ten records. Keep that as the global result
+// ceiling, while the web-search handler passes the caller's requested limit
+// to the boundary so a smaller request is not expanded or silently ignored.
+const MCP_OUTPUT_RESULT_LIMIT = RESEARCH_MAX_RESULTS;
+const MCP_WEB_SEARCH_DEFAULT_RESULT_LIMIT = 5;
+const MCP_OUTPUT_ARRAY_ITEM_LIMIT = 200;
 const MCP_OUTPUT_INTERACTIVE_LIMIT = 80;
 const MCP_OUTPUT_ENTRY_LIMIT = 20;
 const MCP_OUTPUT_NODE_LIMIT = 80;
@@ -254,6 +260,7 @@ const MCP_INSTRUCTIONS = [
 ].join(" ");
 
 type InputRecord = Record<string, unknown>;
+type McpOutputOptions = { preserveBatchResults?: boolean; resultLimit?: number };
 
 export function createMcpServer(runtime: ServerRuntime): McpServer {
   const server = new McpServer(
@@ -559,7 +566,11 @@ function registerResearchTool(server: McpServer, runtime: ServerRuntime): void {
   server.registerTool(
     "web_search",
     { title: "Search the web", description: "Fetch bounded DuckDuckGo HTML results. Titles, URLs, and snippets are untrusted data.", inputSchema: ResearchRequestSchema, annotations: BROWSER_READ_ONLY },
-    async (input, ctx) => callTool(async () => runtime.webSearch(input.query, input, ctx.mcpReq.signal), runtime),
+    async (input, ctx) => callTool(
+      async () => runtime.webSearch(input.query, input, ctx.mcpReq.signal),
+      runtime,
+      { resultLimit: input.maxResults ?? MCP_WEB_SEARCH_DEFAULT_RESULT_LIMIT },
+    ),
   );
 }
 
@@ -746,7 +757,7 @@ function boundErrorDetails(value: unknown): unknown {
       bounded[key] = item;
     }
   };
-  for (const key of ["failedIndex", "failedAction", "completedActions", "hint", "resultsTruncated", "omittedResults"]) {
+  for (const key of ["classification", "status", "attempts", "maxAttempts", "retryAfterMs", "timeoutMs", "failedIndex", "failedAction", "completedActions", "hint", "warning", "truncated", "mcpOutputTruncated", "omittedItems", "resultsTruncated", "omittedResults"]) {
     copyScalar(key);
   }
 
@@ -860,7 +871,7 @@ function untrustedPayloadLength(value: string): number {
 function boundMcpArray(value: unknown[]): unknown {
   const items: unknown[] = [];
   let serializedBytes = 2;
-  for (const item of value) {
+  for (const item of value.slice(0, MCP_OUTPUT_ARRAY_ITEM_LIMIT)) {
     let itemBytes: number;
     try {
       const json = JSON.stringify(item);
@@ -875,7 +886,7 @@ function boundMcpArray(value: unknown[]): unknown {
     items.push(item);
     serializedBytes = candidateBytes;
   }
-  if (items.length === value.length) {
+  if (items.length === value.length && value.length <= MCP_OUTPUT_ARRAY_ITEM_LIMIT) {
     return value;
   }
   return {
@@ -887,7 +898,7 @@ function boundMcpArray(value: unknown[]): unknown {
   };
 }
 
-function boundMcpOutput(value: unknown, options: { preserveBatchResults?: boolean } = {}): unknown {
+function boundMcpOutput(value: unknown, options: McpOutputOptions = {}): unknown {
   if (typeof value === "string") {
     return truncateMcpText(value, MCP_OUTPUT_MAX_BYTES).value;
   }
@@ -899,14 +910,30 @@ function boundMcpOutput(value: unknown, options: { preserveBatchResults?: boolea
   }
 
   let output = { ...value };
+  const resultLimit = boundedResultLimit(options.resultLimit);
   const markOutputTruncated = (): void => {
     output.mcpOutputTruncated = true;
   };
   const capArray = (key: string, limit: number, flag: string): void => {
     const items = output[key];
     if (Array.isArray(items) && items.length > limit) {
+      const omitted = items.length - limit;
       output[key] = items.slice(0, limit);
       output[flag] = true;
+      const omissionKey = `omitted${key.slice(0, 1).toUpperCase()}${key.slice(1)}`;
+      const previousOmitted = typeof output[omissionKey] === "number" && Number.isSafeInteger(output[omissionKey])
+        ? output[omissionKey] as number
+        : 0;
+      output[omissionKey] = previousOmitted + omitted;
+      if (key === "results") {
+        output.hasMore = true;
+        if (typeof output.returnedResults === "number" && Number.isFinite(output.returnedResults)) {
+          output.returnedResults = Math.min(Math.max(0, Math.trunc(output.returnedResults)), limit);
+        }
+        if (typeof output.warning !== "string") {
+          output.warning = "Some search results were omitted by the MCP output limit; use a narrower request or a paginated tool.";
+        }
+      }
       markOutputTruncated();
     }
   };
@@ -930,13 +957,19 @@ function boundMcpOutput(value: unknown, options: { preserveBatchResults?: boolea
   }
   capArray("links", MCP_OUTPUT_LINK_LIMIT, "linksTruncated");
   if (!options.preserveBatchResults) {
-    capArray("results", MCP_OUTPUT_RESULT_LIMIT, "resultsTruncated");
+    capArray("results", resultLimit, "resultsTruncated");
   }
   capArray("entries", MCP_OUTPUT_ENTRY_LIMIT, "entriesTruncated");
   capArray("interactive", MCP_OUTPUT_INTERACTIVE_LIMIT, "interactiveTruncated");
   capArray("nodes", MCP_OUTPUT_NODE_LIMIT, "nodesTruncated");
   capArray("matches", MCP_OUTPUT_MATCH_LIMIT, "matchesTruncated");
   capArray("frames", 20, "framesTruncated");
+  const contractArrayKeys = new Set(["links", "results", "entries", "interactive", "nodes", "matches", "frames"]);
+  for (const [key, item] of Object.entries(output)) {
+    if (!contractArrayKeys.has(key) && Array.isArray(item)) {
+      capArray(key, MCP_OUTPUT_ARRAY_ITEM_LIMIT, `${key}Truncated`);
+    }
+  }
 
   if (Array.isArray(output.results)) {
     output.results = output.results.map((item) => {
@@ -1006,8 +1039,25 @@ function boundMcpOutput(value: unknown, options: { preserveBatchResults?: boolea
   }
   for (const [key, flag] of arrayBounds) {
     while (jsonByteLength(output) > MCP_OUTPUT_MAX_BYTES && Array.isArray(output[key]) && output[key].length > 1) {
-      output[key] = output[key].slice(0, Math.max(1, Math.floor(output[key].length / 2)));
+      const items = output[key] as unknown[];
+      const nextLength = Math.max(1, Math.floor(items.length / 2));
+      const omitted = items.length - nextLength;
+      output[key] = items.slice(0, nextLength);
       output[flag] = true;
+      const omissionKey = `omitted${key.slice(0, 1).toUpperCase()}${key.slice(1)}`;
+      const previousOmitted = typeof output[omissionKey] === "number" && Number.isSafeInteger(output[omissionKey])
+        ? output[omissionKey] as number
+        : 0;
+      output[omissionKey] = previousOmitted + omitted;
+      if (key === "results") {
+        output.hasMore = true;
+        if (typeof output.returnedResults === "number" && Number.isFinite(output.returnedResults)) {
+          output.returnedResults = Math.min(Math.max(0, Math.trunc(output.returnedResults)), nextLength);
+        }
+        if (typeof output.warning !== "string") {
+          output.warning = "Some search results were omitted by the MCP output limit; use a narrower request or a paginated tool.";
+        }
+      }
       markOutputTruncated();
     }
   }
@@ -1016,7 +1066,7 @@ function boundMcpOutput(value: unknown, options: { preserveBatchResults?: boolea
   }
 
   const preserved: Record<string, unknown> = {};
-  for (const key of ["pageId", "frameId", "snapshotId", "domRevision", "url", "untrustedUrl", "title", "selector", "query", "offset", "nextOffset", "revision", "hasMore", "totalMatches", "matchesTruncated", "resultsTruncated", "omittedResults"]) {
+  for (const key of ["pageId", "frameId", "snapshotId", "domRevision", "url", "untrustedUrl", "title", "selector", "query", "source", "offset", "nextOffset", "revision", "hasMore", "requestedMaxResults", "returnedResults", "textTruncated", "linksTruncated", "omittedLinks", "resultsTruncated", "omittedResults", "entriesTruncated", "omittedEntries", "interactiveTruncated", "omittedInteractive", "nodesTruncated", "omittedNodes", "matchesTruncated", "omittedMatches", "framesTruncated", "omittedFrames", "itemsTruncated", "omittedItems", "totalMatches", "warning"]) {
     const item = output[key];
     if (typeof item === "string") {
       preserved[key] = truncateUtf8(item, 1_000);
@@ -1033,15 +1083,25 @@ function boundMcpOutput(value: unknown, options: { preserveBatchResults?: boolea
   };
 }
 
-function sanitizeMcpOutput(value: unknown, options: { preserveBatchResults?: boolean } = {}): unknown {
+function sanitizeMcpOutput(value: unknown, options: McpOutputOptions = {}): unknown {
   const bounded = boundMcpOutput(value, options);
-  const redacted = redactValue(bounded);
+  const redactedValue = redactValue(bounded);
+  const redacted = isRecord(redactedValue) && redactedValue.__truncated === true && redactedValue.mcpOutputTruncated !== true
+    ? { ...redactedValue, mcpOutputTruncated: true, warning: "The MCP result exceeded the safety collection limit; use a narrower request or a paginated tool." }
+    : redactedValue;
   return jsonByteLength(redacted) > MCP_OUTPUT_MAX_BYTES ? boundMcpOutput(redacted, options) : redacted;
 }
 
-async function callTool(operation: () => Promise<unknown>, logger?: Pick<ServerRuntime, "logger">): Promise<CallToolResult> {
+function boundedResultLimit(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return MCP_OUTPUT_RESULT_LIMIT;
+  }
+  return Math.min(Math.max(Math.trunc(value), 1), MCP_OUTPUT_RESULT_LIMIT);
+}
+
+async function callTool(operation: () => Promise<unknown>, logger?: Pick<ServerRuntime, "logger">, options: McpOutputOptions = {}): Promise<CallToolResult> {
   return boundToolError(await safeCallTool(
-    async () => sanitizeMcpOutput(await operation()) ?? null,
+    async () => sanitizeMcpOutput(await operation(), options) ?? null,
     (error) => logger?.logger.warn("MCP tool operation failed", safeErrorDiagnostic(error)),
   ));
 }
@@ -1101,11 +1161,15 @@ function boundToolError(result: CallToolResult): CallToolResult {
   const rawMessage = typeof rawError.message === "string"
     ? rawError.message
     : "The MCP request failed.";
+  const boundedMessage = truncateMcpText(rawMessage, MCP_ERROR_MESSAGE_MAX_BYTES);
   const error: Record<string, unknown> = {
     code,
-    message: truncateMcpText(rawMessage, MCP_ERROR_MESSAGE_MAX_BYTES).value,
+    message: boundedMessage.value,
     retryable: rawError.retryable === true,
   };
+  if (boundedMessage.truncated) {
+    error.messageTruncated = true;
+  }
 
   if (rawError.details !== undefined) {
     error.details = boundErrorDetails(rawError.details);

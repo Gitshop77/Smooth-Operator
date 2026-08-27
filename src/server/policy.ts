@@ -1,7 +1,7 @@
 import { lstatSync, realpathSync } from "node:fs";
 import { isIP } from "node:net";
 import { lookup } from "node:dns/promises";
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
 import { domainToASCII } from "node:url";
 
 import type { ServerConfig } from "./config";
@@ -274,12 +274,72 @@ function hasNoSymlinkSegments(path: string): boolean {
   return !hasSymlinkSegment(path);
 }
 
+export interface AllowedFileRootMetadata {
+  /** Stable identifier suitable for a future tool-level root selector. */
+  id: string;
+  /** The canonical path the policy actually compares against. */
+  path: string;
+}
+
+/**
+ * Resolve configured file roots once, without creating directories or reading
+ * any file contents. Existing symlinks are represented by their canonical
+ * target; unresolved symlink components fail closed. Missing leaf components
+ * remain usable so the runtime can create its private `files` and `downloads`
+ * directories later.
+ */
+export function canonicalizeAllowedFileRoots(rawRoots: readonly string[]): string[] {
+  if (!Array.isArray(rawRoots)) {
+    throw new AppError("CONFIG_INVALID", "Configured file roots must be an array of paths.");
+  }
+  const roots: string[] = [];
+  for (const rawRoot of rawRoots) {
+    if (typeof rawRoot !== "string" || !rawRoot.trim() || rawRoot.includes("\0")) {
+      throw new AppError("CONFIG_INVALID", "Configured file roots must be non-empty paths without null bytes.");
+    }
+    const lexicalRoot = resolve(rawRoot.trim());
+    const canonicalRoot = canonicalPath(lexicalRoot);
+    if (canonicalRoot === undefined) {
+      if (hasSymlinkSegment(lexicalRoot)) {
+        throw new AppError("CONFIG_INSECURE", "Configured file roots must not contain unresolved symbolic links.");
+      }
+      throw new AppError("CONFIG_INSECURE", "Configured file roots could not be resolved safely.");
+    }
+    if (parse(canonicalRoot).root === canonicalRoot) {
+      throw new AppError("CONFIG_INVALID", "Configured file roots must not be filesystem roots.");
+    }
+    if (!roots.includes(canonicalRoot)) {
+      roots.push(canonicalRoot);
+    }
+  }
+  return roots;
+}
+
+/**
+ * Return safe discoverability metadata for configured roots. Only explicitly
+ * allowed roots are returned; the rejected candidate path and filesystem
+ * contents are intentionally never included.
+ */
+export function describeAllowedFileRoots(rawRoots: readonly string[]): AllowedFileRootMetadata[] {
+  return canonicalizeAllowedFileRoots(rawRoots).map((path, index) => ({ id: `root-${index + 1}`, path }));
+}
+
 export class SecurityPolicy {
   private static readonly DNS_LOOKUP_TIMEOUT_MS = 10_000;
   private readonly dnsCache = new Map<string, { expiresAt: number; private: boolean }>();
   private readonly dnsInFlight = new Map<string, Promise<Array<{ address: string }>>>();
+  private readonly allowedFileRoots: string[];
+  private readonly allowedFileRootMetadata: AllowedFileRootMetadata[];
 
-  constructor(private readonly config: ServerConfig) {}
+  constructor(private readonly config: ServerConfig) {
+    this.allowedFileRoots = canonicalizeAllowedFileRoots(config.security.allowedFileRoots);
+    this.allowedFileRootMetadata = this.allowedFileRoots.map((path, index) => ({ id: `root-${index + 1}`, path }));
+  }
+
+  /** Safe root metadata for a future tool-level workspace selector. */
+  getAllowedFileRoots(): AllowedFileRootMetadata[] {
+    return this.allowedFileRootMetadata.map((root) => ({ ...root }));
+  }
 
   assertNavigationAllowed(rawUrl: string): URL {
     let url: URL;
@@ -392,13 +452,17 @@ export class SecurityPolicy {
       try {
         lstatSync(path);
       } catch {
-        throw new AppError("FILE_PATH_BLOCKED", "The file path does not exist or cannot be resolved safely.");
+        throw new AppError("FILE_PATH_BLOCKED", "The file path does not exist or cannot be resolved safely. Choose a path under one of the configured file roots.", {
+          details: this.filePathDetails("missing_or_unresolvable"),
+        });
       }
     }
     if (canonicalCandidate === undefined && hasSymlinkSegment(path)) {
-      throw new AppError("FILE_PATH_BLOCKED", "The file path contains a symbolic link that cannot be resolved safely.");
+      throw new AppError("FILE_PATH_BLOCKED", "The file path contains a symbolic link that cannot be resolved safely. Choose a path under one of the configured file roots without unresolved links.", {
+        details: this.filePathDetails("unresolved_symbolic_link"),
+      });
     }
-    const root = this.config.security.allowedFileRoots.find((candidate) => {
+    const root = this.allowedFileRoots.find((candidate) => {
       const lexicalRoot = resolve(candidate);
       const canonicalRoot = canonicalPath(lexicalRoot) ?? lexicalRoot;
 
@@ -421,8 +485,20 @@ export class SecurityPolicy {
         && isWithinRoot(lexicalRoot, path);
     });
     if (!root) {
-      throw new AppError("FILE_PATH_BLOCKED", "The file path is outside the configured file roots.");
+      throw new AppError("FILE_PATH_BLOCKED", "The file path is outside the configured file roots. Choose a path under one of the allowed roots listed in error details.", {
+        details: this.filePathDetails("outside_allowed_root"),
+      });
     }
     return path;
+  }
+
+  private filePathDetails(reason: string): Record<string, unknown> {
+    return {
+      reason,
+      allowedRoots: this.getAllowedFileRoots(),
+      recovery: this.allowedFileRoots.length > 0
+        ? "Use a path beneath one of the listed canonical roots; directory contents are not exposed by this error."
+        : "No file roots are configured for this server.",
+    };
   }
 }

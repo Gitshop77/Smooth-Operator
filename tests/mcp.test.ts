@@ -458,6 +458,18 @@ describe("native MCP registry", () => {
       expect(arrayResult.isError).not.toBe(true);
       expect((arrayResult.structuredContent as Record<string, unknown>).truncated).toBe(true);
       expect(new TextEncoder().encode(JSON.stringify(arrayResult)).byteLength).toBeLessThan(65_536);
+
+      run.mockResolvedValue(Array.from({ length: 250 }, (_, index) => ({ index })));
+      const countBounded = await client.callTool({ name: "browser_find_elements", arguments: { selector: "div" } });
+      expect(countBounded.isError).not.toBe(true);
+      expect(countBounded.structuredContent).toMatchObject({ truncated: true, mcpOutputTruncated: true, omittedItems: 50 });
+      expect((countBounded.structuredContent as { items: unknown[] }).items).toHaveLength(200);
+
+      run.mockResolvedValue({ items: Array.from({ length: 250 }, (_, index) => ({ index })) });
+      const objectCountBounded = await client.callTool({ name: "browser_extract", arguments: { query: "body" } });
+      expect(objectCountBounded.isError).not.toBe(true);
+      expect(objectCountBounded.structuredContent).toMatchObject({ itemsTruncated: true, mcpOutputTruncated: true, omittedItems: 50 });
+      expect((objectCountBounded.structuredContent as { items: unknown[] }).items).toHaveLength(200);
     } finally {
       await client.close().catch(() => undefined);
       await server.close().catch(() => undefined);
@@ -506,6 +518,39 @@ describe("native MCP registry", () => {
         error: { details: { failedIndex: 49, failedAction: "click", completedActions: 49, completedResults: expect.any(Array), resultsTruncated: true } },
       });
       expect(new TextEncoder().encode(JSON.stringify(largeFailure)).byteLength).toBeLessThan(65_536);
+    } finally {
+      await client.close().catch(() => undefined);
+      await server.close().catch(() => undefined);
+      await runtime.close();
+    }
+  });
+
+  it("preserves the web-search contract limit and reports boundary omissions", async () => {
+    const runtime = await ServerRuntime.create(testConfig());
+    const resultRecord = (index: number) => ({
+      title: `Result ${index}`,
+      url: `https://example.test/result/${index}`,
+      snippet: `Snippet ${index}`,
+    });
+    const webSearch = vi.spyOn(runtime, "webSearch").mockResolvedValue({
+      results: Array.from({ length: 10 }, (_, index) => resultRecord(index)),
+    });
+    const server = createMcpServer(runtime);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "research-output-test", version: "1.0.0" });
+    try {
+      await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+      const complete = await client.callTool({ name: "web_search", arguments: { query: "bounded", maxResults: 10, maxChars: 500 } });
+      expect(complete.isError).not.toBe(true);
+      expect((complete.structuredContent as { results: unknown[] }).results).toHaveLength(10);
+      expect(complete.structuredContent).not.toHaveProperty("resultsTruncated");
+      expect(webSearch.mock.calls[0]?.[1]).toMatchObject({ maxResults: 10, maxChars: 500 });
+
+      webSearch.mockResolvedValue({ results: Array.from({ length: 11 }, (_, index) => resultRecord(index)), returnedResults: 11 });
+      const bounded = await client.callTool({ name: "web_search", arguments: { query: "bounded", maxResults: 10, maxChars: 500 } });
+      expect(bounded.isError).not.toBe(true);
+      expect(bounded.structuredContent).toMatchObject({ hasMore: true, returnedResults: 10, resultsTruncated: true, mcpOutputTruncated: true, omittedResults: 1 });
+      expect((bounded.structuredContent as { results: unknown[] }).results).toHaveLength(10);
     } finally {
       await client.close().catch(() => undefined);
       await server.close().catch(() => undefined);

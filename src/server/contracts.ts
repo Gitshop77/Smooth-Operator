@@ -5,6 +5,12 @@ const BoundedString = (max: number) => z.string().trim().min(1).max(max);
 // trailing, and whitespace-only values: a literal " " is a valid key event.
 const KeyboardString = (max: number) => z.string().min(1).max(max);
 export const MCP_PAGE_TEXT_MAX_CHARS = 8_000;
+// Keep the research input contract and its service/serialization budgets in
+// one place. These constants do not add fields to the public MCP schema.
+export const RESEARCH_QUERY_MAX_CHARS = 4_000;
+export const RESEARCH_MIN_CHARS = 500;
+export const RESEARCH_MAX_CHARS = 4_000;
+export const RESEARCH_MAX_RESULTS = 10;
 const isHttpUrl = (value: string): boolean => {
   try {
     const url = new URL(value);
@@ -703,9 +709,9 @@ export const BatchRequestSchema = z.object({
   }
 });
 export const ResearchRequestSchema = z.object({
-  query: BoundedString(4_000),
-  maxResults: z.number().int().min(1).max(10).optional(),
-  maxChars: z.number().int().min(500).max(4_000).optional(),
+  query: BoundedString(RESEARCH_QUERY_MAX_CHARS),
+  maxResults: z.number().int().min(1).max(RESEARCH_MAX_RESULTS).optional(),
+  maxChars: z.number().int().min(RESEARCH_MIN_CHARS).max(RESEARCH_MAX_CHARS).optional(),
 }).strict();
 export type ResearchRequest = z.infer<typeof ResearchRequestSchema>;
 

@@ -154,4 +154,28 @@ describe("MCP error boundary", () => {
     expect(payload.message).not.toContain("abcdefghijklmnop");
     expect(payload.message.length).toBeLessThan(100);
   });
+
+  it("keeps direct tool errors bounded while retaining retry classification", () => {
+    const failed = toolError(new AppError("SEARCH_HTTP_ERROR", `provider detail https://example.test/?token=secret ${"x".repeat(40_000)}`, {
+      retryable: true,
+      details: {
+        classification: "transient",
+        status: 503,
+        attempts: 3,
+        maxAttempts: 3,
+        completedResults: Array.from({ length: 100 }, () => ({ evidence: "x".repeat(500) })),
+      },
+    }));
+    expect(failed.structuredContent).toMatchObject({
+      ok: false,
+      error: {
+        code: "SEARCH_HTTP_ERROR",
+        retryable: true,
+        details: { classification: "transient", status: 503, attempts: 3, resultsTruncated: true },
+      },
+    });
+    expect(failed.content[0]?.type).toBe("text");
+    expect(new TextEncoder().encode(JSON.stringify(failed)).byteLength).toBeLessThan(30_000);
+    expect(failed.content[0]?.type === "text" ? failed.content[0].text : "").not.toContain("token=secret");
+  });
 });

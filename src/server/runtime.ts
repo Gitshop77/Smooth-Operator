@@ -129,7 +129,11 @@ export class ServerRuntime {
   async close(): Promise<void> {
     if (!this.closePromise) {
       this.closing = true;
+      const pendingProfileAcquisition = this.profileLeasePromise;
       this.closePromise = (async () => {
+        if (pendingProfileAcquisition) {
+          await runShutdownPhase("browser profile lease acquisition", () => pendingProfileAcquisition, PROFILE_ACQUISITION_SETTLE_TIMEOUT_MS, this.logger);
+        }
         const browserClose = await runShutdownPhase("browser close", () => this.browser.shutdownOutcome(), RUNTIME_SHUTDOWN_TIMEOUT_MS, this.logger);
         const browserOutcome = browserClose.value as { succeeded?: unknown } | undefined;
         if (browserClose.status === "complete" && browserOutcome?.succeeded !== false) {
@@ -243,6 +247,7 @@ interface BrowserProfileLease {
 
 const BROWSER_PROFILE_LOCK_NAME = ".smooth-operator-profile.lock";
 const RUNTIME_SHUTDOWN_TIMEOUT_MS = 5_000;
+const PROFILE_ACQUISITION_SETTLE_TIMEOUT_MS = 1_000;
 const PROFILE_RELEASE_TIMEOUT_MS = 1_000;
 
 async function acquireBrowserProfileLease(profileDirectory: string): Promise<BrowserProfileLease> {
@@ -261,6 +266,15 @@ async function acquireBrowserProfileLease(profileDirectory: string): Promise<Bro
         // Leave an unreadable/partial lock for explicit operator recovery.
         // Unlinking by pathname here could remove a replacement lock created
         // by another contender after this descriptor was opened.
+        throw error;
+      }
+      let lockIdentity: Awaited<ReturnType<typeof handle.stat>>;
+      try {
+        lockIdentity = await handle.stat();
+      } catch (error) {
+        await handle.close().catch(() => undefined);
+        // Leave the lock for explicit operator recovery if its identity could
+        // not be established safely.
         throw error;
       }
 
@@ -283,6 +297,10 @@ async function acquireBrowserProfileLease(profileDirectory: string): Promise<Bro
             handleClosed = true;
             await handle.close().catch(() => undefined);
           }
+          const currentIdentity = await lstat(lockPath).catch(() => undefined);
+          if (!currentIdentity || !sameFileIdentity(lockIdentity, currentIdentity)) {
+            return;
+          }
           const current = await readFile(lockPath, "utf8").catch(() => undefined);
           let ownsCurrentLock = false;
           if (current) {
@@ -292,7 +310,10 @@ async function acquireBrowserProfileLease(profileDirectory: string): Promise<Bro
               ownsCurrentLock = false;
             }
           }
-          if (ownsCurrentLock) {
+          const verifiedIdentity = ownsCurrentLock
+            ? await lstat(lockPath).catch(() => undefined)
+            : undefined;
+          if (ownsCurrentLock && verifiedIdentity && sameFileIdentity(lockIdentity, verifiedIdentity)) {
             await unlink(lockPath).catch(() => undefined);
           }
         },
@@ -471,6 +492,10 @@ async function isAllowedMacSystemAlias(componentPath: string): Promise<boolean> 
   }
   const canonical = await realpath(componentPath).catch(() => undefined);
   return canonical === `/private${alias}`;
+}
+
+function sameFileIdentity(left: { dev: number; ino: number }, right: { dev: number; ino: number }): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
 }
 
 function fileSystemErrorCode(error: unknown): string | undefined {

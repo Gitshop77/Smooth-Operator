@@ -1,19 +1,54 @@
 import { AppError } from "./errors";
-import { Logger } from "./logger";
+import { RESEARCH_MAX_CHARS, RESEARCH_MAX_RESULTS, RESEARCH_MIN_CHARS, RESEARCH_QUERY_MAX_CHARS } from "./contracts";
+import { Logger, redactValue } from "./logger";
 import { SecurityPolicy } from "./policy";
-import { redactSecretPlaceholders, wrapUntrustedText } from "./security";
+import { wrapUntrustedText } from "./security";
 import { sanitizeUrl } from "./browser/utils";
 
-const MAX_QUERY_CHARS = 4_000;
+const MAX_QUERY_CHARS = RESEARCH_QUERY_MAX_CHARS;
 const MAX_RESPONSE_BYTES = 2_000_000;
 const REQUEST_TIMEOUT_MS = 30_000;
+const DEFAULT_MAX_RESULTS = 5;
+const MAX_RESULTS = RESEARCH_MAX_RESULTS;
+const MIN_MAX_CHARS = RESEARCH_MIN_CHARS;
+const MAX_MAX_CHARS = RESEARCH_MAX_CHARS;
+const MAX_RESULT_TITLE_CHARS = 500;
+const MAX_RESULT_SNIPPET_CHARS = 4_000;
+const MAX_ATTEMPTS = 3;
+const RETRY_BASE_DELAY_MS = 250;
+const RETRY_MAX_DELAY_MS = 2_000;
+const ZERO_WIDTH_PATTERN = /[\u200B-\u200D\u2060\uFEFF]/g;
+const CONTROL_CHARACTER_PATTERN = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/g;
+const ANTI_BOT_PATTERN = /(?:captcha|challenge|unusual\s+traffic|automated\s+(?:queries|requests)|access\s+denied|temporarily\s+blocked|too\s+many\s+requests)/i;
 
-interface ResearchResult {
+type ResearchItem = { title: string; url: string; untrustedUrl: string; snippet: string };
+
+export interface ResearchResult {
   query: string;
   source: "duckduckgo";
   fetchedAt: string;
-  results: Array<{ title: string; url: string; untrustedUrl: string; snippet: string }>;
+  attempts: number;
+  requestedMaxResults: number;
+  returnedResults: number;
+  hasMore: boolean;
+  resultsTruncated: boolean;
+  textTruncated?: boolean;
+  results: ResearchItem[];
   warning?: string;
+}
+
+interface ParsedResults {
+  results: ResearchItem[];
+  hasMore: boolean;
+  textTruncated: boolean;
+}
+
+interface ResultCandidate {
+  title: string;
+  titleTruncated: boolean;
+  url: string;
+  snippet: string;
+  snippetTruncated: boolean;
 }
 
 export class ResearchService {
@@ -26,16 +61,24 @@ export class ResearchService {
     if (typeof query !== "string") {
       throw new AppError("RESEARCH_INVALID", "A non-empty research query is required.");
     }
-    const normalizedQuery = query.trim();
+    if (!options || typeof options !== "object" || Array.isArray(options)) {
+      throw new AppError("RESEARCH_INVALID", "Research options must be an object.");
+    }
+    let normalizedQuery: string;
+    try {
+      normalizedQuery = normalizeResearchQuery(query);
+    } catch (error) {
+      throw new AppError("RESEARCH_INVALID", "Research queries must contain valid Unicode text.", { cause: error });
+    }
     if (!normalizedQuery) {
       throw new AppError("RESEARCH_INVALID", "A non-empty research query is required.");
     }
     if (normalizedQuery.length > MAX_QUERY_CHARS) {
       throw new AppError("RESEARCH_INVALID", `Research queries must be ${MAX_QUERY_CHARS} characters or shorter.`);
     }
-    const maxResults = boundedInteger(options.maxResults, 5, 1, 10);
+    const maxResults = boundedInteger(options.maxResults, DEFAULT_MAX_RESULTS, 1, MAX_RESULTS);
     // maxChars is an aggregate budget for textual fields only.
-    const maxChars = boundedInteger(options.maxChars, 20_000, 500, 50_000);
+    const maxChars = boundedInteger(options.maxChars, MAX_MAX_CHARS, MIN_MAX_CHARS, MAX_MAX_CHARS);
     let encodedQuery: string;
     try {
       encodedQuery = encodeURIComponent(normalizedQuery);
@@ -68,47 +111,216 @@ export class ResearchService {
         controller.abort();
         throw new AppError("CANCELLED", "The research request was cancelled.");
       }
-      const response = await awaitWithAbort(
-        fetch(url, { signal: controller.signal, redirect: "error", headers: { accept: "text/html" } }),
-        controller.signal,
-      );
-      if (!response.ok) {
-        throw new AppError("SEARCH_HTTP_ERROR", `Search request returned HTTP ${response.status}.`, { retryable: response.status >= 500 });
-      }
+      const fetched = await fetchWithRetry(url, controller.signal);
+      const response = fetched.response;
       const declaredLength = Number(response.headers.get("content-length"));
       if (Number.isFinite(declaredLength) && declaredLength > MAX_RESPONSE_BYTES) {
-        throw new AppError("RESEARCH_RESPONSE_TOO_LARGE", "The search response exceeded the safety limit.");
+        throw new AppError("RESEARCH_RESPONSE_TOO_LARGE", "The search response exceeded the safety limit.", {
+          details: { classification: "response_too_large", attempts: fetched.attempts },
+        });
       }
       const html = await readBoundedResponseText(response, MAX_RESPONSE_BYTES, controller.signal);
       // `redirect: error` keeps the fetch target bounded, while the response
       // URL still gives the parser the correct origin for protocol-relative
       // and relative result links in DuckDuckGo's HTML.
       const resultOrigin = safeResponseOrigin(response.url, url.toString());
-      const results = parseResults(html, maxResults, maxChars, resultOrigin);
-      this.logger.info("Research completed", { resultCount: results.length });
+      const parsed = parseResults(html, maxResults, maxChars, resultOrigin);
+      if (parsed.results.length === 0 && isAntiBotResponse(html)) {
+        throw new AppError("SEARCH_BLOCKED", "The search provider returned an anti-bot or access challenge; complete it manually or retry later.", {
+          details: { classification: "anti_bot", attempts: fetched.attempts },
+        });
+      }
+      this.logger.info("Research completed", { resultCount: parsed.results.length, attempts: fetched.attempts });
+      const warnings: string[] = [];
+      if (parsed.results.length === 0) {
+        warnings.push("No parseable search results were returned.");
+      }
+      if (parsed.hasMore) {
+        warnings.push("Additional search results were omitted by the bounded result or text limit.");
+      }
+      if (parsed.textTruncated) {
+        warnings.push("Some result text was shortened to stay within the requested text budget.");
+      }
       return {
-        query: normalizedQuery,
+        query: safeResearchQuery(normalizedQuery),
         source: "duckduckgo",
         fetchedAt: new Date().toISOString(),
-        results,
-        ...(results.length === 0 ? { warning: "No parseable search results were returned." } : {}),
+        attempts: fetched.attempts,
+        requestedMaxResults: maxResults,
+        returnedResults: parsed.results.length,
+        hasMore: parsed.hasMore,
+        resultsTruncated: parsed.hasMore,
+        ...(parsed.textTruncated ? { textTruncated: true } : {}),
+        results: parsed.results,
+        ...(warnings.length > 0 ? { warning: warnings.join(" ") } : {}),
       };
     } catch (error) {
       if (signal?.aborted) {
         throw new AppError("CANCELLED", "The research request was cancelled.", { cause: error });
       }
       if (timedOut) {
-        throw new AppError("RESEARCH_TIMEOUT", `The research request exceeded its ${REQUEST_TIMEOUT_MS / 1_000}-second timeout.`, { retryable: true, cause: error });
+        throw new AppError("RESEARCH_TIMEOUT", `The research request exceeded its ${REQUEST_TIMEOUT_MS / 1_000}-second timeout.`, {
+          retryable: true,
+          details: { classification: "timeout", timeoutMs: REQUEST_TIMEOUT_MS },
+          cause: error,
+        });
       }
       if (error instanceof AppError) {
         throw error;
       }
-      throw new AppError("RESEARCH_FAILED", "The research request failed.", { retryable: true, cause: error });
+      throw new AppError("RESEARCH_FAILED", "The research request failed.", {
+        retryable: true,
+        details: { classification: "unexpected", attempts: 1 },
+        cause: error,
+      });
     } finally {
       clearTimeout(timeout);
       signal?.removeEventListener("abort", abort);
     }
   }
+}
+
+async function fetchWithRetry(url: URL, signal: AbortSignal): Promise<{ response: Response; attempts: number }> {
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+    if (signal.aborted) {
+      throw new Error("Operation aborted");
+    }
+    let response: Response;
+    try {
+      response = await awaitWithAbort(
+        fetch(url, { signal, redirect: "error", headers: { accept: "text/html" } }),
+        signal,
+      );
+    } catch (error) {
+      if (signal.aborted) {
+        throw error;
+      }
+      if (attempt >= MAX_ATTEMPTS) {
+        throw new AppError("RESEARCH_FAILED", "The search request failed after bounded retries.", {
+          retryable: true,
+          details: { classification: "network", attempts: attempt, maxAttempts: MAX_ATTEMPTS },
+          cause: error,
+        });
+      }
+      await waitForRetry(retryDelayMs(undefined, attempt), signal);
+      continue;
+    }
+
+    if (response.ok) {
+      return { response, attempts: attempt };
+    }
+
+    const error = searchHttpError(response.status, attempt);
+    discardResponseBody(response);
+    if (!error.retryable || attempt >= MAX_ATTEMPTS) {
+      throw error;
+    }
+    await waitForRetry(retryDelayMs(response.headers, attempt), signal);
+  }
+
+  // The loop always returns or throws. Keep a defensive failure for future
+  // edits so callers never receive an undefined response.
+  throw new AppError("RESEARCH_FAILED", "The search request failed.", {
+    retryable: true,
+    details: { classification: "unexpected", attempts: MAX_ATTEMPTS },
+  });
+}
+
+function searchHttpError(status: number, attempt: number): AppError {
+  const normalizedStatus = Number.isSafeInteger(status) && status >= 100 && status <= 599 ? status : 0;
+  const classification = normalizedStatus === 429
+    ? "rate_limited"
+    : normalizedStatus === 401 || normalizedStatus === 403 || normalizedStatus === 451
+      ? "blocked"
+      : normalizedStatus === 408 || normalizedStatus === 425 || normalizedStatus >= 500
+        ? "transient"
+        : "http_error";
+  const retryable = classification === "rate_limited" || classification === "transient";
+  const message = classification === "rate_limited"
+    ? `The search provider rate-limited the request (HTTP ${normalizedStatus}); retry later.`
+    : classification === "blocked"
+      ? `The search provider blocked the request (HTTP ${normalizedStatus}); retry later or use a human browser check.`
+      : `Search request returned HTTP ${normalizedStatus}.`;
+  return new AppError("SEARCH_HTTP_ERROR", message, {
+    retryable,
+    details: { classification, status: normalizedStatus, attempts: attempt, maxAttempts: MAX_ATTEMPTS },
+  });
+}
+
+function retryDelayMs(headers: Headers | undefined, attempt: number): number {
+  const fallback = Math.min(RETRY_MAX_DELAY_MS, RETRY_BASE_DELAY_MS * (2 ** Math.max(0, attempt - 1)));
+  const retryAfter = parseRetryAfter(headers?.get("retry-after"));
+  return Math.min(RETRY_MAX_DELAY_MS, retryAfter ?? fallback);
+}
+
+function parseRetryAfter(value: string | null | undefined): number | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const seconds = Number(value.trim());
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return Math.max(0, Math.trunc(seconds * 1_000));
+  }
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) {
+    return undefined;
+  }
+  return Math.max(0, timestamp - Date.now());
+}
+
+async function waitForRetry(delayMs: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) {
+    throw new Error("Operation aborted");
+  }
+  if (delayMs <= 0) {
+    return;
+  }
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => finish(resolve), delayMs);
+    const onAbort = (): void => finish(() => reject(new Error("Operation aborted")));
+    const finish = (callback: () => void): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+      callback();
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) {
+      onAbort();
+    }
+  });
+}
+
+function discardResponseBody(response: Response): void {
+  try {
+    void response.body?.cancel().catch(() => undefined);
+  } catch {
+    // A test double or non-standard Response body must not affect retry flow.
+  }
+}
+
+function normalizeResearchQuery(query: string): string {
+  return query
+    .normalize("NFKC")
+    .replace(CONTROL_CHARACTER_PATTERN, " ")
+    .replace(ZERO_WIDTH_PATTERN, "")
+    .replace(/\s+/gu, " ")
+    .trim();
+}
+
+function safeResearchQuery(query: string): string {
+  const redacted = redactValue(query);
+  return typeof redacted === "string" ? redacted : "[REDACTED]";
+}
+
+function isAntiBotResponse(html: string): boolean {
+  // Only classify a response with no usable results. This avoids treating a
+  // legitimate result about CAPTCHAs or rate limiting as a provider block.
+  return ANTI_BOT_PATTERN.test(html.slice(0, MAX_RESPONSE_BYTES));
 }
 
 async function awaitWithAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
@@ -141,14 +353,52 @@ async function awaitWithAbort<T>(promise: Promise<T>, signal?: AbortSignal): Pro
   });
 }
 
-function parseResults(html: string, maxResults: number, maxChars: number, baseUrl: string): Array<{ title: string; url: string; untrustedUrl: string; snippet: string }> {
-  const results: Array<{ title: string; url: string; untrustedUrl: string; snippet: string }> = [];
+function parseResults(html: string, maxResults: number, maxChars: number, baseUrl: string): ParsedResults {
+  // Parse one extra usable candidate so the response can explicitly tell the
+  // caller that the result limit hid more data. Unsafe and duplicate links do
+  // not consume that candidate slot.
+  const candidates = parseResultCandidates(html, maxResults + 1, baseUrl);
+  const results: ResearchItem[] = [];
   let textUsed = 0;
-  // Do not rely on a particular attribute order.  DuckDuckGo has emitted
-  // both `class`-before-`href` and `href`-before-`class` variants over time.
+  let textTruncated = false;
+
+  for (const candidate of candidates.slice(0, maxResults)) {
+    textTruncated ||= candidate.titleTruncated || candidate.snippetTruncated;
+    const remaining = maxChars - textUsed;
+    if (remaining <= 0) {
+      textTruncated = true;
+      break;
+    }
+    const boundedTitle = candidate.title.slice(0, remaining);
+    textTruncated ||= boundedTitle.length < candidate.title.length;
+    textUsed += boundedTitle.length;
+    const snippetRemaining = Math.max(0, maxChars - textUsed);
+    const boundedSnippet = candidate.snippet.slice(0, snippetRemaining);
+    textTruncated ||= boundedSnippet.length < candidate.snippet.length;
+    textUsed += boundedSnippet.length;
+    results.push({
+      title: wrapUntrustedText("research_title", boundedTitle, MAX_RESULT_TITLE_CHARS),
+      url: candidate.url,
+      untrustedUrl: wrapUntrustedText("research_url", safeResearchText(candidate.url, 4_096), 4_096),
+      snippet: wrapUntrustedText("research_snippet", boundedSnippet, MAX_RESULT_SNIPPET_CHARS),
+    });
+  }
+
+  return {
+    results,
+    hasMore: candidates.length > results.length,
+    textTruncated,
+  };
+}
+
+function parseResultCandidates(html: string, maxCandidates: number, baseUrl: string): ResultCandidate[] {
+  const candidates: ResultCandidate[] = [];
+  const seenUrls = new Set<string>();
+  // Do not rely on a particular attribute order. DuckDuckGo has emitted both
+  // `class`-before-`href` and `href`-before-`class` variants over time.
   const pattern = /<a\b[^>]*>[\s\S]*?<\/a>/gi;
   let match: RegExpExecArray | null;
-  while (results.length < maxResults && (match = pattern.exec(html))) {
+  while (candidates.length < maxCandidates && (match = pattern.exec(html))) {
     const anchor = match[0];
     const tagEnd = anchor.indexOf(">");
     if (tagEnd < 0) {
@@ -165,33 +415,33 @@ function parseResults(html: string, maxResults: number, maxChars: number, baseUr
     }
     const rawUrl = decodeEntities(hrefMatch[2]);
     const url = normalizeResultUrl(rawUrl, baseUrl);
-    if (!url) {
+    if (!url || seenUrls.has(url)) {
       continue;
     }
+    seenUrls.add(url);
     const titleContent = anchor.slice(tagEnd + 1).replace(/<\/a>\s*$/i, "");
-    const title = redactSecretPlaceholders(decodeEntities(stripTags(titleContent)).trim()).slice(0, 500);
+    const title = boundedResearchText(decodeEntities(stripTags(titleContent)).trim(), MAX_RESULT_TITLE_CHARS);
     const tailWindow = html.slice(match.index + match[0].length, match.index + match[0].length + 3_000);
     const nextResult = /<a\b[^>]*\bclass\s*=\s*(["'])[^"']*\bresult__a\b[^"']*\1/i.exec(tailWindow);
     const tail = nextResult ? tailWindow.slice(0, nextResult.index) : tailWindow;
     const snippetMatch = /\bclass\s*=\s*(["'])[^"']*\bresult__snippet\b[^"']*\1[^>]*>([\s\S]*?)<\/[^>]+>/i.exec(tail);
-    const snippet = snippetMatch ? redactSecretPlaceholders(decodeEntities(stripTags(snippetMatch[2])).trim()).slice(0, 4_000) : "";
-    const remaining = maxChars - textUsed;
-    if (remaining <= 0) {
-      break;
-    }
-    const boundedTitle = title.slice(0, remaining);
-    textUsed += boundedTitle.length;
-    const snippetRemaining = maxChars - textUsed;
-    const boundedSnippet = snippet.slice(0, Math.max(0, snippetRemaining));
-    textUsed += boundedSnippet.length;
-    results.push({
-      title: wrapUntrustedText("research_title", boundedTitle, 500),
-      url,
-      untrustedUrl: wrapUntrustedText("research_url", redactSecretPlaceholders(url), 4_096),
-      snippet: wrapUntrustedText("research_snippet", boundedSnippet, 4_000),
-    });
+    const snippet = snippetMatch
+      ? boundedResearchText(decodeEntities(stripTags(snippetMatch[2])).trim(), MAX_RESULT_SNIPPET_CHARS)
+      : { value: "", truncated: false };
+    candidates.push({ title: title.value, titleTruncated: title.truncated, url, snippet: snippet.value, snippetTruncated: snippet.truncated });
   }
-  return results;
+  return candidates;
+}
+
+function safeResearchText(value: string, maxChars: number): string {
+  const redacted = redactValue(value);
+  return typeof redacted === "string" ? redacted.slice(0, maxChars) : "";
+}
+
+function boundedResearchText(value: string, maxChars: number): { value: string; truncated: boolean } {
+  const redacted = redactValue(value);
+  const safe = typeof redacted === "string" ? redacted : "";
+  return { value: safe.slice(0, maxChars), truncated: safe.length > maxChars };
 }
 
 function stripTags(value: string): string {
@@ -229,13 +479,21 @@ function normalizeResultUrl(rawUrl: string, baseUrl: string): string | undefined
       resolved.password = "";
     }
     const sanitized = sanitizeUrl(resolved.toString());
-    return sanitized.startsWith("[") ? undefined : sanitized;
+    return sanitized.startsWith("[") || sanitized.length > 4_096 ? undefined : sanitized;
   } catch {
     return undefined;
   }
 }
 
 function safeResponseOrigin(responseUrl: string | undefined, fallback: string): string {
+  let fallbackOrigin: URL | undefined;
+  try {
+    fallbackOrigin = new URL(fallback);
+  } catch {
+    // The fallback is generated from the policy-checked URL, but retain the
+    // defensive default below if a non-standard policy test double returns an
+    // invalid value.
+  }
   for (const candidate of [responseUrl, fallback]) {
     if (!candidate) {
       continue;
@@ -243,6 +501,9 @@ function safeResponseOrigin(responseUrl: string | undefined, fallback: string): 
     try {
       const url = new URL(candidate);
       if (url.protocol === "http:" || url.protocol === "https:") {
+        if (fallbackOrigin && url.origin !== fallbackOrigin.origin) {
+          continue;
+        }
         return url.toString();
       }
     } catch {
@@ -283,12 +544,16 @@ async function readBoundedResponseText(response: Response, maxBytes: number, sig
       }
       if (!(result.value instanceof Uint8Array)) {
         cancelReader = true;
-        throw new AppError("RESEARCH_RESPONSE_INVALID", "The search response body was invalid.");
+        throw new AppError("RESEARCH_RESPONSE_INVALID", "The search response body was invalid.", {
+          details: { classification: "invalid_response" },
+        });
       }
       total += result.value.byteLength;
       if (total > maxBytes) {
         cancelReader = true;
-        throw new AppError("RESEARCH_RESPONSE_TOO_LARGE", "The search response exceeded the safety limit.");
+        throw new AppError("RESEARCH_RESPONSE_TOO_LARGE", "The search response exceeded the safety limit.", {
+          details: { classification: "response_too_large", maxBytes },
+        });
       }
       chunks.push(result.value);
     }

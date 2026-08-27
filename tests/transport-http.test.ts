@@ -59,6 +59,16 @@ describe("HTTP transport", () => {
 
     expect((await request()).status).toBe(401);
     expect((await request({ Authorization: `Bearer ${token}`, Origin: "https://evil.example" })).status).toBe(403);
+    const rejectedHost = await rawPostResponse(port, { Host: "user:secret@evil.example", Authorization: `Bearer ${token}` }, initializeBody);
+    expect(rejectedHost.status).toBe(403);
+    expect(rejectedHost.body).toContain("Host header is not allowed.");
+    expect(rejectedHost.body).not.toContain("secret");
+    expect(rejectedHost.body).not.toContain("evil.example");
+    const rejectedOrigin = await rawPostResponse(port, { Origin: "https://user:secret@evil.example/path", Authorization: `Bearer ${token}` }, initializeBody);
+    expect(rejectedOrigin.status).toBe(403);
+    expect(rejectedOrigin.body).toContain("Origin header is not allowed.");
+    expect(rejectedOrigin.body).not.toContain("secret");
+    expect(rejectedOrigin.body).not.toContain("evil.example");
     const preflight = await fetch(endpoint, {
       method: "OPTIONS",
       headers: {
@@ -150,6 +160,10 @@ async function freePort(): Promise<number> {
 }
 
 async function rawPost(port: number, headers: Record<string, string>, body: string): Promise<number> {
+  return (await rawPostResponse(port, headers, body)).status;
+}
+
+async function rawPostResponse(port: number, headers: Record<string, string>, body: string): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
     const request = httpRequest({
       hostname: "127.0.0.1",
@@ -163,8 +177,9 @@ async function rawPost(port: number, headers: Record<string, string>, body: stri
         ...headers,
       },
     }, (response) => {
-      response.resume();
-      response.once("end", () => resolve(response.statusCode ?? 0));
+      const chunks: Buffer[] = [];
+      response.on("data", (chunk: Buffer | string) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+      response.once("end", () => resolve({ status: response.statusCode ?? 0, body: Buffer.concat(chunks).toString("utf8") }));
       response.once("error", reject);
     });
     request.once("error", reject);

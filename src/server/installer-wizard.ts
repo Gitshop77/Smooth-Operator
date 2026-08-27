@@ -1,7 +1,12 @@
-import { isAbsolute, join, parse, win32 } from "node:path";
+import { dirname, isAbsolute, join, parse, resolve, win32 } from "node:path";
 import { existsSync } from "node:fs";
+import { chmod, lstat, rename, unlink, writeFile, type FileHandle } from "node:fs/promises";
 import { homedir } from "node:os";
+import { isIP } from "node:net";
+import { domainToASCII } from "node:url";
 
+import { AppError } from "./errors";
+import { createConfigBackup, ensureSecureDirectory, parseJsonc, readSecureConfigFile } from "./installer";
 import { createUi } from "./ui";
 import { SERVER_VERSION } from "./version";
 
@@ -89,6 +94,7 @@ export async function promptForHarness(opts: { stdin: WizardStdin; stdout: Wizar
   const input = opts.stdin as unknown as import("node:stream").Readable;
   const output = opts.stdout as unknown as import("node:stream").Writable;
   const rl = createInterface({ input, output });
+  const session: WizardSession = tolerantQuestion(rl);
 
   try {
     if (opts.stdout.isTTY) {
@@ -97,7 +103,7 @@ export async function promptForHarness(opts: { stdin: WizardStdin; stdout: Wizar
       HARNESS_MENU.forEach((entry, index) => ui.option(index + 1, entry.label, entry.description));
     }
     while (true) {
-      const answer = await rl.question(`Choose 1-${HARNESS_MENU.length} or type a name [opencode]: `);
+      const answer = await session.question(`Choose 1-${HARNESS_MENU.length} or type a name [opencode]: `);
       const trimmed = answer.trim().toLowerCase();
       if (!trimmed) return "opencode";
       const numeric = Number.parseInt(trimmed, 10);
@@ -210,9 +216,110 @@ async function askYesNo(session: WizardSession, prompt: string, fallback: boolea
 }
 
 function parseDomainList(raw: string): string[] | undefined {
-  const domains = raw.split(",").map((part) => part.trim().toLowerCase()).filter(Boolean);
-  const invalid = domains.find((domain) => !/^(?:\*\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)+$/.test(domain));
-  return invalid === undefined ? domains : undefined;
+  if (raw.trim() === "") {
+    return [];
+  }
+  const parts = raw.split(",").map((part) => part.trim());
+  if (parts.some((part) => !part)) {
+    return undefined;
+  }
+  const domains = parts.map(normalizeWizardDomain);
+  return domains.every((domain): domain is string => domain !== undefined) ? domains : undefined;
+}
+
+function normalizeWizardDomain(value: string): string | undefined {
+  const trimmed = value.trim().replace(/^\.+|\.+$/g, "");
+  const wildcard = trimmed.startsWith("*.");
+  const base = wildcard ? trimmed.slice(2) : trimmed;
+  if (!base || (trimmed.includes("*") && !wildcard) || base.includes("..")) {
+    return undefined;
+  }
+  const bracketless = base.replace(/^\[|\]$/g, "");
+  if (isIP(bracketless) !== 0) {
+    return wildcard ? undefined : bracketless.toLowerCase();
+  }
+  let ascii: string;
+  try {
+    ascii = domainToASCII(base).toLowerCase();
+  } catch {
+    return undefined;
+  }
+  if (!ascii || ascii.length > 253 || !ascii.split(".").every((label) => label.length > 0 && label.length <= 63 && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label))) {
+    return undefined;
+  }
+  return `${wildcard ? "*." : ""}${ascii}`;
+}
+
+function normalizeWizardChoices(choices: WizardChoices): WizardChoices {
+  if (!isRecord(choices) || !["managed", "connect", "disabled"].includes(choices.mode)) {
+    throw new AppError("INSTALL_CONFIG_INVALID", "Wizard choices contain an unsupported browser mode.");
+  }
+  if (typeof choices.headless !== "boolean" || typeof choices.allowEval !== "boolean") {
+    throw new AppError("INSTALL_CONFIG_INVALID", "Wizard choices contain invalid boolean settings.");
+  }
+  const allowedDomains = normalizeWizardChoiceList(choices.allowedDomains, "allowed");
+  const blockedDomains = normalizeWizardChoiceList(choices.blockedDomains, "blocked");
+  const dataDir = typeof choices.dataDir === "string" ? choices.dataDir.trim() : "";
+  const resolvedDataDir = dataDir ? resolve(dataDir) : "";
+  if (!resolvedDataDir || !isAbsolutePath(dataDir) || isFilesystemRoot(resolvedDataDir) || /[\u0000-\u001f\u007f]/.test(dataDir)) {
+    throw new AppError("INSTALL_CONFIG_INVALID", "The wizard data directory must be an absolute non-root path without control characters.");
+  }
+  const browserUrl = normalizeWizardBrowserUrl(choices.browserUrl, choices.mode);
+  const browserExecutablePath = normalizeWizardExecutablePath(choices.browserExecutablePath, choices.mode);
+  return {
+    mode: choices.mode,
+    headless: choices.headless,
+    allowedDomains,
+    blockedDomains,
+    allowEval: choices.allowEval,
+    dataDir: resolvedDataDir,
+    ...(browserUrl ? { browserUrl } : {}),
+    ...(browserExecutablePath ? { browserExecutablePath } : {}),
+  };
+}
+
+function normalizeWizardChoiceList(values: unknown, label: string): string[] {
+  if (!Array.isArray(values) || values.length > 128) {
+    throw new AppError("INSTALL_CONFIG_INVALID", `Wizard ${label} domains must be an array of at most 128 entries.`);
+  }
+  const normalized = values.map((value) => typeof value === "string" ? normalizeWizardDomain(value) : undefined);
+  if (normalized.some((value) => value === undefined)) {
+    throw new AppError("INSTALL_CONFIG_INVALID", `Wizard ${label} domains contain an invalid pattern.`);
+  }
+  return [...new Set(normalized as string[])];
+}
+
+function normalizeWizardBrowserUrl(value: unknown, mode: string): string | undefined {
+  if (value === undefined || value === "") {
+    return undefined;
+  }
+  if (typeof value !== "string" || mode !== "connect") {
+    throw new AppError("INSTALL_CONFIG_INVALID", "A browser URL is only valid for connect mode and must be a string.");
+  }
+  const trimmed = value.trim();
+  try {
+    const url = new URL(trimmed);
+    if ((url.protocol !== "http:" && url.protocol !== "https:") || !url.hostname || url.username || url.password || url.hash) {
+      throw new Error("invalid browser URL");
+    }
+    return url.pathname === "/" && url.search === "" ? url.origin : url.toString();
+  } catch {
+    throw new AppError("INSTALL_CONFIG_INVALID", "The browser URL must be an HTTP(S) URL without credentials.");
+  }
+}
+
+function normalizeWizardExecutablePath(value: unknown, mode: string): string | undefined {
+  if (value === undefined || value === "") {
+    return undefined;
+  }
+  if (typeof value !== "string" || mode === "disabled") {
+    throw new AppError("INSTALL_CONFIG_INVALID", "A browser executable is only valid when browser control is enabled.");
+  }
+  const trimmed = value.trim();
+  if (!isAbsolutePath(trimmed) || /[\u0000-\u001f\u007f]/.test(trimmed)) {
+    throw new AppError("INSTALL_CONFIG_INVALID", "The browser executable must be an absolute path without control characters.");
+  }
+  return trimmed;
 }
 
 export async function runWizard(harness: string, opts: WizardRunOptions): Promise<WizardChoices> {
@@ -222,9 +329,10 @@ export async function runWizard(harness: string, opts: WizardRunOptions): Promis
   }
   const stdin = opts.stdin ?? process.stdin;
   const stdout = opts.stdout ?? process.stdout;
+  const environment = opts.env ?? process.env;
   // Non-interactive runs (piped stdin/stdout or CI) must never open readline:
   // apply exactly the same recommended defaults as the `--yes` path.
-  const interactive = Boolean(stdin.isTTY && stdout.isTTY && !process.env.CI);
+  const interactive = Boolean(stdin.isTTY && stdout.isTTY && !environment.CI);
   if (!interactive) {
     return defaults;
   }
@@ -343,7 +451,7 @@ export async function runWizard(harness: string, opts: WizardRunOptions): Promis
       while (dataDir === defaults.dataDir) {
         const answer = (await session.question(`Data directory [${defaults.dataDir}]: `)).trim();
         if (!answer) break;
-        if (!isAbsolutePath(answer) || isFilesystemRoot(answer)) {
+        if (!isAbsolutePath(answer) || isFilesystemRoot(answer) || /[\u0000-\u001f\u007f]/.test(answer)) {
           ui.failure("Enter an absolute path other than the filesystem root.");
           continue;
         }
@@ -358,7 +466,10 @@ export async function runWizard(harness: string, opts: WizardRunOptions): Promis
           const launched = await launchPersonalChrome({ dataDir, spawn: opts.spawn, probe: opts.probe ?? defaultProbe, port: 9222 });
           browserUrl = launched.url;
           ui.success(`Connected to your Chrome at ${launched.url}`);
-        } catch {
+        } catch (error) {
+          if (error instanceof AppError && (error.code === "INSTALL_CONFIG_INVALID" || error.code === "INSTALL_CONFIG_FAILED")) {
+            throw error;
+          }
           browserUrl = "http://127.0.0.1:9222";
           ui.note("Could not reach Chrome on port 9222 yet - keeping the default URL.");
         }
@@ -406,120 +517,130 @@ async function defaultProbe(url: string, timeoutMs: number): Promise<ProbeResult
   }
 }
 
-export async function persistWizardConfig(choices: WizardChoices, homeDir: string): Promise<void> {
-  const { join, dirname, resolve } = await import("node:path");
-  const { chmod, lstat, readFile, writeFile, rename } = await import("node:fs/promises");
-  const configPath = resolve(join(homeDir, ".smooth-operator/config.json"));
-  const { ensureSecureDirectory } = await import("./installer.js");
-  await ensureSecureDirectory(dirname(configPath));
+async function assertPrivateWizardConfig(handle: FileHandle): Promise<void> {
+  const info = await handle.stat();
+  const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
+  if (uid !== undefined && info.uid !== uid) {
+    throw new AppError("INSTALL_CONFIG_FAILED", "The existing server configuration must be owned by the current user.");
+  }
+  if (process.platform !== "win32" && (info.mode & 0o077) !== 0) {
+    throw new AppError("INSTALL_CONFIG_FAILED", "The existing server configuration must use owner-only permissions (for example, chmod 600).");
+  }
+}
+
+async function rejectWizardConfigSymlink(path: string): Promise<void> {
   try {
-    const stats = await lstat(configPath);
-    if (stats.isSymbolicLink()) {
-      const { AppError } = await import("./errors.js");
-      throw new AppError("INSTALL_CONFIG_FAILED", "Config must not be a symbolic link");
+    if ((await lstat(path)).isSymbolicLink()) {
+      throw new AppError("INSTALL_CONFIG_FAILED", "The server configuration must not be a symbolic link.");
     }
   } catch (error) {
     if (!isMissingPathError(error)) throw error;
+  }
+}
+
+export async function persistWizardConfig(rawChoices: WizardChoices, homeDir: string): Promise<void> {
+  const choices = normalizeWizardChoices(rawChoices);
+  const configPath = resolve(join(homeDir, ".smooth-operator", "config.json"));
+  await ensureSecureDirectory(dirname(configPath));
+
+  // Read and parse the same no-follow descriptor whose bytes are later used
+  // for the backup. This avoids pathname races and bounds memory use even if
+  // the file grows after its initial stat.
+  let previous: Record<string, unknown> = {};
+  let reviewedBytes: Buffer | undefined;
+  let reviewedHandle: FileHandle | undefined;
+  try {
+    const reviewed = await readSecureConfigFile(configPath);
+    if (reviewed) {
+      reviewedBytes = reviewed.bytes;
+      reviewedHandle = reviewed.handle;
+      await assertPrivateWizardConfig(reviewedHandle);
+      const parsed: unknown = parseJsonc(reviewedBytes.toString("utf8"), configPath);
+      if (isRecord(parsed)) previous = parsed;
+    }
+  } finally {
+    await reviewedHandle?.close().catch(() => undefined);
   }
 
   // Merge into the previous configuration instead of replacing it, so
   // unrelated user settings (and unknown sections) survive the wizard.
-  let previous: Record<string, unknown> = {};
-  try {
-    const stats = await lstat(configPath);
-    if (stats.size > MAX_WIZARD_CONFIG_BYTES) {
-      const { AppError } = await import("./errors.js");
-      throw new AppError("INSTALL_CONFIG_FAILED", `Config must be ${MAX_WIZARD_CONFIG_BYTES} bytes or smaller`);
-    }
-    const raw = await readFile(configPath, "utf8");
-    const { parseJsonc } = await import("./installer.js");
-    const parsed: unknown = parseJsonc(raw, configPath);
-    if (isRecord(parsed)) previous = parsed;
-  } catch (error) {
-    if (!isMissingPathError(error)) throw error;
-  }
   const prevBrowser = isRecord(previous.browser) ? previous.browser : {};
   const prevSecurity = isRecord(previous.security) ? previous.security : {};
-
-  // Wizard-managed keys are always written from the chosen values so a
-  // previously persisted unsafe value cannot survive a re-run; unrelated
-  // keys still merge from the previous configuration below.
-  const chosenBrowser: Record<string, unknown> = {
-    mode: choices.mode,
-    headless: choices.headless,
-  };
-  if (choices.browserUrl) {
-    chosenBrowser.url = choices.browserUrl;
-  }
-  if (choices.browserExecutablePath) {
-    chosenBrowser.executablePath = choices.browserExecutablePath;
-  }
-  const chosenSecurity: Record<string, unknown> = {
+  const browserSection: Record<string, unknown> = { ...prevBrowser, mode: choices.mode, headless: choices.headless };
+  // These optional browser fields are wizard-managed too. Clear stale values
+  // when a rerun switches back to managed/disabled mode.
+  delete browserSection.url;
+  delete browserSection.executablePath;
+  if (choices.browserUrl) browserSection.url = choices.browserUrl;
+  if (choices.browserExecutablePath) browserSection.executablePath = choices.browserExecutablePath;
+  const securitySection = {
+    ...prevSecurity,
     allowEval: choices.allowEval,
     allowedDomains: choices.allowedDomains,
     blockedDomains: choices.blockedDomains,
   };
 
-  const config: Record<string, unknown> = { ...previous };
-  const browserSection = { ...prevBrowser, ...chosenBrowser };
-  const securitySection = { ...prevSecurity, ...chosenSecurity };
-  if (Object.keys(browserSection).length > 0) config.browser = browserSection;
-  if (Object.keys(securitySection).length > 0) config.security = securitySection;
-  const defaultDataDir = join(homeDir, ".smooth-operator");
-  if (choices.dataDir !== defaultDataDir) {
+  const config: Record<string, unknown> = { ...previous, browser: browserSection, security: securitySection };
+  const defaultDataDir = resolve(join(homeDir, ".smooth-operator"));
+  if (choices.dataDir === defaultDataDir) {
+    delete config.dataDir;
+  } else {
     config.dataDir = choices.dataDir;
+  }
+
+  const serializedConfig = `${JSON.stringify(config, null, 2)}\n`;
+  if (Buffer.byteLength(serializedConfig, "utf8") > MAX_WIZARD_CONFIG_BYTES) {
+    throw new AppError("INSTALL_CONFIG_FAILED", `The generated server configuration must be ${MAX_WIZARD_CONFIG_BYTES} bytes or smaller.`);
   }
 
   const { randomUUID } = await import("node:crypto");
   const tmpPath = `${configPath}.tmp-${process.pid}-${randomUUID()}`;
-  await writeFile(tmpPath, JSON.stringify(config, null, 2) + "\n", { mode: 0o600, flag: "wx" });
-  await chmod(tmpPath, 0o600);
-  // backup if exists
   try {
-    const stats = await lstat(configPath);
-    if (stats.size > MAX_WIZARD_CONFIG_BYTES) {
-      const { AppError } = await import("./errors.js");
-      throw new AppError("INSTALL_CONFIG_FAILED", `Config must be ${MAX_WIZARD_CONFIG_BYTES} bytes or smaller`);
-    }
-    const existing = await readFile(configPath);
-    const bak = `${configPath}.bak`;
-    try {
-      await writeFile(bak, existing, { mode: 0o600, flag: "wx" });
-      await chmod(bak, 0o600);
-    } catch {
-      let i = 1;
-      while (true) {
-        try {
-          await writeFile(`${bak}.${i}`, existing, { mode: 0o600, flag: "wx" });
-          await chmod(`${bak}.${i}`, 0o600);
-          break;
-        } catch {
-          i++;
-          if (i > 1000) throw new Error("backup limit");
-        }
-      }
-    }
+    await writeFile(tmpPath, serializedConfig, { mode: 0o600, flag: "wx" });
+    await chmod(tmpPath, 0o600);
   } catch (error) {
-    if (!isMissingPathError(error)) throw error;
+    await unlink(tmpPath).catch(() => undefined);
+    throw new AppError("INSTALL_CONFIG_FAILED", "Could not write the temporary server configuration.", { cause: error });
   }
-  await rename(tmpPath, configPath);
-  await chmod(configPath, 0o600);
+
+  try {
+    if (reviewedBytes) {
+      await createConfigBackup(configPath, reviewedBytes);
+    }
+    // Recheck the parent and final component immediately before the atomic
+    // replacement. Rename replaces a final symlink rather than following it;
+    // the checks prevent a user-controlled directory/file link from becoming
+    // the destination in the first place.
+    await ensureSecureDirectory(dirname(configPath));
+    await rejectWizardConfigSymlink(configPath);
+    await rename(tmpPath, configPath);
+  } catch (error) {
+    await unlink(tmpPath).catch(() => undefined);
+    if (error instanceof AppError) throw error;
+    throw new AppError("INSTALL_CONFIG_FAILED", "Could not persist the server configuration.", { cause: error });
+  }
 }
 
 export async function launchPersonalChrome(opts: PersonalChromeOptions): Promise<{ url: string }> {
   const port = opts.port ?? 9222;
+  if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) {
+    throw new AppError("INSTALL_CONFIG_INVALID", "The personal Chrome debugging port must be an integer between 1 and 65535.");
+  }
+  const rawDataDir = typeof opts.dataDir === "string" ? opts.dataDir.trim() : "";
+  const safeDataDir = rawDataDir ? resolve(rawDataDir) : "";
+  if (!safeDataDir || !isAbsolutePath(rawDataDir) || isFilesystemRoot(safeDataDir) || /[\u0000-\u001f\u007f]/.test(rawDataDir)) {
+    throw new AppError("INSTALL_CONFIG_INVALID", "The personal Chrome data directory must be an absolute non-root path without control characters.");
+  }
   const { findChromeExecutable } = await import("./browser/discovery.js");
   const executable = opts.executablePath ?? findChromeExecutable()?.path;
   if (!executable) {
-    const { AppError } = await import("./errors.js");
     throw new AppError("BROWSER_NOT_CONFIGURED", "Install Chrome or set SMOOTH_OPERATOR_BROWSER_EXECUTABLE");
   }
+  await ensureSecureDirectory(safeDataDir);
   const spawnFn = opts.spawn ?? (await import("node:child_process")).spawn;
-  const { join } = await import("node:path");
-  const child = spawnFn(executable, [`--remote-debugging-port=${port}`, `--user-data-dir=${join(opts.dataDir, "personal-chrome")}`, "--no-first-run", "--no-default-browser-check"], { detached: true, stdio: "ignore", windowsHide: true });
+  const child = spawnFn(executable, [`--remote-debugging-port=${port}`, `--user-data-dir=${join(safeDataDir, "personal-chrome")}`, "--no-first-run", "--no-default-browser-check"], { detached: true, stdio: "ignore", windowsHide: true });
   child.unref();
   const probe = opts.probe;
-  const { AppError } = await import("./errors.js");
   const attempts = opts.probeAttempts ?? DEFAULT_PROBE_ATTEMPTS;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     await new Promise((resolveTimeout) => setTimeout(resolveTimeout, PROBE_INTERVAL_MS));

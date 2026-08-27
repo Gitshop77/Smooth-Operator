@@ -1,8 +1,8 @@
-import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, lstatSync, openSync, readSync } from "node:fs";
 import { env } from "node:process";
 import { homedir } from "node:os";
 import { isIP } from "node:net";
-import { join, resolve } from "node:path";
+import { join, parse, resolve, sep } from "node:path";
 import { domainToASCII } from "node:url";
 import process from "node:process";
 
@@ -10,12 +10,13 @@ import * as z from "zod/v4";
 
 import { AppError } from "./errors";
 import type { LogLevel } from "./logger";
+import { canonicalizeAllowedFileRoots } from "./policy";
 
 const TransportSchema = z.enum(["stdio", "http"]);
 const BrowserModeSchema = z.enum(["disabled", "connect", "launch", "managed"]);
 const ConfigPathSchema = z.string().trim().min(1).max(4_096);
 const DomainPatternSchema = z.string().trim().min(1).max(253).refine(isValidDomainPattern, "Domain patterns must be exact hostnames or *.-prefixed suffixes.");
-const HostPatternSchema = z.string().trim().min(1).max(2_048);
+const HostPatternSchema = z.string().trim().min(1).max(255).refine(isValidHostPattern, "Host allowlists must contain hostnames or bracketed IPv6 addresses without ports.");
 const ViewportDimensionSchema = z.number().int().min(1).max(10_000);
 const BrowserViewportSchema = z.object({ width: ViewportDimensionSchema, height: ViewportDimensionSchema }).strict();
 const ConfigList = <T extends z.ZodType>(schema: T) => z.array(schema).max(128);
@@ -116,21 +117,22 @@ function parseBoolean(value: string | undefined, fallback: boolean): boolean {
   if (value === undefined) {
     return fallback;
   }
-  const normalized = value.toLowerCase();
-  if (value === "1" || normalized === "true" || normalized === "yes") {
+  const trimmed = value.trim();
+  const normalized = trimmed.toLowerCase();
+  if (trimmed === "1" || normalized === "true" || normalized === "yes") {
     return true;
   }
-  if (value === "0" || normalized === "false" || normalized === "no") {
+  if (trimmed === "0" || normalized === "false" || normalized === "no") {
     return false;
   }
   throw new AppError("CONFIG_INVALID", `Invalid boolean value '${value}'.`);
 }
 
 function parseInteger(value: string | undefined, fallback: number): number {
-  if (value === undefined || value === "") {
+  if (value === undefined || value.trim() === "") {
     return fallback;
   }
-  const parsed = Number(value);
+  const parsed = Number(value.trim());
   if (!Number.isSafeInteger(parsed)) {
     throw new AppError("CONFIG_INVALID", `Invalid integer value '${value}'.`);
   }
@@ -138,10 +140,10 @@ function parseInteger(value: string | undefined, fallback: number): number {
 }
 
 function parseOptionalInteger(value: string | undefined, fallback: number | undefined): number | undefined {
-  if (value === undefined || value === "") {
+  if (value === undefined || value.trim() === "") {
     return fallback;
   }
-  const parsed = Number(value);
+  const parsed = Number(value.trim());
   if (!Number.isSafeInteger(parsed)) {
     throw new AppError("CONFIG_INVALID", `Invalid integer value '${value}'.`);
   }
@@ -182,6 +184,41 @@ function normalizeList(values: readonly string[]): string[] {
   return [...new Set(values.map((item) => item.trim()).filter(Boolean))];
 }
 
+function normalizeDomainPattern(value: string): string {
+  const trimmed = value.trim().replace(/^\.+|\.+$/g, "");
+  const wildcard = trimmed.startsWith("*.");
+  const base = wildcard ? trimmed.slice(2) : trimmed;
+  const bracketless = base.replace(/^\[|\]$/g, "");
+  if (isIP(bracketless) !== 0) {
+    return `${wildcard ? "*." : ""}${bracketless.toLowerCase()}`;
+  }
+  return `${wildcard ? "*." : ""}${domainToASCII(base).toLowerCase()}`;
+}
+
+function normalizeDomainList(values: readonly string[]): string[] {
+  const normalized = normalizeList(values);
+  if (normalized.some((value) => !isValidDomainPattern(value))) {
+    throw new AppError("CONFIG_INVALID", "Configuration failed validation: configured domain patterns must be exact hostnames or *.-prefixed suffixes.");
+  }
+  return normalized.map(normalizeDomainPattern);
+}
+
+function normalizeHostPattern(value: string): string {
+  const trimmed = value.trim();
+  if (!isValidHostPattern(trimmed)) {
+    throw new AppError("CONFIG_INVALID", "Configuration failed validation: configured HTTP host allowlists must contain hostnames or bracketed IPv6 addresses without ports.");
+  }
+  try {
+    return new URL(`http://${trimmed}`).hostname.toLowerCase();
+  } catch (error) {
+    throw new AppError("CONFIG_INVALID", "Configuration failed validation: configured HTTP host allowlists contain an invalid hostname.", { cause: error });
+  }
+}
+
+function normalizeHostList(values: readonly string[]): string[] {
+  return normalizeList(values).map(normalizeHostPattern);
+}
+
 function isValidDomainPattern(value: string): boolean {
   const trimmed = value.trim().replace(/^\.+|\.+$/g, "");
   const wildcard = trimmed.startsWith("*.");
@@ -205,6 +242,37 @@ function isValidDomainPattern(value: string): boolean {
   return ascii.split(".").every((label) => label.length > 0 && label.length <= 63 && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i.test(label));
 }
 
+function isValidHostPattern(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed || /[\u0000-\u0020/?#@]/.test(trimmed) || trimmed.includes("*")) {
+    return false;
+  }
+  try {
+    const endpoint = new URL(`http://${trimmed}`);
+    return Boolean(endpoint.hostname)
+      && endpoint.username === ""
+      && endpoint.password === ""
+      && endpoint.port === ""
+      && endpoint.pathname === "/"
+      && endpoint.search === ""
+      && endpoint.hash === "";
+  } catch {
+    return false;
+  }
+}
+
+function isValidListenHost(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed || /[\u0000-\u0020/?#@]/.test(trimmed)) {
+    return false;
+  }
+  const bracketless = trimmed.startsWith("[") && trimmed.endsWith("]") ? trimmed.slice(1, -1) : trimmed;
+  if (isIP(bracketless) !== 0) {
+    return true;
+  }
+  return isValidHostPattern(trimmed);
+}
+
 function trimOptional(value: string | undefined): string | undefined {
   return value?.trim();
 }
@@ -217,6 +285,49 @@ function isErrorCode(error: unknown, code: string): boolean {
   return Boolean(error && typeof error === "object" && "code" in error && (error as { code?: unknown }).code === code);
 }
 
+function isAllowedSystemAlias(path: string): boolean {
+  return process.platform === "darwin" && (path === "/var" || path === "/tmp" || path === "/etc");
+}
+
+function assertNoSymlinkComponents(path: string): void {
+  const absolute = resolve(path);
+  const parsed = parse(absolute);
+  let current = parsed.root;
+  const parts = absolute.slice(parsed.root.length).split(sep).filter(Boolean);
+  for (const part of parts) {
+    current = join(current, part);
+    try {
+      const info = lstatSync(current);
+      if (info.isSymbolicLink() && !isAllowedSystemAlias(current)) {
+        throw new AppError("CONFIG_INSECURE", "Configuration paths must not contain symbolic links.");
+      }
+    } catch (error) {
+      if (isErrorCode(error, "ENOENT")) {
+        return;
+      }
+      throw error;
+    }
+  }
+}
+
+function readBoundedConfigText(descriptor: number): string {
+  // Read at most one byte beyond the configured limit. This keeps a file that
+  // grows after fstat from turning the size check into an unbounded allocation.
+  const buffer = Buffer.allocUnsafe(MAX_CONFIG_FILE_BYTES + 1);
+  let offset = 0;
+  while (offset < buffer.byteLength) {
+    const bytesRead = readSync(descriptor, buffer, offset, buffer.byteLength - offset, offset);
+    if (bytesRead === 0) {
+      break;
+    }
+    offset += bytesRead;
+  }
+  if (offset > MAX_CONFIG_FILE_BYTES) {
+    throw new AppError("CONFIG_INVALID", `Configuration files must be ${MAX_CONFIG_FILE_BYTES} bytes or smaller.`);
+  }
+  return buffer.subarray(0, offset).toString("utf8");
+}
+
 interface ReadConfigOptions {
   allowMissing?: boolean;
   allowUnknownRootKeys?: boolean;
@@ -225,6 +336,10 @@ interface ReadConfigOptions {
 function readConfigFile(configPath: string, options: ReadConfigOptions = {}): RawConfig {
   let descriptor: number | undefined;
   try {
+    // Inspect parent components as well as the final file. O_NOFOLLOW only
+    // protects the final component; a user-controlled symlinked directory
+    // would otherwise redirect a trusted config path outside the profile.
+    assertNoSymlinkComponents(configPath);
     // Open and inspect the same descriptor that is subsequently read.  On
     // platforms that expose O_NOFOLLOW this prevents a symlink swap between
     // an lstat and the read.  The lstat fallback is retained for platforms
@@ -258,7 +373,7 @@ function readConfigFile(configPath: string, options: ReadConfigOptions = {}): Ra
     if (stats.size > MAX_CONFIG_FILE_BYTES) {
       throw new AppError("CONFIG_INVALID", `Configuration files must be ${MAX_CONFIG_FILE_BYTES} bytes or smaller.`);
     }
-    const parsed = JSON.parse(readFileSync(descriptor, "utf8")) as unknown;
+    const parsed = JSON.parse(readBoundedConfigText(descriptor)) as unknown;
     // The wizard intentionally preserves unrelated root sections so it can
     // coexist with harness settings. Explicit --config files remain strict;
     // the auto-discovered wizard file only consumes SmoothOperator's known
@@ -298,8 +413,8 @@ function validateConfig(config: ServerConfig): ServerConfig {
   if (!config.http.path.startsWith("/") || /[\u0000-\u0020?#]/.test(config.http.path) || config.http.path.includes("//")) {
     throw new AppError("CONFIG_INVALID", "HTTP path must be a single absolute path without whitespace, query, or fragment components.");
   }
-  if (!config.http.host.trim()) {
-    throw new AppError("CONFIG_INVALID", "HTTP host must not be empty.");
+  if (!isValidListenHost(config.http.host)) {
+    throw new AppError("CONFIG_INVALID", "HTTP host must be a hostname or IP address without a port, path, or credentials.");
   }
   if (config.http.token !== undefined && !/^[\x21-\x7e]+$/.test(config.http.token)) {
     throw new AppError("CONFIG_INVALID", "HTTP tokens must contain printable ASCII characters only.");
@@ -381,7 +496,7 @@ export function loadServerConfig(args: string[] = [], environment: NodeJS.Proces
   const defaultBrowserDataDir = join(dataDir, "browser");
   const configuredRoots = parseList(environment.SMOOTH_OPERATOR_ALLOWED_FILE_ROOTS, nestedSecurity.allowedFileRoots ?? []);
   // Default to private data directory; explicit allowlist required for other roots.
-  const allowedFileRoots = (configuredRoots.length > 0 ? configuredRoots : [join(dataDir, "files"), join(dataDir, "downloads")]).map((path) => expandPath(path, homeDirectory));
+  const allowedFileRoots = canonicalizeAllowedFileRoots((configuredRoots.length > 0 ? configuredRoots : [join(dataDir, "files"), join(dataDir, "downloads")]).map((path) => expandPath(path, homeDirectory)));
 
   const config: ServerConfig = {
     transport: (argValue("--transport") ?? environment.SMOOTH_OPERATOR_TRANSPORT ?? fileConfig.transport ?? "stdio") as Transport,
@@ -391,8 +506,8 @@ export function loadServerConfig(args: string[] = [], environment: NodeJS.Proces
       path: (environment.SMOOTH_OPERATOR_HTTP_PATH ?? nestedHttp.path ?? "/mcp").trim(),
       token: environment.SMOOTH_OPERATOR_HTTP_TOKEN ?? nestedHttp.token,
       allowRemote: parseBoolean(environment.SMOOTH_OPERATOR_ALLOW_REMOTE_HTTP, nestedHttp.allowRemote ?? false),
-      allowedHosts: parseList(environment.SMOOTH_OPERATOR_ALLOWED_HOSTS, nestedHttp.allowedHosts ?? ["localhost", "127.0.0.1", "[::1]"]),
-      allowedOrigins: parseList(environment.SMOOTH_OPERATOR_ALLOWED_ORIGINS, nestedHttp.allowedOrigins ?? ["localhost", "127.0.0.1", "[::1]"]),
+      allowedHosts: normalizeHostList(parseList(environment.SMOOTH_OPERATOR_ALLOWED_HOSTS, nestedHttp.allowedHosts ?? ["localhost", "127.0.0.1", "[::1]"])),
+      allowedOrigins: normalizeHostList(parseList(environment.SMOOTH_OPERATOR_ALLOWED_ORIGINS, nestedHttp.allowedOrigins ?? ["localhost", "127.0.0.1", "[::1]"])),
       maxBodyBytes: parseInteger(environment.SMOOTH_OPERATOR_HTTP_MAX_BODY_BYTES, nestedHttp.maxBodyBytes ?? 2_000_000),
     },
     browser: {
@@ -414,8 +529,8 @@ export function loadServerConfig(args: string[] = [], environment: NodeJS.Proces
       maxHtmlChars: parseInteger(environment.SMOOTH_OPERATOR_MAX_HTML_CHARS, nestedBrowser.maxHtmlChars ?? 200_000),
     },
     security: {
-      allowedDomains: parseList(environment.SMOOTH_OPERATOR_ALLOWED_DOMAINS, nestedSecurity.allowedDomains ?? []),
-      blockedDomains: parseList(environment.SMOOTH_OPERATOR_BLOCKED_DOMAINS, nestedSecurity.blockedDomains ?? []),
+      allowedDomains: normalizeDomainList(parseList(environment.SMOOTH_OPERATOR_ALLOWED_DOMAINS, nestedSecurity.allowedDomains ?? [])),
+      blockedDomains: normalizeDomainList(parseList(environment.SMOOTH_OPERATOR_BLOCKED_DOMAINS, nestedSecurity.blockedDomains ?? [])),
       allowedFileRoots,
       allowPrivateNetwork: parseBoolean(environment.SMOOTH_OPERATOR_ALLOW_PRIVATE_NETWORK, nestedSecurity.allowPrivateNetwork ?? false),
       allowEval: parseBoolean(environment.SMOOTH_OPERATOR_ALLOW_EVAL, nestedSecurity.allowEval ?? false),

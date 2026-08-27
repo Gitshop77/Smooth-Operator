@@ -226,7 +226,7 @@ async function installJsonConfig(target: ConfigTarget, plannedPath: string, opti
   let reviewedBytes: Buffer | undefined;
   let reviewedHandle: FileHandle | undefined;
   try {
-    const reviewed = await readConfigFile(path);
+    const reviewed = await readSecureConfigFile(path);
     if (reviewed) {
       reviewedBytes = reviewed.bytes;
       reviewedHandle = reviewed.handle;
@@ -276,11 +276,15 @@ async function installJsonConfig(target: ConfigTarget, plannedPath: string, opti
   }
 
   await reviewedHandle?.close().catch(() => undefined);
-  const backupPath = existed ? await createUniqueBackup(path, reviewedBytes) : undefined;
+  const serializedConfig = `${JSON.stringify(merged.config, null, 2)}\n`;
+  if (Buffer.byteLength(serializedConfig, "utf8") > MAX_INSTALL_CONFIG_BYTES) {
+    throw new AppError("INSTALL_CONFIG_FAILED", `The generated configuration must be ${MAX_INSTALL_CONFIG_BYTES} bytes or smaller.`);
+  }
+  const backupPath = existed ? await createConfigBackup(path, reviewedBytes) : undefined;
 
   const tempPath = `${path}.tmp-${process.pid}-${randomUUID()}`;
   try {
-    await writeFile(tempPath, `${JSON.stringify(merged.config, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+    await writeFile(tempPath, serializedConfig, { mode: 0o600, flag: "wx" });
     await chmod(tempPath, 0o600);
     await rejectSymlink(path, "configuration file");
     await rename(tempPath, path);
@@ -291,7 +295,7 @@ async function installJsonConfig(target: ConfigTarget, plannedPath: string, opti
   }
 }
 
-interface ReviewedConfigFile {
+export interface ReviewedConfigFile {
   bytes: Buffer;
   handle: FileHandle;
 }
@@ -301,7 +305,7 @@ interface ReviewedConfigFile {
  * backup. O_NOFOLLOW is available on POSIX; the lstat fallback is retained for
  * Windows and older Node builds where that flag is unavailable.
  */
-async function readConfigFile(path: string): Promise<ReviewedConfigFile | undefined> {
+export async function readSecureConfigFile(path: string): Promise<ReviewedConfigFile | undefined> {
   const noFollow = typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0;
   if (!noFollow) {
     await rejectSymlink(path, "configuration file");
@@ -334,12 +338,28 @@ async function readConfigFile(path: string): Promise<ReviewedConfigFile | undefi
     if (info.size > MAX_INSTALL_CONFIG_BYTES) {
       throw new AppError("INSTALL_CONFIG_FAILED", `The configuration file '${path}' must be ${MAX_INSTALL_CONFIG_BYTES} bytes or smaller.`);
     }
-    const bytes = await handle.readFile();
+    const bytes = await readBoundedFile(handle, MAX_INSTALL_CONFIG_BYTES);
     return { bytes, handle };
   } catch (error) {
     await handle.close().catch(() => undefined);
     throw error;
   }
+}
+
+async function readBoundedFile(handle: FileHandle, maxBytes: number): Promise<Buffer> {
+  const buffer = Buffer.allocUnsafe(maxBytes + 1);
+  let offset = 0;
+  while (offset < buffer.byteLength) {
+    const { bytesRead } = await handle.read(buffer, offset, buffer.byteLength - offset, offset);
+    if (bytesRead === 0) {
+      break;
+    }
+    offset += bytesRead;
+  }
+  if (offset > maxBytes) {
+    throw new AppError("INSTALL_CONFIG_FAILED", `Configuration files must be ${maxBytes} bytes or smaller.`);
+  }
+  return buffer.subarray(0, offset);
 }
 
 function missingFileError(path: string): NodeJS.ErrnoException {
@@ -549,7 +569,8 @@ async function rejectSymlink(path: string, label: string): Promise<void> {
   }
 }
 
-async function createUniqueBackup(path: string, reviewedBytes?: Buffer): Promise<string> {
+/** Create an owner-only, exclusive backup from bytes already reviewed safely. */
+export async function createConfigBackup(path: string, reviewedBytes?: Buffer): Promise<string> {
   if (!reviewedBytes) {
     throw new AppError("INSTALL_BACKUP_FAILED", `Could not review ${path} before creating its backup.`);
   }

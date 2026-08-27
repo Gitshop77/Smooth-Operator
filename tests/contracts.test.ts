@@ -130,6 +130,9 @@ describe("MCP contracts", () => {
     expect(BrowserActionSchema.safeParse({ action: "extract", maxChars: 8_001 }).success).toBe(false);
     expect(ResearchRequestSchema.safeParse({ query: "mcp", maxChars: 4_000 }).success).toBe(true);
     expect(ResearchRequestSchema.safeParse({ query: "mcp", maxChars: 4_001 }).success).toBe(false);
+    expect(ResearchRequestSchema.safeParse({ query: "mcp", maxResults: 10 }).success).toBe(true);
+    expect(ResearchRequestSchema.safeParse({ query: "mcp", maxResults: 11 }).success).toBe(false);
+    expect(ResearchRequestSchema.safeParse({ query: "mcp", maxChars: 499 }).success).toBe(false);
   });
 
   it("rejects ambiguous aliases, unsupported batch fields, and incomplete cookies", () => {

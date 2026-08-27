@@ -1,6 +1,6 @@
 import { access, chmod, mkdtemp, mkdir, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 import { describe, expect, it, vi } from "vitest";
 
@@ -9,8 +9,9 @@ vi.mock("node:dns/promises", () => ({ lookup: dnsLookup }));
 
 import { loadServerConfig } from "@/server/config";
 import { AppError } from "@/server/errors";
-import { SecurityPolicy } from "@/server/policy";
+import { describeAllowedFileRoots, SecurityPolicy } from "@/server/policy";
 import { ServerRuntime } from "@/server/runtime";
+import { redactSecretPlaceholders, wrapUntrustedText } from "@/server/security";
 
 import { testConfig } from "./helpers";
 
@@ -54,7 +55,7 @@ describe("configuration", () => {
     expect(config.browser.viewport).toEqual({ width: 1_280, height: 720 });
   });
 
-  it("expands tilde paths against the supplied home directory", () => {
+  it("expands and canonicalizes tilde paths against the supplied home directory", async () => {
     const config = loadTestConfig([], {
       SMOOTH_OPERATOR_DATA_DIR: "~/smooth-data",
       SMOOTH_OPERATOR_BROWSER_USER_DATA_DIR: "~/browser-profile",
@@ -62,7 +63,38 @@ describe("configuration", () => {
     });
     expect(config.dataDir).toBe(join(TEST_HOME, "smooth-data"));
     expect(config.browser.userDataDir).toBe(join(TEST_HOME, "browser-profile"));
-    expect(config.security.allowedFileRoots).toEqual([join(TEST_HOME, "files")]);
+    const canonicalHome = join(await realpath(dirname(TEST_HOME)), basename(TEST_HOME));
+    expect(config.security.allowedFileRoots).toEqual([join(canonicalHome, "files")]);
+  });
+
+  it("normalizes host and domain allowlists and rejects ambiguous host values", () => {
+    const config = loadTestConfig([], {
+      SMOOTH_OPERATOR_ALLOWED_HOSTS: "LOCALHOST, [::1]",
+      SMOOTH_OPERATOR_ALLOWED_ORIGINS: "LOCALHOST",
+      SMOOTH_OPERATOR_ALLOWED_DOMAINS: "*.BÜCHER.example",
+    });
+    expect(config.http.allowedHosts).toEqual(["localhost", "[::1]"]);
+    expect(config.http.allowedOrigins).toEqual(["localhost"]);
+    expect(config.security.allowedDomains).toEqual(["*.xn--bcher-kva.example"]);
+    expect(() => loadTestConfig([], { SMOOTH_OPERATOR_ALLOWED_HOSTS: "localhost:3344" })).toThrowError(/Configuration failed validation/);
+    expect(() => loadTestConfig([], { SMOOTH_OPERATOR_ALLOWED_ORIGINS: "https://localhost" })).toThrowError(/Configuration failed validation/);
+  });
+
+  it("rejects a filesystem root as a configured file root", () => {
+    expect(() => loadTestConfig([], { SMOOTH_OPERATOR_ALLOWED_FILE_ROOTS: "/" })).toThrowError(/filesystem roots/);
+  });
+
+  it("does not read an explicit JSON config through a symlinked directory", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "smooth-operator-config-link-"));
+    const realDirectory = join(directory, "real");
+    const linkedDirectory = join(directory, "linked");
+    try {
+      await mkdir(realDirectory);
+      await symlink(realDirectory, linkedDirectory);
+      await expect(() => loadServerConfig(["--config", join(linkedDirectory, "config.json")], {})).toThrowError(/symbolic links/);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it("uses managed, headed browser control by default while respecting explicit settings", () => {
@@ -267,6 +299,14 @@ describe("configuration", () => {
 });
 
 describe("security policy", () => {
+  it("redacts URL credentials and secret placeholders from untrusted text", () => {
+    const value = "https://alice:super-secret@example.test/%TOKEN%";
+    expect(redactSecretPlaceholders(value)).toBe("https://[REDACTED]@example.test/[SECRET_PLACEHOLDER]");
+    const wrapped = wrapUntrustedText("page", value);
+    expect(wrapped).not.toContain("super-secret");
+    expect(wrapped).not.toContain("%TOKEN%");
+  });
+
   it("blocks credentials, private hosts, and disallowed domains", () => {
     const policy = new SecurityPolicy(testConfig({ security: { ...testConfig().security, allowedDomains: ["example.com"] } }));
     expect(() => policy.assertNavigationAllowed("https://user:pass@example.com")).toThrowError(/credentials/);
@@ -409,6 +449,35 @@ describe("security policy", () => {
     const outside = join(dirname(root), "smooth-operator-outside", "file.txt");
     expect(policy.assertFilePath(inside)).toBe(inside);
     expect(() => policy.assertFilePath(outside)).toThrowError(/file roots/);
+  });
+
+  it("reports canonical allowed roots without exposing a rejected candidate", async () => {
+    const root = await mkdtemp(join(tmpdir(), "smooth-operator-file-root-details-"));
+    const canonicalRoot = await realpath(root);
+    const rejected = join(root, "..", "smooth-operator-file-root-details-outside", "secret.txt");
+    try {
+      const base = testConfig();
+      const policy = new SecurityPolicy(testConfig({
+        security: { ...base.security, allowedFileRoots: [root] },
+      }));
+      expect(policy.getAllowedFileRoots()).toEqual([{ id: "root-1", path: canonicalRoot }]);
+      expect(describeAllowedFileRoots([root])).toEqual([{ id: "root-1", path: canonicalRoot }]);
+      let error: AppError | undefined;
+      try {
+        policy.assertFilePath(rejected);
+      } catch (caught) {
+        error = caught as AppError;
+      }
+      expect(error).toBeInstanceOf(AppError);
+      expect(error?.details).toMatchObject({
+        reason: "outside_allowed_root",
+        allowedRoots: [{ id: "root-1", path: canonicalRoot }],
+      });
+      expect(error?.message).not.toContain(rejected);
+      expect(JSON.stringify(error)).not.toContain(rejected);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it("accepts canonical paths for a symlinked root without allowing symlink escapes", async () => {
