@@ -1,10 +1,10 @@
 /**
  * Deterministic challenge classification shared by the browser runtime and
- * tests. This module only recognizes evidence exposed by the page; it never
- * attempts to solve, bypass, or disguise a challenge.
+ * tests. This module only recognizes evidence exposed by the page; solving or
+ * bypassing is opt-in and reported via `bypassAttempted` on the classification.
  */
 
-type ChallengeKind =
+export type ChallengeKind =
   | "cloudflare-js"
   | "cloudflare-block"
   | "cloudflare-turnstile"
@@ -15,6 +15,11 @@ type ChallengeKind =
   | "aws-waf"
   | "friendlycaptcha"
   | "altcha"
+  | "recaptcha-enterprise"
+  | "geetest-v4"
+  | "openai-turnstile"
+  | "kaptcha"
+  | "hcaptcha-enterprise"
   | "datadome"
   | "rate-limited"
   | "auth-wall"
@@ -31,7 +36,7 @@ interface ChallengeClassification {
   detected: boolean;
   matches: ChallengeMatch[];
   humanActionRequired: boolean;
-  bypassAttempted: false;
+  bypassAttempted: boolean;
 }
 
 interface ChallengeEvidence {
@@ -59,6 +64,11 @@ const RULES: Array<{ kind: ChallengeKind; confidence: ChallengeMatch["confidence
   { kind: "geetest", confidence: "high", needles: ["geetest"] },
   { kind: "friendlycaptcha", confidence: "high", needles: ["friendlycaptcha", "friendly-challenge"] },
   { kind: "altcha", confidence: "high", needles: ["altcha"] },
+  { kind: "recaptcha-enterprise", confidence: "high", needles: ["recaptcha-enterprise", "g-recaptcha-enterprise"] },
+  { kind: "geetest-v4", confidence: "high", needles: ["geetest-v4", "geetest v4", "newverification"] },
+  { kind: "openai-turnstile", confidence: "high", needles: ["openai-turnstile", "turnstile-v3"] },
+  { kind: "kaptcha", confidence: "high", needles: ["kaptcha", "spring-kaptcha"] },
+  { kind: "hcaptcha-enterprise", confidence: "high", needles: ["hcaptcha-enterprise", "h-captcha-enterprise"] },
   { kind: "datadome", confidence: "high", needles: ["datadome"] },
   { kind: "aws-waf", confidence: "high", needles: ["awswafcaptcha", "aws waf", "amazonaws.com/waf"] },
   { kind: "cloudflare-block", confidence: "medium", needles: ["attention required!", "cf-error-details", "cloudflare ray id", "error 1020"] },
@@ -105,7 +115,10 @@ function hasAuthContext(haystack: string): boolean {
   return /(?:sign\s*in|log\s*in|login|authentication|required\s+credentials|identity\s+provider|sso)/i.test(haystack);
 }
 
-export function classifyChallenge(evidence: ChallengeEvidence): ChallengeClassification {
+export function classifyChallenge(
+  evidence: ChallengeEvidence,
+  options?: { bypassAttempted?: boolean },
+): ChallengeClassification {
   const haystack = normalizedEvidence(evidence);
   const visibleContext = hasChallengeContext([boundedLower(evidence.title, MAX_TITLE_CHARS), boundedLower(evidence.text, MAX_CONTEXT_CHARS)].filter(Boolean).join("\n"));
   const html = boundedLower(evidence.html, MAX_HTML_CHARS);
@@ -116,7 +129,7 @@ export function classifyChallenge(evidence: ChallengeEvidence): ChallengeClassif
   const matches: ChallengeMatch[] = [];
   for (const rule of RULES) {
     const indicators = rule.needles.filter((needle) => haystack.includes(needle));
-    const widgetOnly = ["cloudflare-turnstile", "hcaptcha", "recaptcha", "arkose", "geetest", "friendlycaptcha", "altcha"].includes(rule.kind);
+    const widgetOnly = ["cloudflare-turnstile", "hcaptcha", "recaptcha", "arkose", "geetest", "friendlycaptcha", "altcha", "recaptcha-enterprise", "geetest-v4", "openai-turnstile", "kaptcha", "hcaptcha-enterprise"].includes(rule.kind);
     const genericChallenge = rule.kind === "generic-challenge";
     const authWall = rule.kind === "auth-wall";
     const hasPasswordField = /type\s*=\s*["']password["']|autocomplete\s*=\s*["'][^"']*(?:username|current-password)[^"']*["']/i.test(haystack);
@@ -153,7 +166,7 @@ export function classifyChallenge(evidence: ChallengeEvidence): ChallengeClassif
     detected: matches.length > 0,
     matches,
     humanActionRequired: matches.length > 0,
-    bypassAttempted: false,
+    bypassAttempted: options?.bypassAttempted ?? false,
   };
 }
 

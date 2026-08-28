@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { classifyChallenge } from "@/server/browser/challenges";
+import { classifyChallenge, type ChallengeKind } from "@/server/browser/challenges";
 
 describe("challenge classification", () => {
   it("returns structured human-action evidence for common challenges", () => {
@@ -80,5 +80,67 @@ describe("challenge classification", () => {
       frameSources: Array.from({ length: 500 }, () => "x".repeat(4_000)),
     });
     expect(result.matches.map((match) => match.kind)).toContain("cloudflare-turnstile");
+  });
+});
+
+describe("classifyChallenge bypassAttempted option", () => {
+  it("defaults bypassAttempted to false when no options are passed", () => {
+    const result = classifyChallenge({ title: "Verification", text: "Please verify you are human to continue." });
+    expect(result.bypassAttempted).toBe(false);
+  });
+
+  it("returns bypassAttempted true when requested via options", () => {
+    const result = classifyChallenge(
+      { title: "Verification", text: "Please verify you are human to continue." },
+      { bypassAttempted: true },
+    );
+    expect(result.bypassAttempted).toBe(true);
+  });
+
+  it("keeps detection evidence intact while reporting bypassAttempted", () => {
+    const result = classifyChallenge(
+      { title: "Just a moment...", html: '<div class="cf-turnstile"></div>', visibleMarkers: ["DIV cf-turnstile"] },
+      { bypassAttempted: true },
+    );
+    expect(result.detected).toBe(true);
+    expect(result.humanActionRequired).toBe(true);
+    expect(result.bypassAttempted).toBe(true);
+  });
+});
+
+describe("extended RULES: new challenge kinds", () => {
+  const newKinds: Array<{ kind: ChallengeKind; marker: string }> = [
+    { kind: "recaptcha-enterprise", marker: "div recaptcha-enterprise" },
+    { kind: "geetest-v4", marker: "div geetest-v4" },
+    { kind: "openai-turnstile", marker: "div openai-turnstile" },
+    { kind: "kaptcha", marker: "div kaptcha" },
+    { kind: "hcaptcha-enterprise", marker: "div hcaptcha-enterprise" },
+  ];
+
+  it.each(newKinds)("detects $kind via its specific visible marker", ({ kind, marker }) => {
+    const result = classifyChallenge({ visibleMarkers: [marker] });
+    expect(result.detected).toBe(true);
+    expect(result.matches.map((match) => match.kind)).toContain(kind);
+  });
+
+  it("ignores widget-only markers that live only in raw html", () => {
+    // Widget corroboration requires visible evidence (title/text/visibleMarkers),
+    // so a bare html attribute must not be treated as an active challenge.
+    expect(classifyChallenge({ html: '<div class="hcaptcha-enterprise">' }).status).toBe("absent");
+  });
+
+  it("does not match new kinds on unrelated evidence", () => {
+    const unrelated = [
+      { title: "Contact us", text: "Fill out the form below to get in touch.", html: '<input type="text" name="name">' },
+      { status: 429 },
+      { status: 503, text: "Too many requests; please slow down." },
+      { title: "CAPTCHA integration", text: "This article explains how reCAPTCHA works in a form." },
+    ];
+    for (const evidence of unrelated) {
+      const result = classifyChallenge(evidence);
+      for (const { kind } of newKinds) {
+        expect(result.matches.map((match) => match.kind)).not.toContain(kind);
+      }
+    }
   });
 });
