@@ -22,10 +22,12 @@ import { BrowserActionPlanSchema, isDestructiveBatchAction, type BrowserAction }
 import { Logger, redactValue } from "../logger";
 import { SecurityPolicy } from "../policy";
 import { redactSecretPlaceholders, wrapUntrustedText } from "../security";
-import { classifyChallenge } from "./challenges";
+import { humanMouseMove, humanType } from "./behavior";
+import { classifyChallenge, type ChallengeKind } from "./challenges";
 import { nativeBrowserLaunchArgs } from "./compatibility";
 import { chromeExecutableSearchPaths, findChromeExecutable } from "./discovery";
 import { buildFingerprintProfile } from "./fingerprints";
+import { buildSolver, type SolveRequest, type SolveResult } from "./solver";
 import { buildStealthInitScript } from "./stealth";
 import { globMatches, sanitizeUrl as safeUrl } from "./utils";
 
@@ -342,6 +344,13 @@ const DOM_MUTATING_ACTIONS = new Set<BrowserAction["action"]>([
 const PARALLEL_READ_ACTIONS = new Set<BrowserAction["action"]>([
   "wait", "wait_for_element", "wait_for_text", "wait_for_url", "wait_for_network_idle",
   "get_network_log", "get_console_log", "extract", "get_html", "dropdown_options", "page_next", "search_page", "find_elements", "list_frames", "accessibility_snapshot", "get_computed_style", "get_page_info", "get_cookies", "get_storage", "list_downloads",
+]);
+
+// Kinds that carry a human-like score (reCAPTCHA v3, non-interactive Turnstile).
+// Mirrors solver.ts's SCORE_CAPABLE_KINDS, which is not exported; kept local so
+// the solver layer stays untouched while the request is scored correctly.
+const SCORE_CAPABLE_KINDS: ReadonlySet<ChallengeKind> = new Set<ChallengeKind>([
+  "recaptcha", "recaptcha-enterprise", "cloudflare-turnstile", "openai-turnstile",
 ]);
 
 export class BrowserService {
@@ -2713,6 +2722,8 @@ export class BrowserService {
         return this.detectChallenge(state, signal);
       case "wait_for_human":
         return this.waitForHuman(state, action.timeoutMs ?? 120_000, action.pollMs ?? 1_000, signal);
+      case "solve_challenge":
+        return this.solveChallenge(state, action, signal);
       case "get_cookies": {
         const cookies = await page.cookies();
         return cookies.slice(0, 200).map((cookie) => ({
@@ -4899,6 +4910,19 @@ export class BrowserService {
     });
   }
 
+  private async humanMoveToCenter(state: PageState, centerX: number, centerY: number, signal?: AbortSignal): Promise<void> {
+    if (!this.stealthSettings().behaviorEnabled) return;
+    if (!Number.isFinite(centerX) || !Number.isFinite(centerY)) return;
+    throwIfAborted(signal);
+    try {
+      // A failed pre-move is not a click failure — a failed hover must not
+      // fail the click itself, so keep it defensive and swallowed.
+      await humanMouseMove(state.page, 0, 0, centerX, centerY, 300);
+    } catch {
+      // Ignore: fall through to the normal click primitive.
+    }
+  }
+
   private async clickTarget(state: PageState, target: string, button: "left" | "middle" | "right", clickCount: number, signal?: AbortSignal, frame: Frame = state.page.mainFrame(), pointerType: "mouse" | "touch" = "mouse"): Promise<ClickMonitorResult> {
     let selector: string | undefined;
     let clickDescriptor: (ClickDescriptor & { href?: string; rect: { x: number; y: number; width: number; height: number } }) | undefined;
@@ -4930,6 +4954,7 @@ export class BrowserService {
       if (clickDescriptor.href) {
         await this.assertNavigationUrl(frame.url() || state.page.url(), clickDescriptor.href);
       }
+      await this.humanMoveToCenter(state, clickDescriptor.rect.x + clickDescriptor.rect.width / 2, clickDescriptor.rect.y + clickDescriptor.rect.height / 2, signal);
       return this.clickElement(state, frame, selector, button, clickCount, signal, Boolean(clickDescriptor.href), /^e\d+$/.test(ref) ? normalizedTarget : undefined, pointerType);
     }
     if (button !== "left") {
@@ -5065,6 +5090,11 @@ export class BrowserService {
       if (targetDescriptor.href) {
         await this.assertNavigationUrl(frame.url() || state.page.url(), targetDescriptor.href);
       }
+      const clickCenter = await clickable.evaluate((element) => {
+        const rect = (element as HTMLElement).getBoundingClientRect();
+        return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+      }).catch(() => undefined);
+      await this.humanMoveToCenter(state, clickCenter?.x ?? Number.NaN, clickCenter?.y ?? Number.NaN, signal);
       const monitor = await this.runClickAndMonitor(state.page, async () => {
         if (pointerType === "touch") {
           if (frame !== state.page.mainFrame()) {
@@ -5474,7 +5504,11 @@ export class BrowserService {
       }
       if (!nativeControlValueSet) {
         throwIfAborted(signal);
-        await state.page.keyboard.type(text);
+        if (this.stealthSettings().behaviorEnabled) {
+          await humanType(state.page, text);
+        } else {
+          await state.page.keyboard.type(text);
+        }
       }
       throwIfAborted(signal);
       if (!verify) {
@@ -5951,6 +5985,107 @@ export class BrowserService {
       await wait(Math.min(boundedPollMs, remaining), signal);
     }
     return { status: "timed_out", resolution: "timeout", pageId: state.id, waitedMs: Math.max(0, Date.now() - startedAt), initial, final: last };
+  }
+
+  /**
+   * Opt-in CAPTCHA solver hook. Runs the configured solver when a challenge is
+   * present and supported, injects the returned token, re-fires the callback,
+   * and re-detects. `bypassAttempted` is `true` only when a solver actually
+   * ran (plan §6.5); `detectChallenge` stays a pure detector.
+   */
+  private async solveChallenge(state: PageState, action: BrowserAction, signal?: AbortSignal): Promise<unknown> {
+    throwIfAborted(signal);
+    // No provider/API key → graceful human-in-the-loop fallback (no solver ran).
+    const solver = buildSolver(this.config, this.logger);
+    if (!solver) {
+      const detection = await this.detectChallenge(state, signal);
+      return { solved: false, resolution: "no_solver_configured", bypassAttempted: false, pageId: state.id, classification: detection };
+    }
+    // Detect the current challenge before attempting anything.
+    const detection = await this.detectChallenge(state, signal);
+    if (!isChallengePresent(detection)) {
+      return { solved: false, resolution: "no_challenge", bypassAttempted: false, pageId: state.id, classification: detection };
+    }
+    const kind = challengeKindFrom(detection);
+    if (!kind) {
+      return { solved: false, resolution: "challenge_kind_unknown", bypassAttempted: false, pageId: state.id, classification: detection };
+    }
+    if (!solver.supports(kind, SCORE_CAPABLE_KINDS.has(kind))) {
+      return { solved: false, resolution: "solver_unsupported", bypassAttempted: false, pageId: state.id, provider: solver.name, kind, classification: detection };
+    }
+    const sitekey = await this.extractSiteKey(state, detection, signal);
+    const req: SolveRequest = {
+      sitekey,
+      pageurl: state.page.url(),
+      kind,
+      scoreBased: SCORE_CAPABLE_KINDS.has(kind),
+      proxyUrl: this.config.captchaSolver?.proxyUrl,
+    };
+    let result: SolveResult;
+    try {
+      result = await solver.solve(req, signal ?? new AbortController().signal);
+    } catch (error) {
+      // The solver WAS attempted → honest reporting even on failure.
+      return { solved: false, resolution: "solver_failed", bypassAttempted: true, pageId: state.id, provider: solver.name, kind, error: describeSolverError(error), classification: detection };
+    }
+    try {
+      await this.injectSolverToken(state, result, signal);
+    } catch (error) {
+      return { solved: false, resolution: "injection_failed", bypassAttempted: true, pageId: state.id, provider: solver.name, kind, error: describeSolverError(error), classification: detection };
+    }
+    // Refresh refs, then re-detect with a fresh probe to confirm the outcome.
+    this.assertSnapshotForAction(state, action);
+    throwIfAborted(signal);
+    const finalDetection = await this.detectChallenge(state, signal);
+    const cleared = isChallengeAbsent(finalDetection);
+    return {
+      solved: cleared,
+      resolution: cleared ? "challenge_cleared" : "challenge_persisted",
+      bypassAttempted: true,
+      pageId: state.id,
+      provider: solver.name,
+      kind,
+      classification: finalDetection,
+    };
+  }
+
+  /** Probe the first `data-sitekey` in a bounded way for the solve request. */
+  private async extractSiteKey(state: PageState, detection: unknown, signal?: AbortSignal): Promise<string | undefined> {
+    const inline = extractSiteKeyFromMarkup(detection);
+    if (inline) return inline;
+    try {
+      return await awaitWithAbort(state.page.evaluate(() => {
+        const element = document.querySelector("[data-sitekey]") as HTMLElement | null;
+        return element ? (element.getAttribute("data-sitekey") ?? "").slice(0, 1_000) : "";
+      }), signal);
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Best-effort token injection + callback re-fire; never throws out of evaluate. */
+  private async injectSolverToken(state: PageState, result: SolveResult, signal?: AbortSignal): Promise<void> {
+    throwIfAborted(signal);
+    await awaitWithAbort(state.page.evaluate((payload: { token: string; field: string; reFireEvent?: string }) => {
+      let injected = false;
+      try {
+        const widget = document.querySelector("[data-sitekey]") as unknown as Record<string, unknown> | null;
+        if (widget) {
+          widget[payload.field] = payload.token;
+          injected = true;
+        }
+        const win = window as unknown as Record<string, unknown>;
+        if (!injected && !(payload.field in win)) {
+          win[payload.field] = payload.token;
+        }
+        if (typeof payload.reFireEvent === "string" && typeof win[payload.reFireEvent] === "function") {
+          (win[payload.reFireEvent] as () => unknown)();
+        }
+      } catch {
+        // Injection is best-effort; a hostile page must never throw out of evaluate.
+      }
+      return injected;
+    }, { token: result.token, field: result.fieldSelector, reFireEvent: result.reFireEvent }), signal);
   }
 
   private async listDownloads(signal?: AbortSignal): Promise<unknown> {
@@ -6798,8 +6933,48 @@ function isChallengeAbsent(value: unknown): boolean {
   return Boolean(value && typeof value === "object" && "status" in value && (value as { status?: unknown }).status === "absent");
 }
 
+function isChallengePresent(value: unknown): boolean {
+  return Boolean(value && typeof value === "object" && "status" in value && (value as { status?: unknown }).status === "present");
+}
+
 function isChallengeUnknown(value: unknown): boolean {
   return Boolean(value && typeof value === "object" && "status" in value && (value as { status?: unknown }).status === "unknown");
+}
+
+function challengeKindFrom(value: unknown): ChallengeKind | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const matches = (value as { matches?: unknown }).matches;
+  if (!Array.isArray(matches) || matches.length === 0) return undefined;
+  const first = matches[0] as { kind?: unknown };
+  return typeof first?.kind === "string" ? (first.kind as ChallengeKind) : undefined;
+}
+
+/**
+ * Scan classification markup (if present) for the first `data-sitekey`. The
+ * detector does not expose markup, so this prefers inline markup when present
+ * and lets the caller fall back to a bounded live-DOM probe when it is not.
+ */
+function extractSiteKeyFromMarkup(value: unknown): string | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const candidate = value as { html?: string; visibleMarkers?: unknown };
+  const haystacks: string[] = [candidate.html].filter((html): html is string => typeof html === "string");
+  if (Array.isArray(candidate.visibleMarkers)) {
+    haystacks.push(...candidate.visibleMarkers.filter((marker): marker is string => typeof marker === "string"));
+  }
+  for (const haystack of haystacks) {
+    if (typeof haystack !== "string") continue;
+    const match = /data-sitekey\s*=\s*["']([^"']{1,1000})["']/i.exec(haystack);
+    if (match) return match[1].slice(0, 1_000);
+  }
+  return undefined;
+}
+
+function describeSolverError(error: unknown): string {
+  const appError = asAppError(error);
+  if (appError) {
+    return `${appError.code}: ${appError.message.slice(0, 500)}`;
+  }
+  return String(error ?? "").slice(0, 500);
 }
 
 function isChallengeBlockedAction(action: BrowserAction["action"]): boolean {
