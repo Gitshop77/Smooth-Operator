@@ -531,8 +531,8 @@ class TwoCaptchaProvider extends HttpPollingProvider {
     return { type: "not-ready" };
   }
 
-  protected fieldSelector(): string {
-    return fieldSelectorForKind("recaptcha");
+  protected fieldSelector(kind: ChallengeKind): string {
+    return fieldSelectorForKind(kind);
   }
 }
 

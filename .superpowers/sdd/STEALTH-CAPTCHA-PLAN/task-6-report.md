@@ -133,6 +133,60 @@ Score-capable kinds = recaptcha / recaptcha-enterprise / turnstile variants.
   receiver, so polling continues regardless. The `callback` constructor param is
   threaded through but inert in practice. Not wired from config (the
   `captchaSolver` schema has no callback field), so it is dormant by default.
+- **Fix (review finding): 2Captcha `fieldSelector` ignored the challenge kind.**
+  `TwoCaptchaProvider.fieldSelector()` previously hardcoded
+  `fieldSelectorForKind("recaptcha")`, so for every non-recaptcha kind 2Captcha
+  actually solves (hcaptcha, hcaptcha-enterprise, cloudflare-turnstile,
+  openai-turnstile, arkose — all present in its `kinds` set) the returned
+  `fieldSelector`/`reFireEvent` were wrong (always `gRecaptchaResponse`). The
+  base class already calls `this.fieldSelector(req.kind)` and the abstract
+  signature is `fieldSelector(kind: ChallengeKind)`, so the fix simply threads
+  the kind through:
+  ```ts
+  protected fieldSelector(kind: ChallengeKind): string {
+    return fieldSelectorForKind(kind);
+  }
+  ```
+  No other changes; `ChallengeKind` was already imported. CapSolver and
+  AntiCaptcha already returned `fieldSelectorForKind(kind)` and were correct.
+
+## Fix tests
+Added an `it.each` covering test under the existing `2captcha solve lifecycle`
+block that solves on 5 non-recaptcha kinds and asserts the per-kind token field
+(and `reFireEvent`), closing the coverage gap the reviewer flagged:
+- `hcaptcha` → `hCaptchaResponse`
+- `hcaptcha-enterprise` → `hCaptchaResponse`
+- `cloudflare-turnstile` → `cfTurnstileResponse`
+- `openai-turnstile` → `cfTurnstileResponse`
+- `arkose` → `fc-token`
+
+Each uses the same `jsonFetchStub` in.php/res.php pattern as the existing
+reCAPTCHA solve test.
+
+## Verification (fix)
+- `npx vitest run tests/solver.test.ts` → **34 passed** (29 + 5 from the new
+  `it.each` cases).
+- `npm run typecheck` (`tsc --noEmit`) → clean.
+- `npm run lint` (`eslint .`) → clean.
+- Full suite `npm test` → **384 passed, 1 failed** (the same pre-existing
+  `contract-snapshot.test.ts` stale-hash failure, unrelated to this change).
+
+## Files changed (fix)
+- `src/server/browser/solver.ts` (+1/-1): 2Captcha `fieldSelector` override now
+  accepts and forwards `kind`.
+- `tests/solver.test.ts` (+21): `it.each` per-kind field coverage for 2Captcha.
+
+## Self-review (fix)
+- Surgical: exactly the finding's required one-line change plus the covering
+  test; no restructuring, no new imports.
+- The base class (`solve`) passes `req.kind` and the abstract contract already
+  required `fieldSelector(kind)`, so threading the kind is type-correct and
+  consistent with CapSolver/AntiCaptcha.
+- Hygiene: no forbidden phrases introduced.
+
+## Concerns
+- None for this change. The remaining full-suite failure is the pre-existing,
+  unrelated `contract-snapshot.test.ts` stale-hash (see top of this report).
 - **Score-based token quality** is inherently limited (per CAPTCHA-RESEARCH-
   REPORT §6): solvers mint valid tokens that may score ~0.1; the site still
   decides allow/block. The module returns the token + field; injection policy

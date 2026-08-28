@@ -187,6 +187,27 @@ describe("2captcha solve lifecycle", () => {
     vi.unstubAllGlobals();
   });
 
+  it.each([
+    { kind: "hcaptcha" as const, field: "hCaptchaResponse" },
+    { kind: "hcaptcha-enterprise" as const, field: "hCaptchaResponse" },
+    { kind: "cloudflare-turnstile" as const, field: "cfTurnstileResponse" },
+    { kind: "openai-turnstile" as const, field: "cfTurnstileResponse" },
+    { kind: "arkose" as const, field: "fc-token" },
+  ])("threads the challenge kind into the token field ($kind)", async ({ kind, field }) => {
+    vi.stubGlobal("fetch", jsonFetchStub([
+      { test: (url) => url.includes("in.php"), body: { status: 1, request: "task_123" } },
+      { test: (url) => url.includes("res.php"), body: { status: 1, request: "00300ABC123DEF456" } },
+    ]));
+    const provider = make2Captcha("secret-key", captchaConfig(), QUIET_LOGGER);
+    const result = await provider.solve(
+      { pageurl: "https://x.test/", sitekey: "6LeAAAA_key", kind, scoreBased: false },
+      new AbortController().signal,
+    );
+    expect(result.fieldSelector).toBe(field);
+    expect(result.reFireEvent).toBe(field);
+    vi.unstubAllGlobals();
+  });
+
   it("reports the refusal reason when the provider rejects the task", async () => {
     vi.stubGlobal("fetch", jsonFetchStub([
       { test: (url) => url.includes("in.php"), body: { status: 0, request: "ERROR_NO_KEY" } },
