@@ -25,6 +25,8 @@ import { redactSecretPlaceholders, wrapUntrustedText } from "../security";
 import { classifyChallenge } from "./challenges";
 import { nativeBrowserLaunchArgs } from "./compatibility";
 import { chromeExecutableSearchPaths, findChromeExecutable } from "./discovery";
+import { buildFingerprintProfile } from "./fingerprints";
+import { buildStealthInitScript } from "./stealth";
 import { globMatches, sanitizeUrl as safeUrl } from "./utils";
 
 interface BrowserTab {
@@ -171,6 +173,7 @@ interface PageState {
   downloadConfigured: boolean;
   downloadConfigurationError?: AppError;
   navigationGuardInstalled: boolean;
+  stealthInjected: boolean;
   networkRequestListener?: (request: HTTPRequest) => void;
   networkResponseListener?: (response: HTTPResponse) => void;
   consoleListener?: (message: ConsoleMessage) => void;
@@ -2957,6 +2960,19 @@ export class BrowserService {
     return browser;
   }
 
+  // The `stealth` config section is OPTIONAL and absent unless the user enables
+  // it, so read it with safe defaults. Mirrors the plan's `config.stealth`
+  // shape but tolerates the absent-by-default case.
+  private stealthSettings(): { enabled: boolean; profile: "balanced" | "max"; gpu: boolean; behaviorEnabled: boolean } {
+    const s = this.config.stealth;
+    return {
+      enabled: s?.enabled ?? false,
+      profile: s?.profile ?? "balanced",
+      gpu: s?.gpu ?? false,
+      behaviorEnabled: s?.behaviorEnabled ?? s?.enabled ?? false,
+    };
+  }
+
   private async connectBrowser(generation: number): Promise<Browser> {
     if (this.connectionSettlementPromise) {
       const settling = this.connectionSettlementPromise;
@@ -2983,10 +2999,10 @@ export class BrowserService {
             throw new AppError("BROWSER_NOT_CONFIGURED", `Managed browser mode could not find Chrome. Checked: ${chromeExecutableSearchPaths().join(", ")}. Install Chrome or set SMOOTH_OPERATOR_BROWSER_EXECUTABLE.`);
           }
           connection = this.launch({
-            headless: this.config.browser.headless,
+            headless: this.stealthSettings().enabled ? true : this.config.browser.headless,
             executablePath,
             userDataDir: this.config.browser.userDataDir,
-            args: nativeBrowserLaunchArgs(),
+            args: nativeBrowserLaunchArgs({ enabled: this.stealthSettings().enabled, gpu: this.stealthSettings().gpu }),
             timeout: this.config.browser.connectTimeoutMs,
             protocolTimeout: this.config.browser.cdpTimeoutMs,
           });
@@ -2997,10 +3013,10 @@ export class BrowserService {
         }
         ownsBrowser = true;
         connection = this.launch({
-          headless: this.config.browser.headless,
+          headless: this.stealthSettings().enabled ? true : this.config.browser.headless,
           executablePath: this.config.browser.executablePath,
           userDataDir: this.config.browser.userDataDir,
-          args: nativeBrowserLaunchArgs(),
+          args: nativeBrowserLaunchArgs({ enabled: this.stealthSettings().enabled, gpu: this.stealthSettings().gpu }),
           timeout: this.config.browser.connectTimeoutMs,
           protocolTimeout: this.config.browser.cdpTimeoutMs,
         });
@@ -3979,6 +3995,22 @@ export class BrowserService {
         throw new AppError("BROWSER_GUARD_FAILED", "The browser navigation policy could not be installed.", { retryable: true, cause: error });
       }
     }
+    // Stealth fingerprint bundle: inject once per page behind a one-shot guard,
+    // mirroring the navigation-guard block above. `evaluateOnNewDocument` runs
+    // in the main world before page scripts, so a single CDP call covers every
+    // document/iframe the page creates. Gated on the opt-in master switch; the
+    // default path performs a single boolean read and no CDP call.
+    const stealth = this.stealthSettings();
+    if (stealth.enabled && !state.stealthInjected) {
+      try {
+        const source = buildStealthInitScript(buildFingerprintProfile({ profile: stealth.profile }), { max: stealth.profile === "max" });
+        await state.page.evaluateOnNewDocument(source);
+        state.stealthInjected = true;
+      } catch (error) {
+        throwIfAborted(signal);
+        throw new AppError("STEALTH_INITIALIZATION_FAILED", "The stealth fingerprint init script could not be injected.", { retryable: true, cause: error });
+      }
+    }
     // Pages that existed before the browser connection was fully wired do not
     // receive a targetcreated callback. Release their initial CDP pause only
     // after page-level request interception is ready, just as for new pages.
@@ -4072,7 +4104,7 @@ export class BrowserService {
       }
       this.ids.delete(page);
     }
-    const state: PageState = { id: randomUUID(), page, lifecycleGeneration: this.lifecycleGeneration, disposed: false, refs: new Map(), domRevision: 0, networkEnabled: false, consoleEnabled: false, network: [], console: [], dialogs: [], listenersInstalled: false, timeoutsConfigured: false, viewportConfigured: false, downloadConfigured: false, navigationGuardInstalled: false, navigationGeneration: 0, policyVerifiedUrls: new Set(), challengeActive: false };
+    const state: PageState = { id: randomUUID(), page, lifecycleGeneration: this.lifecycleGeneration, disposed: false, refs: new Map(), domRevision: 0, networkEnabled: false, consoleEnabled: false, network: [], console: [], dialogs: [], listenersInstalled: false, timeoutsConfigured: false, viewportConfigured: false, downloadConfigured: false, navigationGuardInstalled: false, stealthInjected: false, navigationGeneration: 0, policyVerifiedUrls: new Set(), challengeActive: false };
     this.ids.set(page, state.id);
     this.states.set(state.id, state);
     this.installListeners(state);
