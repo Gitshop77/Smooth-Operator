@@ -215,4 +215,16 @@ describe("MCP contracts", () => {
       expect(result.error.issues.some((issue) => issue.path.includes(0))).toBe(true);
     }
   });
+
+  it("accepts the solve_challenge action and its solver fields", () => {
+    expect(BrowserActionSchema.safeParse({ action: "solve_challenge", pageId: "p1" }).success).toBe(true);
+    expect(BrowserActionSchema.safeParse({ action: "solve_challenge", pageId: "p1", sitekey: "6LeIxAcTAAAAAJcZFOqjeYgM1uz6MPxCoTabzRk1", provider: "capsolver", proxyUrl: "http://localhost:8080" }).success).toBe(true);
+    expect(BrowserActionSchema.safeParse({ action: "solve_challenge", pageId: "p1", provider: "none" }).success).toBe(true);
+    const missingPage = BrowserActionSchema.safeParse({ action: "solve_challenge" });
+    expect(missingPage.success).toBe(false);
+    if (!missingPage.success) {
+      expect(missingPage.error.issues.map((issue) => issue.message)).toContain("solve_challenge requires pageId.");
+    }
+    expect(BrowserActionSchema.safeParse({ action: "solve_challenge", pageId: "p1", proxyUrl: "ftp://example.com" }).success).toBe(false);
+  });
 });

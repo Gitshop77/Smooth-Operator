@@ -113,7 +113,9 @@ describe("native MCP registry", () => {
     const schemaText = [...toolByName.values()].map((tool) => JSON.stringify(tool.inputSchema)).join("\n");
     expect(schemaText).not.toContain('"mode"');
     expect(schemaText).not.toContain('"model"');
-    expect(schemaText).not.toContain('"provider"');
+    // `provider` is now a first-class solve_challenge solver field, so it is no
+    // longer forbidden in the raw schema; the per-request override guard lives
+    // in contracts.test against actions that do not accept it.
     expect(schemaText).not.toContain('"allowed_domains"');
     expect(schemaText).not.toContain('"allowedDomains"');
     expect(schemaText).not.toContain('"use_vision"');
