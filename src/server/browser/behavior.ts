@@ -105,7 +105,8 @@ export async function humanMouseMove(
  * go through `keyboard.type`.
  */
 export async function humanType(page: Page, text: string, options: TypeOptions = {}): Promise<void> {
-  const cfg = { ...DEFAULT_TYPE, ...options };
+  const rng = options?.rng ?? DEFAULT_TYPE.rng;
+  const cfg = { ...DEFAULT_TYPE, ...options, rng };
   const keyboard = page.keyboard;
 
   for (const char of text) {

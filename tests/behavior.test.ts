@@ -145,6 +145,11 @@ describe("humanType", () => {
     expect(elapsed).toBeLessThan(300);
   });
 
+  it("does not throw when rng is explicitly undefined", async () => {
+    const page = { keyboard: fakeKeyboard() } as unknown as Page;
+    await expect(humanType(page, "x", { rng: undefined })).resolves.toBeUndefined();
+  });
+
   it("fires a think pause when thinkPauseChance is certain", async () => {
     const page = { keyboard: fakeKeyboard() } as unknown as Page;
     const start = Date.now();
