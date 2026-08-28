@@ -68,6 +68,26 @@ const RawConfigSchema = z
       .optional(),
     dataDir: ConfigPathSchema.optional(),
     logLevel: z.enum(["debug", "info", "warn", "error"]).optional(),
+    stealth: z
+      .object({
+        enabled: z.boolean().optional(),
+        profile: z.enum(["balanced", "max"]).optional(),
+        gpu: z.boolean().optional(),
+        behaviorEnabled: z.boolean().optional(),
+      })
+      .strict()
+      .optional(),
+    captchaSolver: z
+      .object({
+        provider: z.enum(["none", "capsolver", "2captcha", "anticaptcha"]).optional(),
+        apiKey: z.string().trim().min(1).max(4_096).optional(),
+        url: z.string().trim().min(1).max(4_096).optional(),
+        proxyUrl: z.string().trim().min(1).max(4_096).optional(),
+        timeoutMs: z.number().int().min(1_000).max(600_000).optional(),
+        maxBytes: z.number().int().min(1_024).max(100_000_000).optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 
@@ -108,6 +128,20 @@ export interface ServerConfig {
     allowedFileRoots: string[];
     allowPrivateNetwork: boolean;
     allowEval: boolean;
+  };
+  stealth?: {
+    enabled: boolean;
+    profile: "balanced" | "max";
+    gpu: boolean;
+    behaviorEnabled: boolean;
+  };
+  captchaSolver?: {
+    provider: "none" | "capsolver" | "2captcha" | "anticaptcha";
+    apiKey?: string;
+    url?: string;
+    proxyUrl?: string;
+    timeoutMs: number;
+    maxBytes: number;
   };
   dataDir: string;
   logLevel: LogLevel;
@@ -449,6 +483,20 @@ function validateConfig(config: ServerConfig): ServerConfig {
   }
   validateBrowserEndpoint(config.browser.url, ["http:", "https:"], "Browser DevTools URL");
   validateBrowserEndpoint(config.browser.wsEndpoint, ["ws:", "wss:"], "Browser WebSocket endpoint");
+  if (config.stealth && config.stealth.profile !== "balanced" && config.stealth.profile !== "max") {
+    throw new AppError("CONFIG_INVALID", "Stealth profile must be 'balanced' or 'max'.");
+  }
+  if (config.captchaSolver) {
+    if (config.captchaSolver.provider !== "none" && config.captchaSolver.provider !== "capsolver" && config.captchaSolver.provider !== "2captcha" && config.captchaSolver.provider !== "anticaptcha") {
+      throw new AppError("CONFIG_INVALID", "Captcha solver provider must be one of 'none', 'capsolver', '2captcha', or 'anticaptcha'.");
+    }
+    if (config.captchaSolver.timeoutMs < 1_000 || config.captchaSolver.timeoutMs > 600_000) {
+      throw new AppError("CONFIG_INVALID", "Captcha solver timeout must be between 1000ms and 600000ms.");
+    }
+    if (config.captchaSolver.maxBytes < 1_024 || config.captchaSolver.maxBytes > 100_000_000) {
+      throw new AppError("CONFIG_INVALID", "Captcha solver max bytes must be between 1024 and 100000000.");
+    }
+  }
   return config;
 }
 
@@ -488,6 +536,8 @@ export function loadServerConfig(args: string[] = [], environment: NodeJS.Proces
   const nestedHttp = fileConfig.http ?? {};
   const nestedBrowser = fileConfig.browser ?? {};
   const nestedSecurity = fileConfig.security ?? {};
+  const nestedStealth = fileConfig.stealth ?? {};
+  const nestedCaptchaSolver = fileConfig.captchaSolver ?? {};
   const viewportWidth = parseOptionalInteger(environment.SMOOTH_OPERATOR_BROWSER_VIEWPORT_WIDTH, nestedBrowser.viewport?.width);
   const viewportHeight = parseOptionalInteger(environment.SMOOTH_OPERATOR_BROWSER_VIEWPORT_HEIGHT, nestedBrowser.viewport?.height);
   const viewport = resolveBrowserViewport(viewportWidth, viewportHeight);
@@ -497,6 +547,36 @@ export function loadServerConfig(args: string[] = [], environment: NodeJS.Proces
   const configuredRoots = parseList(environment.SMOOTH_OPERATOR_ALLOWED_FILE_ROOTS, nestedSecurity.allowedFileRoots ?? []);
   // Default to private data directory; explicit allowlist required for other roots.
   const allowedFileRoots = canonicalizeAllowedFileRoots((configuredRoots.length > 0 ? configuredRoots : [join(dataDir, "files"), join(dataDir, "downloads")]).map((path) => expandPath(path, homeDirectory)));
+
+  // Stealth and captcha solver sections are opt-in. They stay absent unless the
+  // user enables them, keeping the default server configuration untouched.
+  const stealthEnabled = parseBoolean(environment.SMOOTH_OPERATOR_STEALTH_ENABLED, false);
+  const stealth: NonNullable<ServerConfig["stealth"]> = {
+    enabled: stealthEnabled,
+    profile: (environment.SMOOTH_OPERATOR_STEALTH_PROFILE ?? nestedStealth.profile ?? "balanced") as "balanced" | "max",
+    gpu: parseBoolean(environment.SMOOTH_OPERATOR_STEALTH_GPU, nestedStealth.gpu ?? false),
+    behaviorEnabled: environment.SMOOTH_OPERATOR_BEHAVIOR_ENABLED === undefined ? stealthEnabled : parseBoolean(environment.SMOOTH_OPERATOR_BEHAVIOR_ENABLED, stealthEnabled),
+  };
+  const isStealthConfigured =
+    environment.SMOOTH_OPERATOR_STEALTH_PROFILE !== undefined
+    || nestedStealth.profile !== undefined
+    || environment.SMOOTH_OPERATOR_STEALTH_GPU !== undefined
+    || nestedStealth.gpu !== undefined
+    || environment.SMOOTH_OPERATOR_BEHAVIOR_ENABLED !== undefined
+    || nestedStealth.behaviorEnabled !== undefined;
+  const captchaSolver: NonNullable<ServerConfig["captchaSolver"]> = {
+    provider: (environment.SMOOTH_OPERATOR_CAPTCHA_SOLVER ?? nestedCaptchaSolver.provider ?? "none") as NonNullable<ServerConfig["captchaSolver"]>["provider"],
+    apiKey: trimOptional(environment.SMOOTH_OPERATOR_CAPTCHA_SOLVER_API_KEY ?? nestedCaptchaSolver.apiKey),
+    url: trimOptional(environment.SMOOTH_OPERATOR_CAPTCHA_SOLVER_URL ?? nestedCaptchaSolver.url),
+    proxyUrl: trimOptional(environment.SMOOTH_OPERATOR_CAPTCHA_SOLVER_PROXY_URL ?? nestedCaptchaSolver.proxyUrl),
+    timeoutMs: parseInteger(environment.SMOOTH_OPERATOR_CAPTCHA_SOLVER_TIMEOUT_MS, nestedCaptchaSolver.timeoutMs ?? 120_000),
+    maxBytes: parseInteger(environment.SMOOTH_OPERATOR_CAPTCHA_SOLVER_MAX_BYTES, nestedCaptchaSolver.maxBytes ?? 1_000_000),
+  };
+  const isCaptchaSolverConfigured =
+    captchaSolver.provider !== "none"
+    || captchaSolver.apiKey !== undefined
+    || captchaSolver.url !== undefined
+    || captchaSolver.proxyUrl !== undefined;
 
   const config: ServerConfig = {
     transport: (argValue("--transport") ?? environment.SMOOTH_OPERATOR_TRANSPORT ?? fileConfig.transport ?? "stdio") as Transport,
@@ -535,6 +615,8 @@ export function loadServerConfig(args: string[] = [], environment: NodeJS.Proces
       allowPrivateNetwork: parseBoolean(environment.SMOOTH_OPERATOR_ALLOW_PRIVATE_NETWORK, nestedSecurity.allowPrivateNetwork ?? false),
       allowEval: parseBoolean(environment.SMOOTH_OPERATOR_ALLOW_EVAL, nestedSecurity.allowEval ?? false),
     },
+    ...(stealth.enabled || isStealthConfigured ? { stealth } : {}),
+    ...(isCaptchaSolverConfigured ? { captchaSolver } : {}),
     dataDir,
     logLevel: (environment.SMOOTH_OPERATOR_LOG_LEVEL ?? fileConfig.logLevel ?? "info") as LogLevel,
   };
@@ -544,6 +626,8 @@ export function loadServerConfig(args: string[] = [], environment: NodeJS.Proces
     http: config.http,
     browser: config.browser,
     security: config.security,
+    ...(config.stealth ? { stealth: config.stealth } : {}),
+    ...(config.captchaSolver ? { captchaSolver: config.captchaSolver } : {}),
     dataDir: config.dataDir,
     logLevel: config.logLevel,
   });

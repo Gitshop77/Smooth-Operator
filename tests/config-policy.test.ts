@@ -205,6 +205,94 @@ describe("configuration", () => {
     await rm(directory, { recursive: true, force: true });
   });
 
+  it("accepts opt-in stealth and captcha solver configuration", () => {
+    const config = loadTestConfig([], {
+      SMOOTH_OPERATOR_STEALTH_ENABLED: "true",
+      SMOOTH_OPERATOR_STEALTH_PROFILE: "max",
+      SMOOTH_OPERATOR_STEALTH_GPU: "false",
+      SMOOTH_OPERATOR_CAPTCHA_SOLVER: "capsolver",
+      SMOOTH_OPERATOR_CAPTCHA_SOLVER_API_KEY: "  test-api-key  ",
+      SMOOTH_OPERATOR_CAPTCHA_SOLVER_URL: "https://solver.example/api",
+      SMOOTH_OPERATOR_CAPTCHA_SOLVER_PROXY_URL: "socks5://127.0.0.1:1080",
+      SMOOTH_OPERATOR_CAPTCHA_SOLVER_TIMEOUT_MS: "120000",
+      SMOOTH_OPERATOR_CAPTCHA_SOLVER_MAX_BYTES: "1000000",
+    });
+    expect(config.stealth).toEqual({ enabled: true, profile: "max", gpu: false, behaviorEnabled: true });
+    expect(config.captchaSolver).toEqual({
+      provider: "capsolver",
+      apiKey: "test-api-key",
+      url: "https://solver.example/api",
+      proxyUrl: "socks5://127.0.0.1:1080",
+      timeoutMs: 120_000,
+      maxBytes: 1_000_000,
+    });
+    expect(config.stealth?.enabled).toBe(true);
+  });
+
+  it("defaults stealth and leaves sections absent when unconfigured", () => {
+    const defaults = loadTestConfig([], {});
+    expect(defaults.stealth).toBeUndefined();
+    expect(defaults.captchaSolver).toBeUndefined();
+    expect(loadTestConfig([], { SMOOTH_OPERATOR_STEALTH_ENABLED: "false" }).stealth).toBeUndefined();
+  });
+
+  it("keeps stealth present when only profile is configured", () => {
+    const config = loadTestConfig([], { SMOOTH_OPERATOR_STEALTH_PROFILE: "max" });
+    expect(config.stealth).toEqual({ enabled: false, profile: "max", gpu: false, behaviorEnabled: false });
+  });
+
+  it("inherits stealth behaviorEnabled from enabled and allows override", () => {
+    const inherited = loadTestConfig([], { SMOOTH_OPERATOR_STEALTH_ENABLED: "true" });
+    expect(inherited.stealth?.behaviorEnabled).toBe(true);
+    const overridden = loadTestConfig([], {
+      SMOOTH_OPERATOR_STEALTH_ENABLED: "true",
+      SMOOTH_OPERATOR_BEHAVIOR_ENABLED: "false",
+    });
+    expect(overridden.stealth?.behaviorEnabled).toBe(false);
+    expect(loadTestConfig([], { SMOOTH_OPERATOR_STEALTH_ENABLED: "false", SMOOTH_OPERATOR_BEHAVIOR_ENABLED: "true" }).stealth?.behaviorEnabled).toBe(true);
+  });
+
+  it("rejects unknown keys in the stealth and captcha solver sections", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "smooth-operator-config-stealth-"));
+    const path = join(directory, "config.json");
+    await writeFile(path, JSON.stringify({
+      stealth: { enabled: true, unknownKey: true },
+      captchaSolver: { provider: "none", unknownKey: true },
+    }));
+    await chmod(path, 0o600);
+    expect(() => loadTestConfig(["--config", path], {})).toThrowError(/Configuration file failed schema validation/);
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("rejects invalid stealth profile, provider, and solver caps", () => {
+    expect(() => loadTestConfig([], { SMOOTH_OPERATOR_STEALTH_PROFILE: "extreme" })).toThrowError(/Configuration failed validation/);
+    expect(() => loadTestConfig([], { SMOOTH_OPERATOR_STEALTH_PROFILE: "extreme" })).toThrowError(AppError);
+    expect(() => loadTestConfig([], { SMOOTH_OPERATOR_CAPTCHA_SOLVER: "solverX" })).toThrowError(/Configuration failed validation/);
+    expect(() => loadTestConfig([], { SMOOTH_OPERATOR_CAPTCHA_SOLVER: "capsolver", SMOOTH_OPERATOR_CAPTCHA_SOLVER_TIMEOUT_MS: "500" })).toThrowError(/Configuration failed validation/);
+    expect(() => loadTestConfig([], { SMOOTH_OPERATOR_CAPTCHA_SOLVER: "capsolver", SMOOTH_OPERATOR_CAPTCHA_SOLVER_TIMEOUT_MS: "700000" })).toThrowError(/Configuration failed validation/);
+    expect(() => loadTestConfig([], { SMOOTH_OPERATOR_CAPTCHA_SOLVER: "capsolver", SMOOTH_OPERATOR_CAPTCHA_SOLVER_MAX_BYTES: "500" })).toThrowError(/Configuration failed validation/);
+    expect(() => loadTestConfig([], { SMOOTH_OPERATOR_CAPTCHA_SOLVER: "capsolver", SMOOTH_OPERATOR_CAPTCHA_SOLVER_MAX_BYTES: "200000000" })).toThrowError(/Configuration failed validation/);
+  });
+
+  it("validates stealth and solver sections from a JSON configuration file", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "smooth-operator-config-stealth-ok-"));
+    const path = join(directory, "config.json");
+    try {
+      await writeFile(path, JSON.stringify({
+        stealth: { enabled: true, profile: "max" },
+        captchaSolver: { provider: "2captcha", apiKey: "abc", timeoutMs: 5000, maxBytes: 4096 },
+      }));
+      await chmod(path, 0o600);
+      // `enabled` is the env master switch (fallback false); the file supplies
+      // profile/gpu/behaviorEnabled and the solver fields, which are still read.
+      const config = loadTestConfig(["--config", path], {});
+      expect(config.stealth).toEqual({ enabled: false, profile: "max", gpu: false, behaviorEnabled: false });
+      expect(config.captchaSolver).toEqual({ provider: "2captcha", apiKey: "abc", url: undefined, proxyUrl: undefined, timeoutMs: 5_000, maxBytes: 4_096 });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("requires a strong token for remote HTTP", () => {
     expect(() => loadTestConfig([], {
       SMOOTH_OPERATOR_HTTP_HOST: "0.0.0.0",
