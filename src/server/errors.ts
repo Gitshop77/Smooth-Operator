@@ -9,10 +9,8 @@ const ERROR_DETAILS_MAX_BYTES = 8_000;
 const ERROR_DETAIL_VALUE_MAX_CHARS = 1_000;
 const ERROR_TRUNCATION_MARKER = "…[TRUNCATED]";
 const ERROR_CODE_PATTERN = /^[A-Z][A-Z0-9_]*$/;
-// Solver error codes exported for the CAPTCHA resolver (Task 6) and its
-// dispatch in the browser service (Task 10). AppErrors are constructed there,
-// not here; these are only stable, redactable identifiers.
-export const SOLVER_UNAVAILABLE = "SOLVER_UNAVAILABLE";
+// Solver error codes exported for the CAPTCHA resolver (Task 6). AppErrors are
+// constructed there, not here; these are only stable, redactable identifiers.
 export const SOLVER_TIMEOUT = "SOLVER_TIMEOUT";
 export const SOLVER_REFUSED = "SOLVER_REFUSED";
 const UTF8_ENCODER = new TextEncoder();
