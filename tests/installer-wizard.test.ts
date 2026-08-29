@@ -132,7 +132,7 @@ describe("persistWizardConfig merges instead of replacing", () => {
       expect(merged.browser.url).toBe("http://127.0.0.1:9222");
       expect(merged.security.allowPrivateNetwork).toBe(true);
       expect(merged.security.allowedDomains).toEqual(["example.com"]);
-      expect(merged.stealth).toEqual({ enabled: true, profile: "balanced", gpu: false, behaviorEnabled: true });
+      expect(merged.stealth).toEqual({ enabled: true, profile: "balanced", gpu: false, behaviorEnabled: false });
       expect(merged.logLevel).toBe("debug");
       expect(merged.mcp).toEqual({ servers: {} });
       await expect(readFile(`${join(configDir, "config.json")}.bak`, "utf8")).resolves.toBe(existingJson);
@@ -168,7 +168,7 @@ describe("persistWizardConfig merges instead of replacing", () => {
       expect(merged.security.allowEval).toBe(false);
       expect(merged.security.allowedDomains).toEqual([]);
       expect(merged.security.blockedDomains).toEqual([]);
-      expect(merged.stealth).toEqual({ enabled: true, profile: "balanced", gpu: false, behaviorEnabled: true });
+      expect(merged.stealth).toEqual({ enabled: true, profile: "balanced", gpu: false, behaviorEnabled: false });
       expect(merged.captchaSolver).toBeUndefined();
       expect(merged.browser.actionTimeoutMs).toBe(20_000);
       expect(merged.logLevel).toBe("debug");

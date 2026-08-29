@@ -2,9 +2,8 @@ import { STEALTH_BASELINE_ARGS } from "./stealth";
 
 /**
  * Stable launch defaults for the native profile. Reduces background work;
- * optional stealth flags append here when enabled (deduped, never mutating the
- * shared default set). Identity, language, and viewport claims are never
- * fabricated by the native defaults.
+ * optional explicit viewport flags append here when configured. Identity,
+ * language, and automation signals are never changed by this module.
  */
 export const NATIVE_BROWSER_LAUNCH_ARGS = [
   "--disable-background-networking",
@@ -23,7 +22,8 @@ export const NATIVE_BROWSER_LAUNCH_ARGS = [
   "--no-pings",
 ] as const;
 
-// GPU rendering flags appended only when both stealth and `gpu` are requested.
+// GPU rendering flags are explicit performance/compatibility controls, not
+// identity controls. They remain opt-in because Vulkan availability varies.
 // No `=` in these keys, so dedup is by exact string (see nativeBrowserLaunchArgs).
 const STEALTH_GPU_ARGS: readonly string[] = ["--use-angle=vulkan", "--enable-vulkan"];
 

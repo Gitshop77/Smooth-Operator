@@ -169,6 +169,7 @@ const BrowserActionFieldsSchema = z.object({
   verify: z.boolean().optional(),
   durationMs: z.number().int().min(0).max(30_000).optional(),
   pollMs: z.number().int().min(250).max(10_000).optional(),
+  maxAttempts: z.number().int().min(1).max(100).optional(),
   optionValue: BoundedString(2_000).optional(),
   optionValues: z.array(BoundedString(2_000)).min(1).max(200).optional(),
   cookieName: BoundedString(256).optional(),
@@ -638,6 +639,7 @@ export const SolveChallengeRequestSchema = z.object({
   maxDimension: z.number().int().min(1).max(20_000).optional(),
   max_dim: z.number().int().min(1).max(20_000).optional(),
   maxChars: z.number().int().min(1_000).max(MCP_PAGE_TEXT_MAX_CHARS).optional(),
+  maxAttempts: z.number().int().min(1).max(100).optional(),
 }).strict().superRefine((input, context) => {
   if (input.includeScreenshot !== undefined && input.include_screenshot !== undefined) {
     context.addIssue({ code: "custom", message: "Provide includeScreenshot or include_screenshot, not both." });

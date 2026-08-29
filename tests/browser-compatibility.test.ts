@@ -37,7 +37,7 @@ describe("native browser compatibility profile", () => {
 
   it("appends the stealth baseline only when enabled", () => {
     const args = nativeBrowserLaunchArgs({ enabled: true });
-    expect(args).toContain("--disable-blink-features=AutomationControlled");
+    expect(args).not.toContain("--disable-blink-features=AutomationControlled");
     expect(args).not.toContain("--lang=en-US");
     expect(args).not.toContain("--window-size=1920,1080");
   });

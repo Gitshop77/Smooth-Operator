@@ -44,9 +44,12 @@ Ask: *“Scrape pricing into a table”*, *“Fill this form with ~/resume.pdf�
 
 ## How to use
 
-Talk to your harness normally. It can call `browser_navigate` → `browser_snapshot` → `browser_click` and the rest of the MCP surface as needed. For a challenge, `browser_solve_challenge` returns fresh bounded visual/state evidence for the connected AI; the AI uses ordinary browser actions and calls it again to verify the final classification. Human handoff remains available for logins or challenges that require the user.
+Talk to your harness normally. It can call `browser_navigate` → `browser_snapshot` → `browser_click` and the rest of the MCP surface as needed. For a challenge, `browser_solve_challenge` returns fresh bounded visual/state evidence and an attempt budget; the connected AI keeps using ordinary browser actions and calls it again until the final classification is clear or the budget is exhausted. Human handoff remains available only as an explicit final option.
 
-Stealth and short behavioral timing are enabled in the recommended native profile. Page JavaScript is also available by default; set the explicit environment flags to `false` when a stricter profile is needed. See `docs/STEALTH-GUIDE.md` for details and responsible use.
+Browser identity remains native, page JavaScript is available by default, and
+behavioral timing is off for fast deterministic input. Set the explicit
+environment flags to change those choices. See `docs/STEALTH-GUIDE.md` for
+details and responsible use.
 
 For the fastest supported operation, keep behavioral timing off with
 `SMOOTH_OPERATOR_BEHAVIOR_ENABLED=false`; the native browser remains bounded and

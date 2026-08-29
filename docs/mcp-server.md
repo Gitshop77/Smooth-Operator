@@ -46,10 +46,10 @@ smooth-operator --help
 The interactive installer asks exactly three questions: (1) browser profile
 ownership, (2) headed or headless display, and (3) which Chromium executable to
 use. Its recommended defaults are a managed private persistent profile, headed
-display, and the first detected Chromium executable. It also enables page eval,
-balanced stealth, and short behavioral timing in the native profile; pass the
-corresponding environment flags as `false` when those capabilities are not
-wanted. Managed mode owns its profile. Connected mode launches and attaches to
+display, and the first detected Chromium executable. It also enables page eval
+and the identity-preserving compatibility profile; behavioral timing is off
+for fast deterministic input and can be enabled explicitly. Managed mode owns
+its profile. Connected mode launches and attaches to
 a dedicated debugging profile and does not claim ownership of an operator's
 daily browser.
 
@@ -167,11 +167,11 @@ The managed browser is headed by default for sign-in and human handoff. On CI or
 displayless host, explicitly set `SMOOTH_OPERATOR_BROWSER_HEADLESS=true` or use
 Xvfb. If you set both `SMOOTH_OPERATOR_BROWSER_VIEWPORT_WIDTH` and
 `SMOOTH_OPERATOR_BROWSER_VIEWPORT_HEIGHT`, that explicit viewport is applied to
-the browser and any opt-in stealth page metrics. All local browser tools and
-features are available by default, including page evaluation and the balanced
-stealth/short-behavior profile. Set their environment flags to `false` for a
-stricter or faster profile. See `STEALTH-GUIDE.md` for challenge handling and
-the remaining boundaries.
+the browser and any explicitly configured viewport. All local browser tools and
+features are available by default, including page evaluation and the
+identity-preserving compatibility profile. Behavioral timing is off by default
+for fast deterministic input. See `STEALTH-GUIDE.md` for challenge handling
+and the remaining boundaries.
 
 ### Managed mode (default)
 
@@ -312,10 +312,10 @@ variables include:
 | `SMOOTH_OPERATOR_ALLOWED_FILE_ROOTS` | data `files`, `downloads` | Explicit roots replace defaults |
 | `SMOOTH_OPERATOR_ALLOW_PRIVATE_NETWORK` | `false` | Allows non-loopback private targets when true |
 | `SMOOTH_OPERATOR_ALLOW_EVAL` | `true` | Set `false` to disable page JavaScript |
-| `SMOOTH_OPERATOR_STEALTH_ENABLED` | `true` | Set `false` to preserve raw automation signals |
+| `SMOOTH_OPERATOR_STEALTH_ENABLED` | `true` | Native-identity viewport compatibility script |
 | `SMOOTH_OPERATOR_STEALTH_PROFILE` | `balanced` | `balanced` or `max` compatibility label |
 | `SMOOTH_OPERATOR_STEALTH_GPU` | `false` | Adds opt-in GPU launch flags |
-| `SMOOTH_OPERATOR_BEHAVIOR_ENABLED` | `true` | Set `false` for fastest raw interactions |
+| `SMOOTH_OPERATOR_BEHAVIOR_ENABLED` | `false` | Opt-in timing wrappers |
 | `SMOOTH_OPERATOR_HTTP_HOST` | `127.0.0.1` | HTTP bind host |
 | `SMOOTH_OPERATOR_HTTP_PORT` | `3344` | HTTP bind port |
 | `SMOOTH_OPERATOR_HTTP_PATH` | `/mcp` | HTTP endpoint path |
@@ -328,13 +328,11 @@ variables include:
 
 ### Fast operation mode
 
-The default configuration is a native managed browser with short bounded
-behavioral timing, the conservative stealth baseline, and page evaluation
-available. For the fastest raw interactions, set
-`SMOOTH_OPERATOR_BEHAVIOR_ENABLED=false` and, when appropriate,
-`SMOOTH_OPERATOR_STEALTH_ENABLED=false`; set `SMOOTH_OPERATOR_ALLOW_EVAL=false`
-when page JavaScript is not needed. Tool calls remain bounded and cancellable;
-no hidden planning loop is introduced.
+The default configuration is a native managed browser with page evaluation
+available, native browser identity, and deterministic input. Enable
+`SMOOTH_OPERATOR_BEHAVIOR_ENABLED=true` only when a workflow explicitly needs
+timing wrappers. Tool calls remain bounded and cancellable; no hidden planning
+loop is introduced.
 
 Raw MCP/tool-call speed is not the main bot-detection vector. Sites can score
 network and browser identity, IP reputation, session history, and interaction

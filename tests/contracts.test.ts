@@ -224,6 +224,7 @@ describe("MCP contracts", () => {
       fullPage: true,
       maxDimension: 1_200,
       maxChars: 8_000,
+      maxAttempts: 32,
     }).success).toBe(true);
     expect(SolveChallengeRequestSchema.safeParse({ pageId: "p1", full_page: true, max_dim: 1_200, include_screenshot: false }).success).toBe(true);
     expect(BrowserActionSchema.safeParse({ action: "solve_challenge" }).success).toBe(true);

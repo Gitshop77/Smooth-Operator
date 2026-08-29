@@ -72,7 +72,7 @@ describe("configuration", () => {
       SMOOTH_OPERATOR_BEHAVIOR_ENABLED: "false",
     });
     expect(defaults.security.allowEval).toBe(true);
-    expect(defaults.stealth).toEqual({ enabled: true, profile: "balanced", gpu: false, behaviorEnabled: true });
+    expect(defaults.stealth).toEqual({ enabled: true, profile: "balanced", gpu: false, behaviorEnabled: false });
     expect(explicit.security.allowEval).toBe(false);
     expect(explicit.stealth).toEqual({ enabled: false, profile: "balanced", gpu: false, behaviorEnabled: false });
   });
@@ -240,25 +240,25 @@ describe("configuration", () => {
       SMOOTH_OPERATOR_CAPTCHA_SOLVER_TIMEOUT_MS: "120000",
       SMOOTH_OPERATOR_CAPTCHA_SOLVER_MAX_BYTES: "1000000",
     });
-    expect(config.stealth).toEqual({ enabled: true, profile: "max", gpu: false, behaviorEnabled: true });
+    expect(config.stealth).toEqual({ enabled: true, profile: "max", gpu: false, behaviorEnabled: false });
     expect("captchaSolver" in config).toBe(false);
     expect(config.stealth?.enabled).toBe(true);
   });
 
   it("defaults stealth to the enabled balanced profile", () => {
     const defaults = loadTestConfig([], {});
-    expect(defaults.stealth).toEqual({ enabled: true, profile: "balanced", gpu: false, behaviorEnabled: true });
+    expect(defaults.stealth).toEqual({ enabled: true, profile: "balanced", gpu: false, behaviorEnabled: false });
     expect(loadTestConfig([], { SMOOTH_OPERATOR_STEALTH_ENABLED: "false" }).stealth?.enabled).toBe(false);
   });
 
   it("keeps stealth enabled when only profile is configured", () => {
     const config = loadTestConfig([], { SMOOTH_OPERATOR_STEALTH_PROFILE: "max" });
-    expect(config.stealth).toEqual({ enabled: true, profile: "max", gpu: false, behaviorEnabled: true });
+    expect(config.stealth).toEqual({ enabled: true, profile: "max", gpu: false, behaviorEnabled: false });
   });
 
   it("inherits stealth behaviorEnabled from enabled and allows override", () => {
     const inherited = loadTestConfig([], { SMOOTH_OPERATOR_STEALTH_ENABLED: "true" });
-    expect(inherited.stealth?.behaviorEnabled).toBe(true);
+    expect(inherited.stealth?.behaviorEnabled).toBe(false);
     const overridden = loadTestConfig([], {
       SMOOTH_OPERATOR_STEALTH_ENABLED: "true",
       SMOOTH_OPERATOR_BEHAVIOR_ENABLED: "false",

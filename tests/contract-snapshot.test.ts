@@ -29,7 +29,7 @@ describe("public MCP contract snapshot", () => {
         prompts: prompts.prompts.map(({ name, title, description, arguments: promptArguments }) => ({ name, title, description, arguments: promptArguments })),
       };
       const fingerprint = createHash("sha256").update(JSON.stringify(manifest)).digest("hex");
-      expect(fingerprint).toBe("1e19292afcb0884acca8113cd5136f9793ac078f5d622c71bd140ede646bb3f7");
+      expect(fingerprint).toBe("3aa66bc4a26b09d9c909d5bddcb5b876da92f64f9c0d18e231da2d62a819569b");
 
       const success = await client.callTool({ name: "server_health", arguments: {} });
       expect(success.isError).not.toBe(true);

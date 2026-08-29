@@ -224,7 +224,7 @@ export class ServerRuntime {
         headedBrowser: true,
         pageEvaluation: true,
         stealth: true,
-        behavioralTiming: true,
+        behavioralTiming: false,
       },
       features: {
         localBrowserTools: "available",

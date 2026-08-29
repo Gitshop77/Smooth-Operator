@@ -536,7 +536,7 @@ export function loadServerConfig(args: string[] = [], environment: NodeJS.Proces
     profile: (environment.SMOOTH_OPERATOR_STEALTH_PROFILE ?? nestedStealth.profile ?? "balanced") as "balanced" | "max",
     gpu: parseBoolean(environment.SMOOTH_OPERATOR_STEALTH_GPU, nestedStealth.gpu ?? false),
     behaviorEnabled: environment.SMOOTH_OPERATOR_BEHAVIOR_ENABLED === undefined
-      ? nestedStealth.behaviorEnabled ?? true
+      ? nestedStealth.behaviorEnabled ?? false
       : parseBoolean(environment.SMOOTH_OPERATOR_BEHAVIOR_ENABLED, stealthEnabled),
   };
 

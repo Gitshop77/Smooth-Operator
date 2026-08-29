@@ -13,7 +13,7 @@ describe("runtime lifecycle", () => {
     const runtime = await ServerRuntime.create(testConfig());
     try {
       expect(runtime.publicCapabilities()).toMatchObject({
-        defaults: { browserMode: "managed", headedBrowser: true, pageEvaluation: true, stealth: true, behavioralTiming: true },
+        defaults: { browserMode: "managed", headedBrowser: true, pageEvaluation: true, stealth: true, behavioralTiming: false },
         features: { localBrowserTools: "available", pageEvaluation: false, stealth: false, behavioralTiming: false },
         challenges: { classification: "bounded-evidence", connectedAiLoop: true, humanHandoff: true, successRequiresAbsentClassification: true },
       });

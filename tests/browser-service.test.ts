@@ -91,7 +91,7 @@ describe("browser service", () => {
         await expect((service as unknown as { connectBrowser(generation: number): Promise<Browser> }).connectBrowser(0)).resolves.toBe(browser);
         expect(launch).toHaveBeenCalledWith(expect.objectContaining({
           headless,
-          args: expect.arrayContaining(["--disable-blink-features=AutomationControlled", "--window-size=1366,768"]),
+          args: expect.arrayContaining(["--window-size=1366,768"]),
         }));
       } finally {
         await service.close();

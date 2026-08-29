@@ -440,7 +440,7 @@ function writeSummary(ui: ReturnType<typeof createUi>, harness: string, choices:
       ["Blocked sites", choices.blockedDomains.length ? choices.blockedDomains.join(", ") : "none"],
       ["Page JavaScript", choices.allowEval ? "enabled" : "off"],
       ["Stealth baseline", "enabled (balanced)"],
-      ["Behavioral realism", "enabled"],
+      ["Behavioral timing", "off (fast native input)"],
       ["Data directory", choices.dataDir],
     ] satisfies ReadonlyArray<readonly [string, string]>),
   ]);
@@ -531,7 +531,7 @@ export async function persistWizardConfig(rawChoices: WizardChoices, homeDir: st
     enabled: true,
     profile: "balanced",
     gpu: false,
-    behaviorEnabled: true,
+    behaviorEnabled: false,
   };
 
   const config: Record<string, unknown> = { ...previous, browser: browserSection, security: securitySection, stealth: stealthSection };

@@ -273,7 +273,7 @@ export const MCP_INSTRUCTIONS = [
   "For open shadow roots, Puppeteer pierce/ selectors may be used explicitly; closed shadow roots remain unavailable.",
   "Use browser_batch for short validated sequences, but keep destructive actions separate when user confirmation is needed.",
   "Use an efficient observe -> act -> verify loop: observe with browser_snapshot or browser_get_state, perform one bounded browser action, then observe again to verify the resulting state. Keep refs and indexes fresh after navigation, scrolling, or DOM changes; parallelize only independent read-only observations.",
-  "browser_solve_challenge is an internal connected-AI loop. It collects a fresh challenge classification plus bounded visual/state evidence, then the connected AI uses normal browser actions and calls it again to verify. Never claim a challenge is solved unless the final classification explicitly reports it absent; unknown or failed classification is not success.",
+  "browser_solve_challenge is an internal connected-AI loop. Each call is one bounded verification cycle and returns fresh visual/state evidence plus attemptsRemaining; the connected AI should keep using normal browser actions and call it again until the final classification explicitly reports the challenge absent or automation_exhausted. Never claim a challenge is solved from a present, unknown, or failed classification. Human handoff is only an explicit final option after exhaustion.",
   "The server contains no LLM or agent planner; the MCP client is responsible for reasoning, retries, and task completion.",
 ].join(" ");
 
@@ -443,7 +443,7 @@ function registerBrowserTools(server: McpServer, runtime: ServerRuntime): void {
     "browser_solve_challenge",
     {
       title: "Solve a web challenge",
-      description: "Run the internal connected-AI challenge loop: collect fresh challenge classification and bounded visual/state evidence, let the connected AI use normal browser actions, then call again to verify. The result is successful only when the final classification explicitly reports the challenge absent.",
+      description: "Run one cycle of the internal connected-AI challenge loop. Collect fresh bounded visual/state evidence, use normal browser actions, and call again until the challenge is explicitly absent or the bounded attempt budget is exhausted. No external solver or token injection is used.",
       inputSchema: SolveChallengeRequestSchema,
       annotations: BROWSER_READ_ONLY,
     },

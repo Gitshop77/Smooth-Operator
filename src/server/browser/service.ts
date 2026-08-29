@@ -192,6 +192,8 @@ interface PageState {
   policyVerifiedUrls: Set<string>;
   /** Most recent challenge observation, used only to label a later clear. */
   challengeStatus?: "present" | "absent" | "unknown";
+  /** Number of connected-AI challenge verification cycles on this document. */
+  challengeAttempts?: number;
   dialogResolutionPromise?: Promise<void>;
 }
 
@@ -284,6 +286,8 @@ const MAX_DOM_TRAVERSAL_NODES = 20_000;
 const MAX_TEXT_SCAN_CHARS = 500_000;
 const MAX_MARKUP_EVIDENCE_CHARS = 120_000;
 const CHALLENGE_AI_GUIDANCE = "Use normal browser click, input, scroll, or key tools on the visible challenge controls, then call solve_challenge again to verify that the challenge is cleared.";
+const CHALLENGE_DEFAULT_MAX_ATTEMPTS = 32;
+const CHALLENGE_MAX_ATTEMPTS = 100;
 const MAX_DOWNLOAD_ENTRIES = 100;
 const TARGET_GUARD_MAX_REQUEST_IDS = 128;
 const CLICK_SETTLE_TIMEOUT_MS = 10;
@@ -3775,6 +3779,7 @@ export class BrowserService {
       this.clearTargetGuardNavigationError(state.page);
       state.policyVerifiedUrls?.clear();
       state.challengeStatus = undefined;
+      state.challengeAttempts = 0;
     } catch (error) {
       this.logger.debug("Blocked navigation recovery could not restore a blank page", { pageId: state.id, error: String(error) });
     }
@@ -4022,11 +4027,11 @@ export class BrowserService {
         throw new AppError("BROWSER_GUARD_FAILED", "The browser navigation policy could not be installed.", { retryable: true, cause: error });
       }
     }
-    // Stealth fingerprint bundle: inject once per page behind a one-shot guard,
+    // Browser compatibility script: inject once per page behind a one-shot guard,
     // mirroring the navigation-guard block above. `evaluateOnNewDocument` runs
     // in the main world before page scripts, so a single CDP call covers every
-    // document/iframe the page creates. The native profile enables this by
-    // default, while an explicit false keeps the raw browser path available.
+    // document/iframe the page creates. It only applies an explicit viewport;
+    // browser identity and native automation signals remain untouched.
     const stealth = this.stealthSettings();
     if (stealth.enabled && !state.stealthInjected) {
       try {
@@ -4038,7 +4043,7 @@ export class BrowserService {
         state.stealthInjected = true;
       } catch (error) {
         throwIfAborted(signal);
-        throw new AppError("STEALTH_INITIALIZATION_FAILED", "The stealth fingerprint init script could not be injected.", { retryable: true, cause: error });
+        throw new AppError("STEALTH_INITIALIZATION_FAILED", "The browser compatibility script could not be injected.", { retryable: true, cause: error });
       }
     }
     // Pages that existed before the browser connection was fully wired do not
@@ -4245,6 +4250,7 @@ export class BrowserService {
         // latch is retained.
         if (frame === mainFrame) {
           state.challengeStatus = undefined;
+          state.challengeAttempts = 0;
         }
       } catch (error) {
         this.logger.debug("Browser frame navigation event was unavailable after page disposal", { pageId: state.id, error: String(error) });
@@ -6038,12 +6044,17 @@ export class BrowserService {
   private async solveChallenge(state: PageState, action: BrowserAction, signal?: AbortSignal): Promise<unknown> {
     throwIfAborted(signal);
     const previousChallengeStatus = state.challengeStatus;
+    const requestedMaxAttempts = action.maxAttempts;
+    const maxAttempts = Number.isFinite(requestedMaxAttempts)
+      ? Math.min(CHALLENGE_MAX_ATTEMPTS, Math.max(1, Math.floor(requestedMaxAttempts as number)))
+      : CHALLENGE_DEFAULT_MAX_ATTEMPTS;
     const detection = await this.detectChallenge(state, signal);
     if (isChallengeUnknown(detection)) {
       state.challengeStatus = "unknown";
       return {
         solved: false,
         verified: false,
+        challengeState: "unknown",
         resolution: "challenge_state_unverified",
         verification: "unknown",
         workflow: "verification_unavailable",
@@ -6056,22 +6067,46 @@ export class BrowserService {
 
     if (isChallengeAbsent(detection)) {
       const cleared = previousChallengeStatus === "present";
+      const attempts = state.challengeAttempts ?? 0;
       state.challengeStatus = "absent";
+      state.challengeAttempts = 0;
       return {
         solved: true,
         verified: true,
+        challengeState: "clear",
         resolution: cleared ? "challenge_cleared" : "no_challenge",
         verification: "verified",
         workflow: "verified",
         pageId: state.id,
+        ...(attempts > 0 ? { attempts } : {}),
         classification: detection,
+      };
+    }
+
+    state.challengeStatus = "present";
+    const attempts = (state.challengeAttempts ?? 0) + 1;
+    state.challengeAttempts = attempts;
+    if (attempts > maxAttempts) {
+      return {
+        solved: false,
+        verified: true,
+        challengeState: "present",
+        resolution: "automation_exhausted",
+        verification: "challenge_present",
+        workflow: "human_handoff_available",
+        pageId: state.id,
+        attempts: attempts - 1,
+        maxAttempts,
+        attemptsRemaining: 0,
+        classification: detection,
+        nextAction: "Automation attempts are exhausted. Human handoff is available if the site permits it.",
+        guidance: "Automation attempts are exhausted. Human handoff is available if the site permits it.",
       };
     }
 
     // A present challenge is an AI handoff. Capture exactly one fresh bounded
     // snapshot so refs, viewport, frame, and revision all describe the same
     // document as the screenshot.
-    state.challengeStatus = "present";
     const includeScreenshot = action.includeScreenshot ?? action.include_screenshot ?? true;
     const requestedMaxDimension = action.maxDimension ?? action.max_dim;
     const maxDimension = Number.isFinite(requestedMaxDimension)
@@ -6106,6 +6141,9 @@ export class BrowserService {
       snapshotId: snapshot.snapshotId,
       domRevision: snapshot.domRevision,
       viewport: snapshot.viewport,
+      attempts,
+      maxAttempts,
+      attemptsRemaining: Math.max(0, maxAttempts - attempts),
       refs: stableRefs,
       interactive: stableRefs,
       classification: detection,

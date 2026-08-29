@@ -184,6 +184,23 @@ describe("solve_challenge internal AI visual workflow", () => {
     await instance.close();
   });
 
+  it("keeps retrying the connected-AI loop before exposing handoff", async () => {
+    const instance = service();
+    const internal = instance as unknown as Internals;
+    vi.spyOn(internal, "detectChallenge").mockResolvedValue(detection("present"));
+    vi.spyOn(internal, "snapshotUnlocked").mockResolvedValue(snapshot());
+
+    const state = { id: "page-1" as const };
+    const first = await internal.solveChallenge(state, { ...solveAction, maxAttempts: 2 } as BrowserAction);
+    const second = await internal.solveChallenge(state, { ...solveAction, maxAttempts: 2 } as BrowserAction);
+    const exhausted = await internal.solveChallenge(state, { ...solveAction, maxAttempts: 2 } as BrowserAction);
+
+    expect(first).toMatchObject({ workflow: "ai_action_required", attempts: 1, attemptsRemaining: 1 });
+    expect(second).toMatchObject({ workflow: "ai_action_required", attempts: 2, attemptsRemaining: 0 });
+    expect(exhausted).toMatchObject({ workflow: "human_handoff_available", resolution: "automation_exhausted", attempts: 2, attemptsRemaining: 0 });
+    await instance.close();
+  });
+
   it("propagates cancellation from detection instead of converting it to success", async () => {
     const instance = service();
     const internal = instance as unknown as Internals;

@@ -1,30 +1,26 @@
 /**
- * Stealth: coherent baseline launch args + init-script source.
+ * Browser compatibility: explicit viewport coherence only.
  *
  * Pure module — produces strings only. No browser runtime is imported and there
- * are no side effects at import time. `STEALTH_BASELINE_ARGS` is the single
- * source of the supported automation-control flag (appended by
- * `nativeBrowserLaunchArgs` when stealth is enabled); `buildStealthInitScript`
- * returns a single bundled page-JS source string that is injected once per
+ * are no side effects at import time. `STEALTH_BASELINE_ARGS` is empty;
+ * `buildStealthInitScript` returns a small page script that is injected once per
  * document via `page.evaluateOnNewDocument`. The runtime supplies the optional
- * viewport when configured. No unsupported UA, platform, browser
- * version, language, or client-hint claims are fabricated.
+ * viewport when configured. It deliberately does not hide automation markers,
+ * patch browser APIs, or fabricate UA/platform/version/language/client-hint
+ * claims.
  *
- * Coherence over maximality: every patch is guarded and never throws (a throwing
- * patch is a louder tell). The accepted `balanced`/`max` labels are retained
- * for configuration compatibility, while both currently use this minimal
- * supported patch set.
+ * Coherence over maximality: the only supported patch is explicit viewport
+ * alignment, and it is guarded so a page cannot make initialization fail.
+ * The accepted `balanced`/`max` labels remain for compatibility.
  */
 
 import type { FingerprintProfile } from "./fingerprints";
 
 /**
- * Stealth baseline flags (append-only, never mutated by callers). Appended by
- * `nativeBrowserLaunchArgs` when stealth is enabled; the runtime builder works
- * on a fresh copy so this shared array stays pristine for the default-args test.
+ * No identity or automation-evasion flags are supported. The constant remains
+ * exported for source compatibility with callers that inspect launch options.
  */
 export const STEALTH_BASELINE_ARGS: readonly string[] = [
-  "--disable-blink-features=AutomationControlled", // hide navigator.webdriver at the C++ source
 ];
 
 /**
@@ -40,75 +36,13 @@ export function buildStealthInitScript(
   const { width, height } = profile.viewport;
   const applyViewport = options.applyViewport === true;
 
-  const head = `
-  // ---- shared helpers (ported, minimal) ----
-  function makeNativeString(fnName) {
-    return 'function ' + fnName + '() { [native code] }';
-  }
-  function patchToString(target, fnStr) {
-    try {
-      Object.defineProperty(target, 'toString', {
-        configurable: true,
-        writable: true,
-        value: function toString() { return fnStr; }
-      });
-    } catch (e) {}
-  }
-  function stripProxyFromErrors(fn) {
-    try {
-      return new Proxy(fn, {
-        apply: function applyTrap(target, thisArg, args) {
-          try { return Reflect.apply(target, thisArg, args); }
-          catch (e) { throw e; }
-        }
-      });
-    } catch (e) { return fn; }
-  }
-
-  // ---- supported runtime values (only explicit configuration is interpolated) ----
+  const source = `
+  // Only an explicitly configured viewport is applied. Browser identity and
+  // native automation signals remain untouched.
   var APPLY_VIEWPORT = ${String(applyViewport)};
   var VIEWPORT = { width: ${width}, height: ${height} };`;
 
-  const balanced = `
-  // 1. navigator.webdriver — belt-and-suspenders (the launch flag is primary).
-  try {
-    var navProto = Object.getPrototypeOf(navigator);
-    if (navProto && Object.prototype.hasOwnProperty.call(navProto, 'webdriver')) {
-      delete navProto.webdriver;
-    }
-  } catch (e) {}
-
-  // 2. navigator.permissions.query — resolve the "impossible combination".
-  try {
-    if (navigator.permissions && typeof navigator.permissions.query === 'function') {
-      var perms = navigator.permissions;
-      var originalQuery = perms.query.bind(perms);
-      perms.query = function (query) {
-        if (query && query.name === 'notifications' &&
-            window.location && window.location.protocol !== 'https:') {
-          try {
-            if (typeof PermissionStatus !== 'undefined') {
-              return Promise.resolve(new PermissionStatus({ state: 'denied' }));
-            }
-          } catch (e) {}
-        }
-        return originalQuery(query);
-      };
-    }
-  } catch (e) {}
-
-  // 3. toString / Proxy trace hiding — the patched getters hide themselves.
-  try {
-    if (navigator.permissions && typeof navigator.permissions.query === 'function') {
-      var hiddenQuery = stripProxyFromErrors(navigator.permissions.query);
-      patchToString(hiddenQuery, makeNativeString('query'));
-      navigator.permissions.query = hiddenQuery;
-    }
-  } catch (e) {}
-
-  // Coherence: screen dimensions track an explicitly configured launch
-  // viewport (guarded, best-effort). Without that explicit input, leave the
-  // browser's real dimensions untouched.
+  const viewport = `
   try {
     if (APPLY_VIEWPORT && window && typeof window.innerWidth === 'number') {
       Object.defineProperty(window, 'innerWidth', {
@@ -120,5 +54,5 @@ export function buildStealthInitScript(
     }
   } catch (e) {}`;
 
-  return `(function () {\n${head}\n${balanced}\n})();\n`;
+  return `(function () {\n${source}\n${viewport}\n})();\n`;
 }

@@ -24,7 +24,7 @@ git clone https://github.com/Gitshop77/Smooth-Operator.git && cd Smooth-Operator
 
 The npm registry name is `smooth-operator-mcp` (plain `smooth-operator` is an unrelated library).
 
-Wizard (default): exactly 3 prompts — browser profile ownership, browser display, and the Chromium executable. Choices are normalized and validated before persistence. Personal-Chrome mode launches `chrome --remote-debugging-port=9222 --user-data-dir=~/.smooth-operator/personal-chrome`, polls `http://127.0.0.1:9222/json/version` (300ms×33), and derives `browserUrl`; the URL is not a prompt. `--yes` uses defaults: managed, headed, page eval on, balanced stealth, and short behavioral timing. Persists to `~/.smooth-operator/config.json` (0600, owner-only, bounded, symlink-safe, and backed up). Bare `smooth-operator install` prompts for the harness on a TTY (piped/CI prints usage); managed mode owns one private persistent profile, while connected mode launches and attaches to a dedicated debugging profile rather than an operator's daily browser.
+Wizard (default): exactly 3 prompts — browser profile ownership, browser display, and the Chromium executable. Choices are normalized and validated before persistence. Personal-Chrome mode launches `chrome --remote-debugging-port=9222 --user-data-dir=~/.smooth-operator/personal-chrome`, polls `http://127.0.0.1:9222/json/version` (300ms×33), and derives `browserUrl`; the URL is not a prompt. `--yes` uses defaults: managed, headed, page eval on, native-identity compatibility, and deterministic input. Persists to `~/.smooth-operator/config.json` (0600, owner-only, bounded, symlink-safe, and backed up). Bare `smooth-operator install` prompts for the harness on a TTY (piped/CI prints usage); managed mode owns one private persistent profile, while connected mode launches and attaches to a dedicated debugging profile rather than an operator's daily browser.
 
 ## Browser
 
@@ -37,9 +37,11 @@ Private Chromium-based browser (headed by default) on first tool call. Auto-disc
 - **Disabled:** `SMOOTH_OPERATOR_BROWSER_MODE=disabled`
 
 All local browser tools and features are available by default, including page
-eval and the balanced stealth/short-behavior profile. Set
-`SMOOTH_OPERATOR_ALLOW_EVAL=false`, `SMOOTH_OPERATOR_STEALTH_ENABLED=false`, or
-`SMOOTH_OPERATOR_BEHAVIOR_ENABLED=false` for a stricter/faster profile;
+eval and the identity-preserving compatibility profile. Behavioral timing is
+off for the fastest deterministic path. Set
+`SMOOTH_OPERATOR_ALLOW_EVAL=false` or `SMOOTH_OPERATOR_STEALTH_ENABLED=false`
+to disable those features. Set `SMOOTH_OPERATOR_BEHAVIOR_ENABLED=true` only
+when timing wrappers are needed;
 challenge handling remains evidence-first and is documented in
 `docs/STEALTH-GUIDE.md`.
 
@@ -90,10 +92,10 @@ Env or `--config` JSON (`chmod 600`, no symlinks).
 | SMOOTH_OPERATOR_ALLOWED_FILE_ROOTS | files/downloads | file roots |
 | SMOOTH_OPERATOR_ALLOW_PRIVATE_NETWORK | false | private targets |
 | SMOOTH_OPERATOR_ALLOW_EVAL | true | Set false to disable page JS |
-| SMOOTH_OPERATOR_STEALTH_ENABLED | true | Set false to preserve raw automation signals |
+| SMOOTH_OPERATOR_STEALTH_ENABLED | true | compatibility script; identity/signals remain native |
 | SMOOTH_OPERATOR_STEALTH_PROFILE | balanced | accepted profile name |
 | SMOOTH_OPERATOR_STEALTH_GPU | false | opt-in GPU flags |
-| SMOOTH_OPERATOR_BEHAVIOR_ENABLED | true | Set false for fastest raw interactions |
+| SMOOTH_OPERATOR_BEHAVIOR_ENABLED | false | opt-in timing wrappers |
 | SMOOTH_OPERATOR_HTTP_HOST | 127.0.0.1 | HTTP bind host |
 | SMOOTH_OPERATOR_HTTP_PORT | 3344 | HTTP bind port |
 | SMOOTH_OPERATOR_HTTP_PATH | /mcp | HTTP endpoint path |

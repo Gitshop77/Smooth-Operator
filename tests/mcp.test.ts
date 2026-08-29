@@ -48,7 +48,7 @@ const CLOSED_WORLD_TOOLS = new Set(["server_health", "browser_doctor", "browser_
 describe("native MCP registry", () => {
   it("publishes observe-act-verify guidance for connected-AI challenge handling", () => {
     expect(MCP_INSTRUCTIONS).toContain("observe -> act -> verify");
-    expect(MCP_INSTRUCTIONS).toContain("final classification explicitly reports it absent");
+    expect(MCP_INSTRUCTIONS).toContain("final classification explicitly reports the challenge absent");
     expect(MCP_INSTRUCTIONS).toContain("internal connected-AI loop");
   });
 
