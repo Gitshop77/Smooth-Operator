@@ -30,6 +30,7 @@ import {
   WaitForTextRequestSchema,
   WaitForUrlRequestSchema,
   WaitForHumanRequestSchema,
+  SolveChallengeRequestSchema,
   WaitRequestSchema,
   type BrowserAction,
 } from "./contracts";
@@ -255,7 +256,7 @@ const MCP_INSTRUCTIONS = [
   "Prefer stable refs, indexes, and selectors over coordinates; use coordinates only when the page cannot expose a reliable target.",
   "For open shadow roots, Puppeteer pierce/ selectors may be used explicitly; closed shadow roots remain unavailable.",
   "Use browser_batch for short validated sequences, but keep destructive actions separate when user confirmation is needed.",
-  "The server does not solve or bypass CAPTCHA/anti-bot challenges. Use browser_challenge and ask the user for a human-only step when necessary.",
+  "CAPTCHA handling is opt-in: stealth + human-in-the-loop by default; an optional solver can be enabled via config. Use browser_challenge to detect, browser_wait_for_human for human takeover, and browser_solve_challenge only when a solver is configured.",
   "The server contains no LLM or agent planner; the MCP client is responsible for reasoning, retries, and task completion.",
 ].join(" ");
 
@@ -419,8 +420,9 @@ function registerBrowserTools(server: McpServer, runtime: ServerRuntime): void {
   registerAction(server, runtime, "browser_hover", "Hover an element", "Move the pointer over a CSS selector or snapshot ref.", TargetRequestSchema, "hover");
   registerAction(server, runtime, "browser_move", "Move the pointer", "Move the pointer to bounded top-level viewport coordinates without clicking. Use this to inspect hover-driven UI before choosing a click point.", MoveRequestSchema, "move", (input) => ({ ...input, coordinateX: input.coordinateX ?? input.coordinate_x, coordinateY: input.coordinateY ?? input.coordinate_y }));
   registerAction(server, runtime, "browser_press_and_hold", "Press and hold or drag", "Press a mouse button on an element for a bounded duration. Optional startCoordinateX/startCoordinateY and endCoordinateX/endCoordinateY drag with interpolated mouse events; path supplies a bounded explicit pointer path for drawing or selection gestures.", HoldRequestSchema, "press_and_hold");
-  registerAction(server, runtime, "browser_challenge", "Detect a web challenge", "Detect common CAPTCHA and anti-bot challenge markers without attempting to bypass them.", EmptyInputSchema, "detect_challenge");
-  registerAction(server, runtime, "browser_wait_for_human", "Wait for human takeover", "Wait for a user to complete a visible challenge or sign-in step in the browser. This tool never solves or bypasses challenges.", WaitForHumanRequestSchema, "wait_for_human");
+  registerAction(server, runtime, "browser_challenge", "Detect a web challenge", "Detect common CAPTCHA and anti-bot challenge markers. Solving is opt-in: use browser_solve_challenge (when a solver is configured) or browser_wait_for_human for a human-only step.", EmptyInputSchema, "detect_challenge");
+  registerAction(server, runtime, "browser_wait_for_human", "Wait for human takeover", "Wait for a user to complete a visible challenge or sign-in step in the browser. Solving is opt-in via browser_solve_challenge; this tool performs no solving.", WaitForHumanRequestSchema, "wait_for_human");
+  registerAction(server, runtime, "browser_solve_challenge", "Solve a web challenge", "Attempt to solve a detected CAPTCHA or anti-bot challenge via an opt-in solver service (capsolver, 2captcha, or anticaptcha) when configured. Falls back to human-in-the-loop when no solver is configured or the challenge is unsupported; the result reports `bypassAttempted`.", SolveChallengeRequestSchema, "solve_challenge");
 
   registerAction(server, runtime, "browser_evaluate", "Evaluate page JavaScript", "Run page JavaScript given either a code or expression argument, only when the explicit eval gate is enabled; output is redacted and bounded.", EvaluateRequestSchema, "evaluate");
   server.registerTool(
@@ -512,6 +514,7 @@ function actionAnnotations(action: BrowserAction["action"]): ToolAnnotations {
     case "get_storage":
       return BROWSER_READ_ONLY;
     case "navigate":
+    case "solve_challenge":
       return BROWSER_MUTATING;
     case "evaluate":
       return BROWSER_DESTRUCTIVE;

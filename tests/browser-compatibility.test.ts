@@ -34,4 +34,38 @@ describe("native browser compatibility profile", () => {
     expect(args).not.toContain("--disable-web-security");
     expect(args).not.toContain("--no-sandbox");
   });
+
+  it("appends the stealth baseline only when enabled", () => {
+    const args = nativeBrowserLaunchArgs({ enabled: true });
+    expect(args).toContain("--disable-blink-features=AutomationControlled");
+    expect(args).toContain("--lang=en-US");
+    expect(args).toContain("--window-size=1920,1080");
+  });
+
+  it("appends GPU flags only when enabled and gpu is requested", () => {
+    const enabledOnly = nativeBrowserLaunchArgs({ enabled: true });
+    expect(enabledOnly).not.toContain("--use-angle=vulkan");
+    expect(enabledOnly).not.toContain("--enable-vulkan");
+
+    const withGpu = nativeBrowserLaunchArgs({ enabled: true, gpu: true });
+    expect(withGpu).toContain("--use-angle=vulkan");
+    expect(withGpu).toContain("--enable-vulkan");
+  });
+
+  it("dedups stealth flags by --key (exactly one --lang entry)", () => {
+    const args = nativeBrowserLaunchArgs({ enabled: true });
+    const langFlags = args.filter((a) => a.split("=")[0] === "--lang");
+    expect(langFlags).toHaveLength(1);
+    expect(langFlags[0]).toBe("--lang=en-US");
+  });
+
+  it("returns a fresh array per call and never mutates the shared set", () => {
+    const a = nativeBrowserLaunchArgs({ enabled: true });
+    expect(a).not.toBe(NATIVE_BROWSER_LAUNCH_ARGS);
+    expect(a).not.toBe(nativeBrowserLaunchArgs({ enabled: true }));
+
+    a.push("--test-only");
+    expect(nativeBrowserLaunchArgs({ enabled: true })).not.toContain("--test-only");
+    expect([...NATIVE_BROWSER_LAUNCH_ARGS]).not.toContain("--test-only");
+  });
 });

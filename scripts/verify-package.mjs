@@ -84,10 +84,18 @@ async function main() {
     if (install) {
       const installDirectory = await mkdtemp(join(tmpdir(), "smooth-operator-package-install-"));
       try {
+        // `npm run` propagates `npm_config_allow_scripts` (from the global
+        // .npmrc) into the child env as NPM_CONFIG_ALLOW_SCRIPTS; npm 11
+        // rejects a project-scoped install when allow-scripts is set via
+        // cli/env, so strip it to keep the smoke install deterministic.
+        const installEnv = { ...process.env };
+        delete installEnv.NPM_CONFIG_ALLOW_SCRIPTS;
+        delete installEnv.npm_config_allow_scripts;
         await execFileAsync(npmCommand, ["install", "--ignore-scripts", "--no-audit", "--no-fund", "--package-lock=false", "--prefix", installDirectory, tarball], {
           cwd: installDirectory,
           maxBuffer: 2_000_000,
           timeout: 180_000,
+          env: installEnv,
         });
         const binary = join(installDirectory, "node_modules", ".bin", process.platform === "win32" ? "smooth-operator.cmd" : "smooth-operator");
         const version = await execFileAsync(binary, ["--version"], { cwd: installDirectory, timeout: 30_000 });

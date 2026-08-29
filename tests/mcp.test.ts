@@ -58,7 +58,7 @@ describe("native MCP registry", () => {
     const resourceTemplates = await client.listResourceTemplates();
     const prompts = await client.listPrompts();
 
-    expect(tools.tools).toHaveLength(60);
+    expect(tools.tools).toHaveLength(61);
     expect(resources.resources).toHaveLength(6);
     expect(resourceTemplates.resourceTemplates).toHaveLength(1);
     expect(prompts.prompts).toHaveLength(4);
@@ -113,7 +113,9 @@ describe("native MCP registry", () => {
     const schemaText = [...toolByName.values()].map((tool) => JSON.stringify(tool.inputSchema)).join("\n");
     expect(schemaText).not.toContain('"mode"');
     expect(schemaText).not.toContain('"model"');
-    expect(schemaText).not.toContain('"provider"');
+    // `provider` is now a first-class solve_challenge solver field, so it is no
+    // longer forbidden in the raw schema; the per-request override guard lives
+    // in contracts.test against actions that do not accept it.
     expect(schemaText).not.toContain('"allowed_domains"');
     expect(schemaText).not.toContain('"allowedDomains"');
     expect(schemaText).not.toContain('"use_vision"');
@@ -142,6 +144,8 @@ describe("native MCP registry", () => {
     expect(toolByName.get("browser_find_text")?.annotations?.openWorldHint).toBe(true);
     expect(toolByName.get("browser_type")?.annotations?.readOnlyHint).not.toBe(true);
     expect(toolByName.get("browser_type")?.annotations?.openWorldHint).toBe(true);
+    expect(toolByName.get("browser_solve_challenge")?.annotations?.readOnlyHint).toBe(false);
+    expect(toolByName.get("browser_solve_challenge")?.annotations?.openWorldHint).toBe(true);
     expect(toolByName.get("web_search")?.annotations?.openWorldHint).toBe(true);
     for (const name of ["browser_network_log", "browser_console_log", "browser_cookies", "browser_storage", "browser_evaluate", "browser_batch", "browser_exec"]) {
       expect(toolByName.get(name)?.annotations?.destructiveHint, `${name} must advertise destructive capability`).toBe(true);
@@ -161,6 +165,9 @@ describe("native MCP registry", () => {
     const rejectedOverride = await client.callTool({ name: "browser_evaluate", arguments: { code: "1 + 1", mode: "full" } });
     expect(rejectedOverride.isError).toBe(true);
     expect(JSON.stringify(rejectedOverride)).toContain("Unrecognized key");
+    const solverStrict = await client.callTool({ name: "browser_solve_challenge", arguments: { pageId: "x", __smooth_operator_invalid_field__: true } });
+    expect(solverStrict.isError).toBe(true);
+    expect(JSON.stringify(solverStrict)).toContain("Unrecognized key");
     const denied = await client.callTool({ name: "browser_evaluate", arguments: { code: "1 + 1" } });
     expect(denied.isError).toBe(true);
     expect(JSON.stringify(denied)).toContain("EVALUATE_DISABLED");
@@ -224,6 +231,7 @@ describe("native MCP registry", () => {
       ["browser_press_and_hold", { target: "#x", durationMs: 10 }],
       ["browser_challenge", {}], ["browser_evaluate", { code: "1 + 1" }],
       ["browser_wait_for_human", { timeoutMs: 500 }],
+      ["browser_solve_challenge", { pageId: "missing" }],
       ["browser_exec", { code: JSON.stringify([{ action: "wait", milliseconds: 0 }]) }],
       ["browser_batch", { actions: [{ action: "wait", milliseconds: 0 }] }],
       ["browser_dialog", { operation: "get_text" }], ["browser_cookies", { operation: "get" }], ["browser_storage", { operation: "get" }],

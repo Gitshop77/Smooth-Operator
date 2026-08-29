@@ -22,9 +22,13 @@ import { BrowserActionPlanSchema, isDestructiveBatchAction, type BrowserAction }
 import { Logger, redactValue } from "../logger";
 import { SecurityPolicy } from "../policy";
 import { redactSecretPlaceholders, wrapUntrustedText } from "../security";
-import { classifyChallenge } from "./challenges";
+import { humanMouseMove, humanType } from "./behavior";
+import { classifyChallenge, type ChallengeKind } from "./challenges";
 import { nativeBrowserLaunchArgs } from "./compatibility";
 import { chromeExecutableSearchPaths, findChromeExecutable } from "./discovery";
+import { buildFingerprintProfile } from "./fingerprints";
+import { buildSolver, type SolveRequest, type SolveResult } from "./solver";
+import { buildStealthInitScript } from "./stealth";
 import { globMatches, sanitizeUrl as safeUrl } from "./utils";
 
 interface BrowserTab {
@@ -171,6 +175,7 @@ interface PageState {
   downloadConfigured: boolean;
   downloadConfigurationError?: AppError;
   navigationGuardInstalled: boolean;
+  stealthInjected: boolean;
   networkRequestListener?: (request: HTTPRequest) => void;
   networkResponseListener?: (response: HTTPResponse) => void;
   consoleListener?: (message: ConsoleMessage) => void;
@@ -339,6 +344,13 @@ const DOM_MUTATING_ACTIONS = new Set<BrowserAction["action"]>([
 const PARALLEL_READ_ACTIONS = new Set<BrowserAction["action"]>([
   "wait", "wait_for_element", "wait_for_text", "wait_for_url", "wait_for_network_idle",
   "get_network_log", "get_console_log", "extract", "get_html", "dropdown_options", "page_next", "search_page", "find_elements", "list_frames", "accessibility_snapshot", "get_computed_style", "get_page_info", "get_cookies", "get_storage", "list_downloads",
+]);
+
+// Kinds that carry a human-like score (reCAPTCHA v3, non-interactive Turnstile).
+// Mirrors solver.ts's SCORE_CAPABLE_KINDS, which is not exported; kept local so
+// the solver layer stays untouched while the request is scored correctly.
+const SCORE_CAPABLE_KINDS: ReadonlySet<ChallengeKind> = new Set<ChallengeKind>([
+  "recaptcha", "recaptcha-enterprise", "cloudflare-turnstile", "openai-turnstile",
 ]);
 
 export class BrowserService {
@@ -1004,7 +1016,17 @@ export class BrowserService {
     // cancelled) after `timeoutMs`. Give the operation lock a buffer so a
     // borderline-slow challenge probe cannot abort it with BROWSER_TIMEOUT
     // before the internal deadline elapses and returns a status object.
-    const budgetMs = action.action === "wait_for_human" ? timeoutMs + 5_000 : timeoutMs;
+    // solve_challenge runs the CAPTCHA solver's own polling window inside the
+    // lock (solver.solve receives operationSignal); cap it on the solver's
+    // timeout (default 120s) so legitimate solves are not cut off by the
+    // default 15s action deadline, with a trailing buffer mirroring
+    // wait_for_human.
+    const solverTimeoutMs = this.config.captchaSolver?.timeoutMs ?? 0;
+    const budgetMs = action.action === "wait_for_human"
+      ? timeoutMs + 5_000
+      : action.action === "solve_challenge"
+        ? Math.max(timeoutMs + 5_000, solverTimeoutMs) + 5_000
+        : timeoutMs;
     return this.withOperationLock(signal, async (operationSignal) => {
       let result: unknown;
       let snapshotInvalidated = false;
@@ -2710,6 +2732,8 @@ export class BrowserService {
         return this.detectChallenge(state, signal);
       case "wait_for_human":
         return this.waitForHuman(state, action.timeoutMs ?? 120_000, action.pollMs ?? 1_000, signal);
+      case "solve_challenge":
+        return this.solveChallenge(state, action, signal);
       case "get_cookies": {
         const cookies = await page.cookies();
         return cookies.slice(0, 200).map((cookie) => ({
@@ -2957,6 +2981,19 @@ export class BrowserService {
     return browser;
   }
 
+  // The `stealth` config section is OPTIONAL and absent unless the user enables
+  // it, so read it with safe defaults. Mirrors the plan's `config.stealth`
+  // shape but tolerates the absent-by-default case.
+  private stealthSettings(): { enabled: boolean; profile: "balanced" | "max"; gpu: boolean; behaviorEnabled: boolean } {
+    const s = this.config.stealth;
+    return {
+      enabled: s?.enabled ?? false,
+      profile: s?.profile ?? "balanced",
+      gpu: s?.gpu ?? false,
+      behaviorEnabled: s?.behaviorEnabled ?? s?.enabled ?? false,
+    };
+  }
+
   private async connectBrowser(generation: number): Promise<Browser> {
     if (this.connectionSettlementPromise) {
       const settling = this.connectionSettlementPromise;
@@ -2983,10 +3020,10 @@ export class BrowserService {
             throw new AppError("BROWSER_NOT_CONFIGURED", `Managed browser mode could not find Chrome. Checked: ${chromeExecutableSearchPaths().join(", ")}. Install Chrome or set SMOOTH_OPERATOR_BROWSER_EXECUTABLE.`);
           }
           connection = this.launch({
-            headless: this.config.browser.headless,
+            headless: this.stealthSettings().enabled ? true : this.config.browser.headless,
             executablePath,
             userDataDir: this.config.browser.userDataDir,
-            args: nativeBrowserLaunchArgs(),
+            args: nativeBrowserLaunchArgs({ enabled: this.stealthSettings().enabled, gpu: this.stealthSettings().gpu }),
             timeout: this.config.browser.connectTimeoutMs,
             protocolTimeout: this.config.browser.cdpTimeoutMs,
           });
@@ -2997,10 +3034,10 @@ export class BrowserService {
         }
         ownsBrowser = true;
         connection = this.launch({
-          headless: this.config.browser.headless,
+          headless: this.stealthSettings().enabled ? true : this.config.browser.headless,
           executablePath: this.config.browser.executablePath,
           userDataDir: this.config.browser.userDataDir,
-          args: nativeBrowserLaunchArgs(),
+          args: nativeBrowserLaunchArgs({ enabled: this.stealthSettings().enabled, gpu: this.stealthSettings().gpu }),
           timeout: this.config.browser.connectTimeoutMs,
           protocolTimeout: this.config.browser.cdpTimeoutMs,
         });
@@ -3979,6 +4016,22 @@ export class BrowserService {
         throw new AppError("BROWSER_GUARD_FAILED", "The browser navigation policy could not be installed.", { retryable: true, cause: error });
       }
     }
+    // Stealth fingerprint bundle: inject once per page behind a one-shot guard,
+    // mirroring the navigation-guard block above. `evaluateOnNewDocument` runs
+    // in the main world before page scripts, so a single CDP call covers every
+    // document/iframe the page creates. Gated on the opt-in master switch; the
+    // default path performs a single boolean read and no CDP call.
+    const stealth = this.stealthSettings();
+    if (stealth.enabled && !state.stealthInjected) {
+      try {
+        const source = buildStealthInitScript(buildFingerprintProfile({ profile: stealth.profile }), { max: stealth.profile === "max" });
+        await state.page.evaluateOnNewDocument(source);
+        state.stealthInjected = true;
+      } catch (error) {
+        throwIfAborted(signal);
+        throw new AppError("STEALTH_INITIALIZATION_FAILED", "The stealth fingerprint init script could not be injected.", { retryable: true, cause: error });
+      }
+    }
     // Pages that existed before the browser connection was fully wired do not
     // receive a targetcreated callback. Release their initial CDP pause only
     // after page-level request interception is ready, just as for new pages.
@@ -4072,7 +4125,7 @@ export class BrowserService {
       }
       this.ids.delete(page);
     }
-    const state: PageState = { id: randomUUID(), page, lifecycleGeneration: this.lifecycleGeneration, disposed: false, refs: new Map(), domRevision: 0, networkEnabled: false, consoleEnabled: false, network: [], console: [], dialogs: [], listenersInstalled: false, timeoutsConfigured: false, viewportConfigured: false, downloadConfigured: false, navigationGuardInstalled: false, navigationGeneration: 0, policyVerifiedUrls: new Set(), challengeActive: false };
+    const state: PageState = { id: randomUUID(), page, lifecycleGeneration: this.lifecycleGeneration, disposed: false, refs: new Map(), domRevision: 0, networkEnabled: false, consoleEnabled: false, network: [], console: [], dialogs: [], listenersInstalled: false, timeoutsConfigured: false, viewportConfigured: false, downloadConfigured: false, navigationGuardInstalled: false, stealthInjected: false, navigationGeneration: 0, policyVerifiedUrls: new Set(), challengeActive: false };
     this.ids.set(page, state.id);
     this.states.set(state.id, state);
     this.installListeners(state);
@@ -4867,6 +4920,19 @@ export class BrowserService {
     });
   }
 
+  private async humanMoveToCenter(state: PageState, centerX: number, centerY: number, signal?: AbortSignal): Promise<void> {
+    if (!this.stealthSettings().behaviorEnabled) return;
+    if (!Number.isFinite(centerX) || !Number.isFinite(centerY)) return;
+    throwIfAborted(signal);
+    try {
+      // A failed pre-move is not a click failure — a failed hover must not
+      // fail the click itself, so keep it defensive and swallowed.
+      await humanMouseMove(state.page, 0, 0, centerX, centerY, 300);
+    } catch {
+      // Ignore: fall through to the normal click primitive.
+    }
+  }
+
   private async clickTarget(state: PageState, target: string, button: "left" | "middle" | "right", clickCount: number, signal?: AbortSignal, frame: Frame = state.page.mainFrame(), pointerType: "mouse" | "touch" = "mouse"): Promise<ClickMonitorResult> {
     let selector: string | undefined;
     let clickDescriptor: (ClickDescriptor & { href?: string; rect: { x: number; y: number; width: number; height: number } }) | undefined;
@@ -4898,6 +4964,7 @@ export class BrowserService {
       if (clickDescriptor.href) {
         await this.assertNavigationUrl(frame.url() || state.page.url(), clickDescriptor.href);
       }
+      await this.humanMoveToCenter(state, clickDescriptor.rect.x + clickDescriptor.rect.width / 2, clickDescriptor.rect.y + clickDescriptor.rect.height / 2, signal);
       return this.clickElement(state, frame, selector, button, clickCount, signal, Boolean(clickDescriptor.href), /^e\d+$/.test(ref) ? normalizedTarget : undefined, pointerType);
     }
     if (button !== "left") {
@@ -5033,6 +5100,11 @@ export class BrowserService {
       if (targetDescriptor.href) {
         await this.assertNavigationUrl(frame.url() || state.page.url(), targetDescriptor.href);
       }
+      const clickCenter = await clickable.evaluate((element) => {
+        const rect = (element as HTMLElement).getBoundingClientRect();
+        return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+      }).catch(() => undefined);
+      await this.humanMoveToCenter(state, clickCenter?.x ?? Number.NaN, clickCenter?.y ?? Number.NaN, signal);
       const monitor = await this.runClickAndMonitor(state.page, async () => {
         if (pointerType === "touch") {
           if (frame !== state.page.mainFrame()) {
@@ -5442,7 +5514,11 @@ export class BrowserService {
       }
       if (!nativeControlValueSet) {
         throwIfAborted(signal);
-        await state.page.keyboard.type(text);
+        if (this.stealthSettings().behaviorEnabled) {
+          await humanType(state.page, text);
+        } else {
+          await state.page.keyboard.type(text);
+        }
       }
       throwIfAborted(signal);
       if (!verify) {
@@ -5919,6 +5995,107 @@ export class BrowserService {
       await wait(Math.min(boundedPollMs, remaining), signal);
     }
     return { status: "timed_out", resolution: "timeout", pageId: state.id, waitedMs: Math.max(0, Date.now() - startedAt), initial, final: last };
+  }
+
+  /**
+   * Opt-in CAPTCHA solver hook. Runs the configured solver when a challenge is
+   * present and supported, injects the returned token, re-fires the callback,
+   * and re-detects. `bypassAttempted` is `true` only when a solver actually
+   * ran (plan §6.5); `detectChallenge` stays a pure detector.
+   */
+  private async solveChallenge(state: PageState, action: BrowserAction, signal?: AbortSignal): Promise<unknown> {
+    throwIfAborted(signal);
+    // No provider/API key → graceful human-in-the-loop fallback (no solver ran).
+    const solver = buildSolver(this.config, this.logger);
+    if (!solver) {
+      const detection = await this.detectChallenge(state, signal);
+      return { solved: false, resolution: "no_solver_configured", bypassAttempted: false, pageId: state.id, classification: detection };
+    }
+    // Detect the current challenge before attempting anything.
+    const detection = await this.detectChallenge(state, signal);
+    if (!isChallengePresent(detection)) {
+      return { solved: false, resolution: "no_challenge", bypassAttempted: false, pageId: state.id, classification: detection };
+    }
+    const kind = challengeKindFrom(detection);
+    if (!kind) {
+      return { solved: false, resolution: "challenge_kind_unknown", bypassAttempted: false, pageId: state.id, classification: detection };
+    }
+    if (!solver.supports(kind, SCORE_CAPABLE_KINDS.has(kind))) {
+      return { solved: false, resolution: "solver_unsupported", bypassAttempted: false, pageId: state.id, provider: solver.name, kind, classification: detection };
+    }
+    const sitekey = await this.extractSiteKey(state, detection, signal);
+    const req: SolveRequest = {
+      sitekey,
+      pageurl: state.page.url(),
+      kind,
+      scoreBased: SCORE_CAPABLE_KINDS.has(kind),
+      proxyUrl: this.config.captchaSolver?.proxyUrl,
+    };
+    let result: SolveResult;
+    try {
+      result = await solver.solve(req, signal ?? new AbortController().signal);
+    } catch (error) {
+      // The solver WAS attempted → honest reporting even on failure.
+      return { solved: false, resolution: "solver_failed", bypassAttempted: true, pageId: state.id, provider: solver.name, kind, error: describeSolverError(error), classification: detection };
+    }
+    try {
+      await this.injectSolverToken(state, result, signal);
+    } catch (error) {
+      return { solved: false, resolution: "injection_failed", bypassAttempted: true, pageId: state.id, provider: solver.name, kind, error: describeSolverError(error), classification: detection };
+    }
+    // Refresh refs, then re-detect with a fresh probe to confirm the outcome.
+    this.assertSnapshotForAction(state, action);
+    throwIfAborted(signal);
+    const finalDetection = await this.detectChallenge(state, signal);
+    const cleared = isChallengeAbsent(finalDetection);
+    return {
+      solved: cleared,
+      resolution: cleared ? "challenge_cleared" : "challenge_persisted",
+      bypassAttempted: true,
+      pageId: state.id,
+      provider: solver.name,
+      kind,
+      classification: finalDetection,
+    };
+  }
+
+  /** Probe the first `data-sitekey` in a bounded way for the solve request. */
+  private async extractSiteKey(state: PageState, detection: unknown, signal?: AbortSignal): Promise<string | undefined> {
+    const inline = extractSiteKeyFromMarkup(detection);
+    if (inline) return inline;
+    try {
+      return await awaitWithAbort(state.page.evaluate(() => {
+        const element = document.querySelector("[data-sitekey]") as HTMLElement | null;
+        return element ? (element.getAttribute("data-sitekey") ?? "").slice(0, 1_000) : "";
+      }), signal);
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Best-effort token injection + callback re-fire; never throws out of evaluate. */
+  private async injectSolverToken(state: PageState, result: SolveResult, signal?: AbortSignal): Promise<void> {
+    throwIfAborted(signal);
+    await awaitWithAbort(state.page.evaluate((payload: { token: string; field: string; reFireEvent?: string }) => {
+      let injected = false;
+      try {
+        const widget = document.querySelector("[data-sitekey]") as unknown as Record<string, unknown> | null;
+        if (widget) {
+          widget[payload.field] = payload.token;
+          injected = true;
+        }
+        const win = window as unknown as Record<string, unknown>;
+        if (!injected && !(payload.field in win)) {
+          win[payload.field] = payload.token;
+        }
+        if (typeof payload.reFireEvent === "string" && typeof win[payload.reFireEvent] === "function") {
+          (win[payload.reFireEvent] as () => unknown)();
+        }
+      } catch {
+        // Injection is best-effort; a hostile page must never throw out of evaluate.
+      }
+      return injected;
+    }, { token: result.token, field: result.fieldSelector, reFireEvent: result.reFireEvent }), signal);
   }
 
   private async listDownloads(signal?: AbortSignal): Promise<unknown> {
@@ -6766,8 +6943,48 @@ function isChallengeAbsent(value: unknown): boolean {
   return Boolean(value && typeof value === "object" && "status" in value && (value as { status?: unknown }).status === "absent");
 }
 
+function isChallengePresent(value: unknown): boolean {
+  return Boolean(value && typeof value === "object" && "status" in value && (value as { status?: unknown }).status === "present");
+}
+
 function isChallengeUnknown(value: unknown): boolean {
   return Boolean(value && typeof value === "object" && "status" in value && (value as { status?: unknown }).status === "unknown");
+}
+
+function challengeKindFrom(value: unknown): ChallengeKind | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const matches = (value as { matches?: unknown }).matches;
+  if (!Array.isArray(matches) || matches.length === 0) return undefined;
+  const first = matches[0] as { kind?: unknown };
+  return typeof first?.kind === "string" ? (first.kind as ChallengeKind) : undefined;
+}
+
+/**
+ * Scan classification markup (if present) for the first `data-sitekey`. The
+ * detector does not expose markup, so this prefers inline markup when present
+ * and lets the caller fall back to a bounded live-DOM probe when it is not.
+ */
+function extractSiteKeyFromMarkup(value: unknown): string | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const candidate = value as { html?: string; visibleMarkers?: unknown };
+  const haystacks: string[] = [candidate.html].filter((html): html is string => typeof html === "string");
+  if (Array.isArray(candidate.visibleMarkers)) {
+    haystacks.push(...candidate.visibleMarkers.filter((marker): marker is string => typeof marker === "string"));
+  }
+  for (const haystack of haystacks) {
+    if (typeof haystack !== "string") continue;
+    const match = /data-sitekey\s*=\s*["']([^"']{1,1000})["']/i.exec(haystack);
+    if (match) return match[1].slice(0, 1_000);
+  }
+  return undefined;
+}
+
+function describeSolverError(error: unknown): string {
+  const appError = asAppError(error);
+  if (appError) {
+    return `${appError.code}: ${appError.message.slice(0, 500)}`;
+  }
+  return String(error ?? "").slice(0, 500);
 }
 
 function isChallengeBlockedAction(action: BrowserAction["action"]): boolean {

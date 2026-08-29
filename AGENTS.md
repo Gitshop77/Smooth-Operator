@@ -36,7 +36,7 @@ Headed private Chromium-based browser on first tool call. Auto-discovers an inst
 - **Launch:** `SMOOTH_OPERATOR_BROWSER_MODE=launch SMOOTH_OPERATOR_BROWSER_EXECUTABLE=/path/to/chrome`
 - **Disabled:** `SMOOTH_OPERATOR_BROWSER_MODE=disabled`
 
-No spoofing, no CAPTCHA bypass.
+By default no spoofing and no CAPTCHA bypass; both are opt-in (`SMOOTH_OPERATOR_STEALTH_ENABLED`, `SMOOTH_OPERATOR_CAPTCHA_SOLVER_*`) and documented in `STEALTH-GUIDE.md`.
 
 ## HTTP
 
@@ -50,7 +50,7 @@ Default `127.0.0.1:3344`. Remote needs `SMOOTH_OPERATOR_ALLOW_REMOTE_HTTP=true` 
 
 - **Observation:** `browser_snapshot`, `browser_tabs`, `browser_list_tabs`, `browser_list_sessions`, `browser_get_state`, `browser_page_info`, `browser_interactive`, `browser_frames`, `browser_accessibility_snapshot`, `browser_extract`, `browser_extract_content`, `browser_find_text`, `browser_search_page`, `browser_find_elements`, `browser_dropdown_options`, `browser_computed_style`, `browser_page_next`, `browser_get_html`, `browser_challenge`, `browser_doctor`, `server_health`
 - **Navigation/interaction:** `browser_navigate`, `browser_back`, `browser_go_back`, `browser_forward`, `browser_reload`, `browser_switch_tab`, `browser_close_tab`, `browser_click`, `browser_input`, `browser_select`, `browser_scroll`, `browser_scroll_to_bottom`, `browser_key`, `browser_wait`, `browser_wait_for_element`, `browser_wait_for_text`, `browser_wait_for_url`, `browser_wait_for_network_idle`, `browser_hover`, `browser_press_and_hold`, `browser_type`, `browser_close`, `browser_close_all`
-- **Gated:** `browser_screenshot`, `browser_pdf`, `browser_upload`, `browser_downloads`, `browser_network_log`, `browser_console_log`, `browser_dialog`, `browser_cookies`, `browser_storage`, `browser_evaluate` (off), `browser_batch`, `browser_exec` (JSON only), `browser_wait_for_human`, `browser_close_session`, `web_search`
+- **Gated:** `browser_screenshot`, `browser_pdf`, `browser_upload`, `browser_downloads`, `browser_network_log`, `browser_console_log`, `browser_dialog`, `browser_cookies`, `browser_storage`, `browser_evaluate` (off), `browser_batch`, `browser_exec` (JSON only), `browser_wait_for_human`, `browser_solve_challenge` (opt-in solver), `browser_close_session`, `web_search`
 
 All browser operations use bounded, cancellable queue/action deadlines. After an uncooperative timeout, the old browser lifecycle is retired before the queue advances. Snapshot refs are page/frame/revision-bound and must be refreshed after navigation or DOM-changing actions. Text, HTML, accessibility, links, and search outputs are bounded before serialization; truncated responses expose flags and omission counts. `web_search` accepts up to 10 results, uses a bounded aggregate text budget, normalizes queries, retries transient provider failures, and reports anti-bot blocks without bypassing them.
 
@@ -132,7 +132,7 @@ No model service.
 - Config files and backups are bounded, owner-only, regular, and symlink-safe.
 - Bounded, normalized, redacted, untrusted wrappers; result omission is explicit rather than silent.
 - Constant-time bearer check, JSON stderr, no secrets.
-- CAPTCHA report only, no bypass. `pierce/` for open shadow roots.
+- CAPTCHA is reported only by default; solving is opt-in via the configured solver, with honest `bypassAttempted` reporting. `pierce/` for open shadow roots.
 
 DNS is best-effort, not a firewall.
 

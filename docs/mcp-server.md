@@ -155,8 +155,10 @@ evaluating page content.
 
 The managed browser is headed by default for sign-in and human handoff. On CI or a
 displayless host, explicitly set `SMOOTH_OPERATOR_BROWSER_HEADLESS=true` or use
-Xvfb. The server never adds fingerprint spoofing, CAPTCHA solving, proxy
-rotation, or other evasion behavior.
+Xvfb. By default the server adds no fingerprint spoofing, CAPTCHA solving, proxy
+rotation, or other evasion behavior. These are opt-in: `SMOOTH_OPERATOR_STEALTH_ENABLED`
+turns on a stealth baseline + JS fingerprint bundle, and `SMOOTH_OPERATOR_CAPTCHA_SOLVER_*`
+enables an optional solver. See `STEALTH-GUIDE.md`.
 
 ### Managed mode (default)
 
@@ -354,15 +356,18 @@ individual descriptions and limits are returned by `tools/list`.
 `browser_upload`, `browser_downloads`, `browser_network_log`,
 `browser_console_log`, `browser_dialog`, `browser_cookies`,
 `browser_storage`, `browser_evaluate`, `browser_batch`,
-`browser_exec`, `browser_wait_for_human`, `browser_close_session`, and
-the explicit browser-session lifecycle controls.
+`browser_exec`, `browser_wait_for_human`, `browser_solve_challenge`,
+`browser_close_session`, and the explicit browser-session lifecycle controls.
 
 `browser_evaluate` is page JavaScript and is disabled by default. `browser_exec`
 accepts only a JSON array of validated browser actions; it is not a shell,
 Python, or arbitrary code runner. Destructive batch actions require explicit
 confirmation. `browser_wait_for_human` pauses for an operator to complete a
-visible sign-in or challenge, and `browser_close_session` closes the one
-native browser session by its explicit session identifier.
+visible sign-in or challenge, `browser_solve_challenge` attempts to solve a
+detected challenge via the opt-in solver service (configured with
+`SMOOTH_OPERATOR_CAPTCHA_SOLVER_*`) and falls back to human-in-the-loop
+otherwise, and `browser_close_session` closes the one native browser session by
+its explicit session identifier. Both challenge tools report `bypassAttempted`.
 
 Actions that leave a usable page—navigation, click, input, select, scroll, key,
 back, forward, and reload—accept optional `includeSnapshot: true`. The action
