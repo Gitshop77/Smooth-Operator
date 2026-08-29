@@ -1,5 +1,5 @@
 import { dirname, isAbsolute, join, parse, resolve, win32 } from "node:path";
-import { existsSync } from "node:fs";
+import { accessSync, constants, statSync } from "node:fs";
 import { chmod, lstat, rename, unlink, writeFile, type FileHandle } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isIP } from "node:net";
@@ -51,12 +51,16 @@ interface PersonalChromeOptions {
   port?: number;
   spawn?: SpawnFunction;
   probe: ProbeFunction;
-  /** Upper bound for the readiness poll loop. Defaults to 33 (~10s at 300ms). */
+  /** Upper bound for the readiness poll loop. Defaults to 33 attempts within a 10s deadline. */
   probeAttempts?: number;
 }
 
 const PROBE_INTERVAL_MS = 300;
+const PROBE_TIMEOUT_MS = 1_000;
 const DEFAULT_PROBE_ATTEMPTS = 33;
+const DEFAULT_PROBE_DEADLINE_MS = 10_000;
+const MAX_PROBE_ATTEMPTS = 100;
+const MAX_PROBE_RESPONSE_BYTES = 64 * 1024;
 const MAX_WIZARD_CONFIG_BYTES = 2_000_000;
 const HARNESS_MENU = [
   { id: "opencode", label: "OpenCode", description: "Configures ~/.config/opencode/opencode.json" },
@@ -84,6 +88,20 @@ function isAbsolutePath(value: string): boolean {
 
 function isFilesystemRoot(value: string): boolean {
   return (isAbsolute(value) && parse(value).root === value) || (win32.isAbsolute(value) && win32.parse(value).root === value);
+}
+
+function isExecutableFile(path: string): boolean {
+  try {
+    if (!statSync(path).isFile()) {
+      return false;
+    }
+    if (process.platform !== "win32") {
+      accessSync(path, constants.X_OK);
+    }
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function isInteractive(): boolean {
@@ -165,8 +183,8 @@ async function askBrowser(session: WizardSession, ui: ReturnType<typeof createUi
         return detected[numeric - 1].path;
       }
       if (/^\d+$/.test(answer)) continue;
-      if (isAbsolutePath(answer) && existsSync(answer)) return answer;
-      ui.failure("Enter a listed number or an existing absolute path.");
+      if (isAbsolutePath(answer) && isExecutableFile(answer)) return answer;
+      ui.failure("Enter a listed number or an existing executable file path.");
     }
   }
   while (true) {
@@ -176,8 +194,8 @@ async function askBrowser(session: WizardSession, ui: ReturnType<typeof createUi
       ui.failure("Enter an absolute path.");
       continue;
     }
-    if (!existsSync(answer)) {
-      ui.failure("That path does not exist.");
+    if (!isExecutableFile(answer)) {
+      ui.failure("That path is not an executable file.");
       continue;
     }
     return answer;
@@ -447,16 +465,70 @@ function writeSummary(ui: ReturnType<typeof createUi>, harness: string, choices:
 }
 
 async function defaultProbe(url: string, timeoutMs: number): Promise<ProbeResult> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
     const response = await fetch(url, { signal: controller.signal });
-    clearTimeout(timer);
     if (!response.ok) return { state: "no-file" };
-    const version: unknown = await response.json().catch(() => ({}));
-    return { state: "live", version };
+    const version = await readProbeJson(response, controller.signal);
+    return isDevToolsVersion(version) ? { state: "live", version } : { state: "no-file" };
   } catch {
     return { state: "no-file" };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function isDevToolsVersion(value: unknown): boolean {
+  return isRecord(value)
+    && typeof value.Browser === "string"
+    && typeof value.webSocketDebuggerUrl === "string"
+    && /^wss?:\/\//i.test(value.webSocketDebuggerUrl);
+}
+
+async function readProbeJson(response: Response, signal: AbortSignal): Promise<unknown> {
+  const declaredLength = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declaredLength) && declaredLength > MAX_PROBE_RESPONSE_BYTES) {
+    return undefined;
+  }
+  if (!response.body) {
+    return undefined;
+  }
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      if (signal.aborted) {
+        return undefined;
+      }
+      const next = await reader.read();
+      if (next.done) {
+        break;
+      }
+      if (!(next.value instanceof Uint8Array)) {
+        return undefined;
+      }
+      total += next.value.byteLength;
+      if (total > MAX_PROBE_RESPONSE_BYTES) {
+        return undefined;
+      }
+      chunks.push(next.value);
+    }
+  } finally {
+    await reader.cancel().catch(() => undefined);
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  try {
+    return JSON.parse(new TextDecoder().decode(bytes)) as unknown;
+  } catch {
+    return undefined;
   }
 }
 
@@ -586,16 +658,21 @@ export async function launchPersonalChrome(opts: PersonalChromeOptions): Promise
   if (!safeDataDir || !isAbsolutePath(rawDataDir) || isFilesystemRoot(safeDataDir) || /[\u0000-\u001f\u007f]/.test(rawDataDir)) {
     throw new AppError("INSTALL_CONFIG_INVALID", "The personal Chrome data directory must be an absolute non-root path without control characters.");
   }
-  const { findChromeExecutable } = await import("./browser/discovery.js");
-  const executable = opts.executablePath ?? findChromeExecutable()?.path;
-  if (!executable) {
-    throw new AppError("BROWSER_NOT_CONFIGURED", "Install Chrome or set SMOOTH_OPERATOR_BROWSER_EXECUTABLE");
+  if (opts.probeAttempts !== undefined && (!Number.isSafeInteger(opts.probeAttempts) || opts.probeAttempts < 1 || opts.probeAttempts > MAX_PROBE_ATTEMPTS)) {
+    throw new AppError("INSTALL_CONFIG_INVALID", `The personal Chrome probe attempt count must be an integer between 1 and ${MAX_PROBE_ATTEMPTS}.`);
   }
   await ensureSecureDirectory(safeDataDir);
+  const personalProfileDir = join(safeDataDir, "personal-chrome");
+  await ensureSecureDirectory(personalProfileDir);
+  const { findChromeExecutable } = await import("./browser/discovery.js");
+  const executable = opts.executablePath ?? findChromeExecutable()?.path;
+  if (!executable || !isExecutableFile(executable)) {
+    throw new AppError("BROWSER_NOT_CONFIGURED", "Install Chrome or set SMOOTH_OPERATOR_BROWSER_EXECUTABLE");
+  }
   const spawnFn = opts.spawn ?? (await import("node:child_process")).spawn;
   const args = [
     `--remote-debugging-port=${port}`,
-    `--user-data-dir=${join(safeDataDir, "personal-chrome")}`,
+    `--user-data-dir=${personalProfileDir}`,
     "--no-first-run",
     "--no-default-browser-check",
     ...(opts.headless ? ["--headless=new"] : []),
@@ -604,19 +681,45 @@ export async function launchPersonalChrome(opts: PersonalChromeOptions): Promise
   child.unref();
   const probe = opts.probe;
   const attempts = opts.probeAttempts ?? DEFAULT_PROBE_ATTEMPTS;
+  const deadline = opts.probeAttempts === undefined ? Date.now() + DEFAULT_PROBE_DEADLINE_MS : undefined;
+  let attemptsMade = 0;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
-    // Probe immediately after spawning. Chrome often has its DevTools endpoint
-    // ready before the first 300ms tick; retaining the interval between later
-    // probes keeps startup bounded without adding avoidable latency.
-    if (attempt > 0) {
-      await new Promise((resolveTimeout) => setTimeout(resolveTimeout, PROBE_INTERVAL_MS));
+    if (deadline !== undefined && Date.now() >= deadline) {
+      break;
     }
+    // Probe immediately after spawning. Chrome often has its DevTools endpoint
+    // ready before the first tick. Later probes retain a short interval, while
+    // the default deadline prevents a slow endpoint from stretching startup.
+    if (attempt > 0) {
+      const remaining = deadline === undefined ? PROBE_INTERVAL_MS : deadline - Date.now();
+      if (remaining <= 0) break;
+      await new Promise((resolveTimeout) => setTimeout(resolveTimeout, Math.min(PROBE_INTERVAL_MS, remaining)));
+    }
+    const remaining = deadline === undefined ? PROBE_TIMEOUT_MS : Math.min(PROBE_TIMEOUT_MS, deadline - Date.now());
+    if (remaining <= 0) break;
+    attemptsMade += 1;
     try {
-      const res = await probe(`http://127.0.0.1:${port}/json/version`, 1000);
+      const res = await boundedProbe(probe, `http://127.0.0.1:${port}/json/version`, remaining);
       if (res.state === "live") return { url: `http://127.0.0.1:${port}` };
     } catch {
       // Endpoint not ready yet; keep probing until attempts are exhausted.
     }
   }
-  throw new AppError("BROWSER_CONNECT_TIMEOUT", `Chrome DevTools endpoint on port ${port} did not become ready after ${attempts} probes. Close Chrome or choose another port.`);
+  throw new AppError("BROWSER_CONNECT_TIMEOUT", `Chrome DevTools endpoint on port ${port} did not become ready after ${attemptsMade} probes. Close Chrome or choose another port.`);
+}
+
+async function boundedProbe(probe: ProbeFunction, url: string, timeoutMs: number): Promise<ProbeResult> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      Promise.resolve().then(() => probe(url, timeoutMs)),
+      new Promise<ProbeResult>((resolveProbe) => {
+        timer = setTimeout(() => resolveProbe({ state: "timeout" }), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
 }

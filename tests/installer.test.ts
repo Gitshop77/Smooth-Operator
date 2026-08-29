@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { installHarness, planHarnessInstall, type HarnessCommand } from "@/server/installer";
+import { ensureSecureDirectory, installHarness, planHarnessInstall, type HarnessCommand } from "@/server/installer";
 
 const SOURCE_ENTRY: HarnessCommand = { command: "smooth-operator", args: [] };
 
@@ -17,6 +17,11 @@ function configOptions(path: string, serverEntry: HarnessCommand = SOURCE_ENTRY)
 }
 
 describe("harness installer", () => {
+  it("never treats a filesystem root as a configuration directory", async () => {
+    await expect(ensureSecureDirectory("/")).rejects.toThrow(/filesystem roots/);
+    await expect(installHarness("opencode", { environment: { OPENCODE_CONFIG_DIR: "/" }, serverEntry: SOURCE_ENTRY })).rejects.toThrow(/filesystem roots/);
+  });
+
   it("plans current non-interactive CLI argv without launching programs", async () => {
     const entry = { command: "/opt/Node Runtime/node", args: ["/opt/SmoothOperator/dist/smooth-operator.mjs"] };
     const calls: Array<{ command: string; args: readonly string[] }> = [];

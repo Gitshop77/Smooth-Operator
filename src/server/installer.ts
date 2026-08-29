@@ -201,9 +201,9 @@ function resolveConfigPath(target: JsonConfigTarget, homeDirectory = homedir(), 
     return join(home, "Library", "Application Support", "Claude", "claude_desktop_config.json");
   }
   if (platform() === "win32") {
-    return join(environment.APPDATA ?? join(home, "AppData", "Roaming"), "Claude", "claude_desktop_config.json");
+    return join(resolveConfigDirectory(environment.APPDATA, join(home, "AppData", "Roaming")), "Claude", "claude_desktop_config.json");
   }
-  return join(environment.XDG_CONFIG_HOME ?? join(home, ".config"), "Claude", "claude_desktop_config.json");
+  return join(resolveConfigDirectory(environment.XDG_CONFIG_HOME, join(home, ".config")), "Claude", "claude_desktop_config.json");
 }
 
 function resolveOpenCodeConfigPath(homeDirectory = homedir(), environment = process.env, override?: string): string {
@@ -213,8 +213,17 @@ function resolveOpenCodeConfigPath(homeDirectory = homedir(), environment = proc
   if (environment.OPENCODE_CONFIG) {
     return resolve(environment.OPENCODE_CONFIG);
   }
-  const configDirectory = environment.OPENCODE_CONFIG_DIR ?? join(homeDirectory || homedir(), ".config", "opencode");
+  const configDirectory = resolveConfigDirectory(environment.OPENCODE_CONFIG_DIR, join(homeDirectory || homedir(), ".config", "opencode"));
   return join(configDirectory, "opencode.json");
+}
+
+function resolveConfigDirectory(value: string | undefined, fallback: string): string {
+  const candidate = value?.trim() || fallback;
+  try {
+    return resolve(candidate);
+  } catch (error) {
+    throw new AppError("INSTALL_CONFIG_INVALID", "Configuration directory paths must be valid filesystem paths.", { cause: error });
+  }
 }
 
 async function installJsonConfig(target: ConfigTarget, plannedPath: string, options: HarnessInstallOptions, allowOpenCodeJsoncFallback = false): Promise<string> {
@@ -534,6 +543,9 @@ function sameOpenCodeEntry(value: Record<string, unknown>, desired: Record<strin
 
 export async function ensureSecureDirectory(path: string): Promise<void> {
   const absolute = resolve(path);
+  if (parse(absolute).root === absolute) {
+    throw new AppError("INSTALL_CONFIG_FAILED", "Configuration directories must not be filesystem roots.");
+  }
   // macOS exposes /var (and sometimes /tmp) through system aliases. Check all
   // components while allowing only those known OS aliases; a user-controlled
   // symlink such as ~/.config must fail closed before mkdir follows it.

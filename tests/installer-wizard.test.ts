@@ -316,7 +316,7 @@ describe("personal Chrome launcher", () => {
     try {
       const spawn = vi.fn((_executable: string, _args: string[]) => ({ unref: vi.fn() }));
       const probe = vi.fn(async () => ({ state: "live", version: { Browser: "Chrome/124" } }));
-      await expect(launchPersonalChrome({ executablePath: "/bin/chrome", dataDir: home, spawn: spawn as never, probe, probeAttempts: 1 })).resolves.toEqual({ url: "http://127.0.0.1:9222" });
+      await expect(launchPersonalChrome({ executablePath: process.execPath, dataDir: home, spawn: spawn as never, probe, probeAttempts: 1 })).resolves.toEqual({ url: "http://127.0.0.1:9222" });
       expect(spawn).toHaveBeenCalledTimes(1);
       expect(spawn.mock.calls[0]?.[1]).not.toContain("--headless=new");
       expect(probe).toHaveBeenCalledTimes(1);
@@ -330,7 +330,7 @@ describe("personal Chrome launcher", () => {
     try {
       const spawn = vi.fn((_executable: string, _args: string[]) => ({ unref: vi.fn() }));
       const probe = vi.fn(async () => ({ state: "live" }));
-      await expect(launchPersonalChrome({ executablePath: "/bin/chrome", dataDir: home, headless: true, spawn: spawn as never, probe, probeAttempts: 1 })).resolves.toEqual({ url: "http://127.0.0.1:9222" });
+      await expect(launchPersonalChrome({ executablePath: process.execPath, dataDir: home, headless: true, spawn: spawn as never, probe, probeAttempts: 1 })).resolves.toEqual({ url: "http://127.0.0.1:9222" });
       expect(spawn.mock.calls[0]?.[1]).toContain("--headless=new");
     } finally {
       await rm(home, { recursive: true, force: true });
@@ -342,6 +342,8 @@ describe("personal Chrome launcher", () => {
     const probe = vi.fn();
     await expect(launchPersonalChrome({ executablePath: "/bin/chrome", dataDir: "", spawn, probe })).rejects.toThrow(/data directory/);
     await expect(launchPersonalChrome({ executablePath: "/bin/chrome", dataDir: "/tmp/smooth-operator-launcher", port: 0, spawn, probe })).rejects.toThrow(/port/);
+    await expect(launchPersonalChrome({ executablePath: process.execPath, dataDir: "/tmp/smooth-operator-launcher", spawn, probe, probeAttempts: 0 })).rejects.toThrow(/probe attempt count/);
+    await expect(launchPersonalChrome({ executablePath: "/tmp/smooth-operator-launcher", dataDir: "/tmp/smooth-operator-launcher", spawn, probe, probeAttempts: 1 })).rejects.toMatchObject({ code: "BROWSER_NOT_CONFIGURED" });
     expect(spawn).not.toHaveBeenCalled();
     expect(probe).not.toHaveBeenCalled();
   });
