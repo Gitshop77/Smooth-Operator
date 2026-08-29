@@ -46,7 +46,7 @@ Ask: *“Scrape pricing into a table”*, *“Fill this form with ~/resume.pdf�
 
 Talk to your harness normally. It can call `browser_navigate` → `browser_snapshot` → `browser_click` and the rest of the MCP surface as needed. Logins and CAPTCHA challenges pause for human handoff in the Chrome window.
 
-Stealth (an identity-preserving baseline plus a JS fingerprint bundle) and an optional CAPTCHA solver are **opt-in and off by default**. Enable them with `SMOOTH_OPERATOR_STEALTH_ENABLED` and `SMOOTH_OPERATOR_CAPTCHA_SOLVER_*`; see `STEALTH-GUIDE.md` for details and responsible use.
+Stealth (an identity-preserving baseline plus a JS fingerprint bundle) and an optional CAPTCHA solver are **opt-in and off by default**. Enable them with `SMOOTH_OPERATOR_STEALTH_ENABLED` and `SMOOTH_OPERATOR_CAPTCHA_SOLVER_*`; see `docs/STEALTH-GUIDE.md` for details and responsible use.
 
 ## Why
 

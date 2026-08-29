@@ -36,7 +36,7 @@ Headed private Chromium-based browser on first tool call. Auto-discovers an inst
 - **Launch:** `SMOOTH_OPERATOR_BROWSER_MODE=launch SMOOTH_OPERATOR_BROWSER_EXECUTABLE=/path/to/chrome`
 - **Disabled:** `SMOOTH_OPERATOR_BROWSER_MODE=disabled`
 
-By default no spoofing and no CAPTCHA bypass; both are opt-in (`SMOOTH_OPERATOR_STEALTH_ENABLED`, `SMOOTH_OPERATOR_CAPTCHA_SOLVER_*`) and documented in `STEALTH-GUIDE.md`.
+By default no spoofing and no CAPTCHA bypass; both are opt-in (`SMOOTH_OPERATOR_STEALTH_ENABLED`, `SMOOTH_OPERATOR_CAPTCHA_SOLVER_*`) and documented in `docs/STEALTH-GUIDE.md`.
 
 ## HTTP
 
