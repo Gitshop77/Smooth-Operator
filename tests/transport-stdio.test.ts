@@ -91,7 +91,7 @@ describe("stdio transport", () => {
       const resources = await client.listResources();
       const resourceTemplates = await client.listResourceTemplates();
       const prompts = await client.listPrompts();
-      expect(tools.tools).toHaveLength(60);
+      expect(tools.tools).toHaveLength(61);
       expect(resources.resources).toHaveLength(6);
       expect(resourceTemplates.resourceTemplates).toHaveLength(1);
       expect(prompts.prompts).toHaveLength(4);
