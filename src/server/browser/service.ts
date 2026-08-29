@@ -1016,7 +1016,17 @@ export class BrowserService {
     // cancelled) after `timeoutMs`. Give the operation lock a buffer so a
     // borderline-slow challenge probe cannot abort it with BROWSER_TIMEOUT
     // before the internal deadline elapses and returns a status object.
-    const budgetMs = action.action === "wait_for_human" ? timeoutMs + 5_000 : timeoutMs;
+    // solve_challenge runs the CAPTCHA solver's own polling window inside the
+    // lock (solver.solve receives operationSignal); cap it on the solver's
+    // timeout (default 120s) so legitimate solves are not cut off by the
+    // default 15s action deadline, with a trailing buffer mirroring
+    // wait_for_human.
+    const solverTimeoutMs = this.config.captchaSolver?.timeoutMs ?? 0;
+    const budgetMs = action.action === "wait_for_human"
+      ? timeoutMs + 5_000
+      : action.action === "solve_challenge"
+        ? Math.max(timeoutMs + 5_000, solverTimeoutMs) + 5_000
+        : timeoutMs;
     return this.withOperationLock(signal, async (operationSignal) => {
       let result: unknown;
       let snapshotInvalidated = false;

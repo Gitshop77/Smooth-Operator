@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { BrowserAction } from "@/server/contracts";
+import type { ServerConfig } from "@/server/config";
 import { BrowserService } from "@/server/browser/service";
 import { buildSolver } from "@/server/browser/solver";
 import type { SolveRequest, SolveResult } from "@/server/browser/solver";
@@ -109,5 +110,45 @@ describe("solve_challenge gating", () => {
 
     expect(result).toMatchObject({ solved: false, bypassAttempted: true, resolution: "solver_failed" });
     expect(solve).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("solve_challenge operation-lock budget", () => {
+  type WithLock = (signal: AbortSignal | undefined, operation: () => Promise<unknown>, queueTimeoutMs: number, operationTimeoutMs?: number, mode?: string) => Promise<unknown>;
+
+  function serviceWithConfig(overrides: Partial<ServerConfig> = {}): { instance: BrowserService; withLock: ReturnType<typeof vi.spyOn> } {
+    const config = testConfig(overrides);
+    const instance = new BrowserService(config, new SecurityPolicy(config), QUIET_LOGGER);
+    const withLock = vi.spyOn(instance as unknown as { withOperationLock: WithLock }, "withOperationLock")
+      .mockResolvedValue(undefined);
+    return { instance, withLock };
+  }
+
+  it("gives solve_challenge a budget that accommodates the solver timeout", async () => {
+    const { instance, withLock } = serviceWithConfig({
+      captchaSolver: { provider: "2captcha", apiKey: "test-key", timeoutMs: 120_000, maxBytes: 1_000_000 },
+    });
+
+    await (instance as unknown as { execute: (action: BrowserAction, signal?: AbortSignal) => Promise<unknown> })
+      .execute({ action: "solve_challenge", pageId: undefined } as unknown as BrowserAction);
+
+    const call = withLock.mock.calls[0] as [unknown, unknown, number, number?];
+    const queueTimeoutMs = call[2];
+    const operationTimeoutMs = call[3] ?? call[2];
+    // The solver's own polling window (120s) must fit inside the lock budget so
+    // legitimate solves are not aborted by the default 15s action deadline.
+    expect(queueTimeoutMs).toBeGreaterThanOrEqual(120_000 + 5_000);
+    expect(operationTimeoutMs).toBeGreaterThanOrEqual(120_000 + 5_000);
+  });
+
+  it("leaves non-solve actions on the default action timeout", async () => {
+    const { instance, withLock } = serviceWithConfig();
+
+    await (instance as unknown as { execute: (action: BrowserAction, signal?: AbortSignal) => Promise<unknown> })
+      .execute({ action: "wait", milliseconds: 0 } as unknown as BrowserAction);
+
+    const call = withLock.mock.calls[0] as [unknown, unknown, number, number?];
+    // Non-solve actions keep the plain timeoutMs budget (no solver buffer).
+    expect(call[2]).toBe(15_000);
   });
 });
