@@ -217,7 +217,7 @@ function isValidDomainPattern(pattern: string): boolean {
     }
     const bracketless = base.replace(/^\[|\]$/g, "");
     if (isIP(bracketless) !== 0) {
-      return true;
+      return !wildcard;
     }
     const ascii = domainToASCII(base);
     return Boolean(ascii) && ascii.split(".").every((label) => label.length > 0 && label.length <= 63 && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i.test(label));
@@ -340,6 +340,23 @@ export function canonicalizeAllowedFileRoots(rawRoots: readonly string[]): strin
     }
     if (parse(canonicalRoot).root === canonicalRoot) {
       throw new AppError("CONFIG_INVALID", "Configured file roots must not be filesystem roots.");
+    }
+    // A configured root is a directory boundary, never a single file. This
+    // prevents an exact path to a sensitive regular file from becoming an
+    // implicitly allowed write target through root containment.
+    try {
+      if (!lstatSync(canonicalRoot).isDirectory()) {
+        throw new AppError("CONFIG_INVALID", "Configured file roots must be directories.");
+      }
+    } catch (error) {
+      if (error instanceof AppError) {
+        throw error;
+      }
+      if (!isMissingPathError(error)) {
+        throw new AppError("CONFIG_INSECURE", "Configured file roots could not be inspected safely.", { cause: error });
+      }
+      // Missing leaf roots are valid: the runtime creates the private files
+      // and downloads directories after configuration is loaded.
     }
     if (!roots.includes(canonicalRoot)) {
       roots.push(canonicalRoot);

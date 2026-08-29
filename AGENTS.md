@@ -145,7 +145,7 @@ No model service.
 
 - HTTP(S) only, no creds, domain/DNS preflight, redirects fail closed; untrusted URL credentials are redacted in output.
 - Private/link-local/multicast blocked; re-checked at DevTools.
-- Uploads/PDFs inside allowed roots, symlink-checked; downloads are bounded and report configuration failures.
+- Uploads/PDFs inside allowed directory roots, symlink-checked; existing regular files are not roots; downloads are bounded and report configuration failures.
 - Config files and backups are bounded, owner-only, regular, and symlink-safe.
 - Bounded, normalized, redacted, untrusted wrappers; result omission is explicit rather than silent.
 - Constant-time bearer check, JSON stderr, no secrets.

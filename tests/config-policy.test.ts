@@ -91,8 +91,8 @@ describe("configuration", () => {
 
   it("normalizes host and domain allowlists and rejects ambiguous host values", () => {
     const config = loadTestConfig([], {
-      SMOOTH_OPERATOR_ALLOWED_HOSTS: "LOCALHOST, [::1]",
-      SMOOTH_OPERATOR_ALLOWED_ORIGINS: "LOCALHOST",
+      SMOOTH_OPERATOR_ALLOWED_HOSTS: "LOCALHOST., [::1]",
+      SMOOTH_OPERATOR_ALLOWED_ORIGINS: "LOCALHOST.",
       SMOOTH_OPERATOR_ALLOWED_DOMAINS: "*.BÜCHER.example",
     });
     expect(config.http.allowedHosts).toEqual(["localhost", "[::1]"]);
@@ -100,10 +100,22 @@ describe("configuration", () => {
     expect(config.security.allowedDomains).toEqual(["*.xn--bcher-kva.example"]);
     expect(() => loadTestConfig([], { SMOOTH_OPERATOR_ALLOWED_HOSTS: "localhost:3344" })).toThrowError(/Configuration failed validation/);
     expect(() => loadTestConfig([], { SMOOTH_OPERATOR_ALLOWED_ORIGINS: "https://localhost" })).toThrowError(/Configuration failed validation/);
+    expect(() => loadTestConfig([], { SMOOTH_OPERATOR_ALLOWED_DOMAINS: "*.[::1]" })).toThrowError(/Configuration failed validation/);
   });
 
   it("rejects a filesystem root as a configured file root", () => {
     expect(() => loadTestConfig([], { SMOOTH_OPERATOR_ALLOWED_FILE_ROOTS: "/" })).toThrowError(/filesystem roots/);
+  });
+
+  it("rejects a regular file as a configured file root", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "smooth-operator-config-file-root-"));
+    const file = join(directory, "root.txt");
+    try {
+      await writeFile(file, "not a directory");
+      expect(() => loadTestConfig([], { SMOOTH_OPERATOR_ALLOWED_FILE_ROOTS: file })).toThrowError(/must be directories/);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it("does not read an explicit JSON config through a symlinked directory", async () => {

@@ -224,9 +224,24 @@ function normalizeHostPattern(value: string): string {
     throw new AppError("CONFIG_INVALID", "Configuration failed validation: configured HTTP host allowlists must contain hostnames or bracketed IPv6 addresses without ports.");
   }
   try {
-    return new URL(`http://${trimmed}`).hostname.toLowerCase();
+    const hostname = new URL(`http://${trimmed}`).hostname.toLowerCase();
+    // DNS hostnames are equivalent with or without a terminal root label;
+    // normalize it once so Host/Origin comparisons do not depend on spelling.
+    return hostname.endsWith(".") ? hostname.slice(0, -1) : hostname;
   } catch (error) {
     throw new AppError("CONFIG_INVALID", "Configuration failed validation: configured HTTP host allowlists contain an invalid hostname.", { cause: error });
+  }
+}
+
+function normalizeListenHost(value: string): string {
+  const trimmed = value.trim();
+  try {
+    const hostname = new URL(`http://${trimmed}`).hostname.toLowerCase();
+    return hostname.endsWith(".") ? hostname.slice(0, -1) : hostname;
+  } catch {
+    // Preserve the original value so validateConfig can return the precise
+    // invalid-host error instead of turning a parse failure into a default.
+    return trimmed;
   }
 }
 
@@ -243,7 +258,9 @@ function isValidDomainPattern(value: string): boolean {
   }
   const bracketless = base.replace(/^\[|\]$/g, "");
   if (isIP(bracketless) !== 0) {
-    return true;
+    // Wildcards describe DNS suffixes, not address literals. Accept exact IP
+    // entries but reject a pattern that could never match a hostname safely.
+    return !wildcard;
   }
   let ascii: string;
   try {
@@ -543,7 +560,7 @@ export function loadServerConfig(args: string[] = [], environment: NodeJS.Proces
   const config: ServerConfig = {
     transport: (argValue("--transport") ?? environment.SMOOTH_OPERATOR_TRANSPORT ?? fileConfig.transport ?? "stdio") as Transport,
     http: {
-      host: (argValue("--host") ?? environment.SMOOTH_OPERATOR_HTTP_HOST ?? nestedHttp.host ?? "127.0.0.1").trim(),
+      host: normalizeListenHost(argValue("--host") ?? environment.SMOOTH_OPERATOR_HTTP_HOST ?? nestedHttp.host ?? "127.0.0.1"),
       port: parseInteger(argValue("--port") ?? environment.SMOOTH_OPERATOR_HTTP_PORT, nestedHttp.port ?? 3_344),
       path: (environment.SMOOTH_OPERATOR_HTTP_PATH ?? nestedHttp.path ?? "/mcp").trim(),
       token: environment.SMOOTH_OPERATOR_HTTP_TOKEN ?? nestedHttp.token,

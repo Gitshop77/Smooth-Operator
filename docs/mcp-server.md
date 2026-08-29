@@ -359,8 +359,9 @@ are always applied, with explicit opt-ins where documented:
   the same policy checks; `about:blank` is allowed, data/blob URLs are limited
   to non-frame subresources, and file, browser-internal, extension, and
   unknown schemes are rejected.
-- Upload and PDF destinations must stay within configured file roots after
-  realpath and symlink checks. Download paths and generated files are bounded.
+- Upload and PDF destinations must stay within configured directory roots after
+  realpath and symlink checks; an existing regular file cannot be configured as
+  a root. Download paths and generated files are bounded.
 - Page JavaScript is available in the native profile by default and can be
   disabled with `SMOOTH_OPERATOR_ALLOW_EVAL=false`; when enabled, page code can
   observe and mutate page state with the browser's privileges.
