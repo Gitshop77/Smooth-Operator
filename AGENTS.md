@@ -36,7 +36,7 @@ Headed private Chromium-based browser on first tool call. Auto-discovers an inst
 - **Launch:** `SMOOTH_OPERATOR_BROWSER_MODE=launch SMOOTH_OPERATOR_BROWSER_EXECUTABLE=/path/to/chrome`
 - **Disabled:** `SMOOTH_OPERATOR_BROWSER_MODE=disabled`
 
-No spoofing, no CAPTCHA bypass.
+By default no spoofing and no CAPTCHA bypass; both are opt-in (`SMOOTH_OPERATOR_STEALTH_ENABLED`, `SMOOTH_OPERATOR_CAPTCHA_SOLVER_*`) and documented in `STEALTH-GUIDE.md`.
 
 ## HTTP
 
@@ -132,7 +132,7 @@ No model service.
 - Config files and backups are bounded, owner-only, regular, and symlink-safe.
 - Bounded, normalized, redacted, untrusted wrappers; result omission is explicit rather than silent.
 - Constant-time bearer check, JSON stderr, no secrets.
-- CAPTCHA report only, no bypass. `pierce/` for open shadow roots.
+- CAPTCHA is reported only by default; solving is opt-in via the configured solver, with honest `bypassAttempted` reporting. `pierce/` for open shadow roots.
 
 DNS is best-effort, not a firewall.
 
