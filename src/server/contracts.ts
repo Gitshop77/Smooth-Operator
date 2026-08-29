@@ -626,6 +626,7 @@ export const WaitRequestSchema = z.object({ milliseconds: z.number().int().min(0
 export const WaitForTextRequestSchema = z.object({ text: BoundedString(20_000), timeoutMs: z.number().int().min(100).max(120_000).optional(), ...PageInput }).strict();
 export const WaitForUrlRequestSchema = z.object({ url: BoundedString(8_000), timeoutMs: z.number().int().min(100).max(120_000).optional(), ...PageInput }).strict();
 export const WaitForHumanRequestSchema = z.object({ timeoutMs: z.number().int().min(500).max(600_000).optional(), pollMs: z.number().int().min(250).max(10_000).optional(), ...PageInput }).strict();
+export const SolveChallengeRequestSchema = z.object({ pageId: BoundedString(200) }).strict();
 export const KeyRequestSchema = z.object({ keys: z.array(KeyboardString(100)).min(1).max(32), ...PageInput }).strict();
 export const ScrollRequestSchema = z.object({ selector: BoundedString(2_000).optional(), direction: z.enum(["up", "down", "left", "right"]).default("down"), amount: z.number().finite().min(1).max(100_000).default(600), ...PageInput }).strict();
 export const ScrollToBottomRequestSchema = z.object({ maxScrolls: z.number().int().min(1).max(50).optional(), timeoutMs: z.number().int().min(100).max(120_000).optional(), restoreTop: z.boolean().optional(), ...PageInput }).strict();
