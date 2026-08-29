@@ -3,7 +3,8 @@ import { STEALTH_BASELINE_ARGS } from "./stealth";
 /**
  * Stable launch defaults for the native profile. Reduces background work;
  * optional stealth flags append here when enabled (deduped, never mutating the
- * shared default set).
+ * shared default set). Identity, language, and viewport claims are never
+ * fabricated by the native defaults.
  */
 export const NATIVE_BROWSER_LAUNCH_ARGS = [
   "--disable-background-networking",
@@ -30,9 +31,11 @@ const STEALTH_GPU_ARGS: readonly string[] = ["--use-angle=vulkan", "--enable-vul
 export interface StealthLaunchOptions {
   enabled?: boolean;
   gpu?: boolean;
+  /** An explicit viewport is the only dimension claim the caller may share. */
+  viewport?: { width: number; height: number };
 }
 
-/** Return a fresh copy of the audited native launch defaults (never shared). */
+/** Return a fresh copy of the native launch defaults (never shared). */
 function nativeBrowserLaunchArgsBase(): string[] {
   return [...NATIVE_BROWSER_LAUNCH_ARGS];
 }
@@ -43,6 +46,13 @@ export function nativeBrowserLaunchArgs(options: StealthLaunchOptions = {}): str
     for (const flag of STEALTH_BASELINE_ARGS) {
       const key = flag.split("=")[0];
       if (!args.some((a) => a.split("=")[0] === key)) args.push(flag);
+    }
+    if (options.viewport
+      && Number.isInteger(options.viewport.width)
+      && Number.isInteger(options.viewport.height)
+      && options.viewport.width > 0
+      && options.viewport.height > 0) {
+      args.push(`--window-size=${options.viewport.width},${options.viewport.height}`);
     }
     if (options.gpu) {
       for (const flag of STEALTH_GPU_ARGS) {

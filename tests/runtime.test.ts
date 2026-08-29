@@ -9,6 +9,19 @@ import { ServerRuntime } from "@/server/runtime";
 import { testConfig } from "./helpers";
 
 describe("runtime lifecycle", () => {
+  it("reports native feature defaults and effective challenge guarantees", async () => {
+    const runtime = await ServerRuntime.create(testConfig());
+    try {
+      expect(runtime.publicCapabilities()).toMatchObject({
+        defaults: { browserMode: "managed", headedBrowser: true, pageEvaluation: true, stealth: true, behavioralTiming: true },
+        features: { localBrowserTools: "available", pageEvaluation: false, stealth: false, behavioralTiming: false },
+        challenges: { classification: "bounded-evidence", connectedAiLoop: true, humanHandoff: true, successRequiresAbsentClassification: true },
+      });
+    } finally {
+      await runtime.close();
+    }
+  });
+
   it("tightens an existing runtime directory with unsafe permissions", async () => {
     const directory = await mkdtemp(join(tmpdir(), "smooth-operator-runtime-"));
     await chmod(directory, 0o755);

@@ -51,12 +51,12 @@ const BrowserActionNames = [
   "disable_network_log",
   "get_network_log",
   "clear_network_log",
-  "getclear_network_log",
+  "getclear_network_log", // canonical action spelling of the read_and_clear operation
   "enable_console_log",
   "disable_console_log",
   "get_console_log",
   "clear_console_log",
-  "getclear_console_log",
+  "getclear_console_log", // canonical action spelling of the read_and_clear operation
   "find_text",
   "extract",
   "get_html",
@@ -169,9 +169,6 @@ const BrowserActionFieldsSchema = z.object({
   verify: z.boolean().optional(),
   durationMs: z.number().int().min(0).max(30_000).optional(),
   pollMs: z.number().int().min(250).max(10_000).optional(),
-  sitekey: BoundedString(4_000).optional(),
-  provider: z.enum(["none", "capsolver", "2captcha", "anticaptcha"]).optional(),
-  proxyUrl: HttpUrl(4_096).optional(),
   optionValue: BoundedString(2_000).optional(),
   optionValues: z.array(BoundedString(2_000)).min(1).max(200).optional(),
   cookieName: BoundedString(256).optional(),
@@ -278,9 +275,6 @@ export const BrowserActionSchema = BrowserActionFieldsSchema.extend({ action: Ac
   }
   if (input.outputPath !== undefined && input.filePath !== undefined && input.action === "save_as_pdf") {
     context.addIssue({ code: "custom", message: "Provide outputPath or filePath, not both." });
-  }
-  if (input.action === "solve_challenge" && input.pageId === undefined) {
-    context.addIssue({ code: "custom", message: "solve_challenge requires pageId." });
   }
   if (["navigate", "set_cookie"].includes(input.action) && input.url !== undefined && !isHttpUrl(input.url)) {
     context.addIssue({ code: "custom", message: "Navigation and cookie URLs must be absolute HTTP(S) URLs." });
@@ -626,7 +620,35 @@ export const WaitRequestSchema = z.object({ milliseconds: z.number().int().min(0
 export const WaitForTextRequestSchema = z.object({ text: BoundedString(20_000), timeoutMs: z.number().int().min(100).max(120_000).optional(), ...PageInput }).strict();
 export const WaitForUrlRequestSchema = z.object({ url: BoundedString(8_000), timeoutMs: z.number().int().min(100).max(120_000).optional(), ...PageInput }).strict();
 export const WaitForHumanRequestSchema = z.object({ timeoutMs: z.number().int().min(500).max(600_000).optional(), pollMs: z.number().int().min(250).max(10_000).optional(), ...PageInput }).strict();
-export const SolveChallengeRequestSchema = z.object({ pageId: BoundedString(200) }).strict();
+/**
+ * Request a connected-AI challenge loop. The page id is optional because the
+ * browser session may already have an active page; screenshot and evidence
+ * bounds mirror the native snapshot/screenshot contracts.
+ *
+ * Aliases are retained for browser-use clients that use snake_case names. The
+ * MCP handler normalizes them before dispatching the canonical action.
+ */
+export const SolveChallengeRequestSchema = z.object({
+  pageId: BoundedString(200).optional(),
+  includeScreenshot: z.boolean().optional(),
+  include_screenshot: z.boolean().optional(),
+  fullPage: z.boolean().optional(),
+  full_page: z.boolean().optional(),
+  full: z.boolean().optional(),
+  maxDimension: z.number().int().min(1).max(20_000).optional(),
+  max_dim: z.number().int().min(1).max(20_000).optional(),
+  maxChars: z.number().int().min(1_000).max(MCP_PAGE_TEXT_MAX_CHARS).optional(),
+}).strict().superRefine((input, context) => {
+  if (input.includeScreenshot !== undefined && input.include_screenshot !== undefined) {
+    context.addIssue({ code: "custom", message: "Provide includeScreenshot or include_screenshot, not both." });
+  }
+  if ([input.fullPage, input.full_page, input.full].filter((value) => value !== undefined).length > 1) {
+    context.addIssue({ code: "custom", message: "Provide only one of fullPage, full_page, or full." });
+  }
+  if (input.maxDimension !== undefined && input.max_dim !== undefined) {
+    context.addIssue({ code: "custom", message: "Provide maxDimension or max_dim, not both." });
+  }
+});
 export const KeyRequestSchema = z.object({ keys: z.array(KeyboardString(100)).min(1).max(32), ...PageInput }).strict();
 export const ScrollRequestSchema = z.object({ selector: BoundedString(2_000).optional(), direction: z.enum(["up", "down", "left", "right"]).default("down"), amount: z.number().finite().min(1).max(100_000).default(600), ...PageInput }).strict();
 export const ScrollToBottomRequestSchema = z.object({ maxScrolls: z.number().int().min(1).max(50).optional(), timeoutMs: z.number().int().min(100).max(120_000).optional(), restoreTop: z.boolean().optional(), ...PageInput }).strict();

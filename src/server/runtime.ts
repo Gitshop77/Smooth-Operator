@@ -92,8 +92,14 @@ export class ServerRuntime {
     let browserProfileLease: BrowserProfileLease | undefined;
     try {
       await ensurePrivateDirectory(config.dataDir);
-      await ensurePrivateDirectory(join(config.dataDir, "downloads"));
-      await ensurePrivateDirectory(join(config.dataDir, "files"));
+      // These sibling roots have no ordering dependency once the private
+      // data directory exists. Initialize them concurrently to shorten cold
+      // startup while retaining each root's independent symlink/permission
+      // checks.
+      await Promise.all([
+        ensurePrivateDirectory(join(config.dataDir, "downloads")),
+        ensurePrivateDirectory(join(config.dataDir, "files")),
+      ]);
       const ownsBrowserProcess = config.browser.mode !== "disabled" && (config.browser.mode === "managed" || config.browser.mode === "launch"
         || (config.browser.autoLaunch && Boolean(config.browser.executablePath)));
       const needsProfileLease = Boolean(ownsBrowserProcess && config.browser.userDataDir);
@@ -213,6 +219,19 @@ export class ServerRuntime {
       protocol: "Model Context Protocol",
       server: { name: "SmoothOperator", version: SERVER_VERSION },
       transports: ["stdio", "http"],
+      defaults: {
+        browserMode: "managed",
+        headedBrowser: true,
+        pageEvaluation: true,
+        stealth: true,
+        behavioralTiming: true,
+      },
+      features: {
+        localBrowserTools: "available",
+        pageEvaluation: this.config.security.allowEval,
+        stealth: this.config.stealth.enabled,
+        behavioralTiming: this.config.stealth.behaviorEnabled,
+      },
       browser: {
         mode: this.config.browser.mode,
         configured: managedBrowser || (!browserDisabled
@@ -231,6 +250,12 @@ export class ServerRuntime {
         dnsResolution: "preflight-only; browser resolver remains unpinned",
         evaluateAllowed: this.config.security.allowEval,
         httpRemoteAllowed: this.config.http.allowRemote,
+      },
+      challenges: {
+        classification: "bounded-evidence",
+        connectedAiLoop: true,
+        humanHandoff: true,
+        successRequiresAbsentClassification: true,
       },
       persistence: {
         fileRootsConfigured: this.config.security.allowedFileRoots.length > 0,

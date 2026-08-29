@@ -33,7 +33,7 @@ export interface FingerprintProfile {
 
 export interface BuildOptions {
   profile?: StealthProfile; // default "balanced"
-  seed?: number; // reserved for per-session jitter; core values are pure
+  seed?: number; // deterministic selector for max-profile hardware values
   version?: number; // default 124 (stable recent Chrome)
   platform?: Platform; // default "Windows"
   viewport?: { width: number; height: number }; // default { 1920, 1080 }

@@ -9,10 +9,9 @@ function compiles(source: string) {
   expect(() => new Function(source)).not.toThrow();
 }
 
-// Verifies the exact composition service.ts wires in `configurePageUnlocked`:
-// `buildStealthInitScript(buildFingerprintProfile({ profile }), { max })`.
-// The `evaluateOnNewDocument` call itself needs a live page and is covered by
-// the live suite (Task 12); here we prove the source it injects is well-formed.
+// Verifies the exact composition service.ts wires in `configurePageUnlocked`.
+// The `evaluateOnNewDocument` call needs a live page; here we prove the source
+// it injects is well-formed.
 describe("stealth init-script composition (service wiring)", () => {
   it("balanced profile yields a non-empty, well-formed init script", () => {
     const source = buildStealthInitScript(buildFingerprintProfile({ profile: "balanced" }), { max: false });

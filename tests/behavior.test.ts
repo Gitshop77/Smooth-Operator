@@ -116,6 +116,14 @@ describe("humanMouseMove", () => {
       expect.objectContaining({ randomizeMoveDelay: true }),
     );
   });
+
+  it("honors the explicit duration option without changing the cursor start", async () => {
+    await humanMouseMove(fakePage, 0, 0, 10, 10, 400, { durationMs: 40 });
+    expect(gc.moveTo).toHaveBeenCalledWith(
+      { x: 10, y: 10 },
+      expect.objectContaining({ moveDelay: 40 }),
+    );
+  });
 });
 
 describe("humanScroll", () => {

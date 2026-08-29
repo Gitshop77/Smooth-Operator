@@ -58,7 +58,7 @@ export function supportedHarnessTargets(): readonly string[] {
   return SUPPORTED_HARNESSES;
 }
 
-/** Return the argv for a harness CLI. Separated for auditability and testing. */
+/** Return the argv for a harness CLI without launching the harness. */
 export function planHarnessInstall(target: string, options: Pick<HarnessInstallOptions, "homeDirectory" | "environment" | "configPaths" | "serverEntry"> = {}): HarnessInstallPlan {
   const normalized = normalizeTarget(target);
   const entry = options.serverEntry ?? resolveServerEntry();
@@ -338,7 +338,11 @@ export async function readSecureConfigFile(path: string): Promise<ReviewedConfig
     if (info.size > MAX_INSTALL_CONFIG_BYTES) {
       throw new AppError("INSTALL_CONFIG_FAILED", `The configuration file '${path}' must be ${MAX_INSTALL_CONFIG_BYTES} bytes or smaller.`);
     }
-    const bytes = await readBoundedFile(handle, MAX_INSTALL_CONFIG_BYTES);
+    // Allocate to the observed size (plus one byte for growth detection) rather
+    // than reserving the full 2 MiB cap for every small config. The read still
+    // checks the hard cap, so a file growing between stat and read remains
+    // bounded and fails closed.
+    const bytes = await readBoundedFile(handle, MAX_INSTALL_CONFIG_BYTES, info.size);
     return { bytes, handle };
   } catch (error) {
     await handle.close().catch(() => undefined);
@@ -346,10 +350,21 @@ export async function readSecureConfigFile(path: string): Promise<ReviewedConfig
   }
 }
 
-async function readBoundedFile(handle: FileHandle, maxBytes: number): Promise<Buffer> {
-  const buffer = Buffer.allocUnsafe(maxBytes + 1);
+async function readBoundedFile(handle: FileHandle, maxBytes: number, expectedBytes = maxBytes): Promise<Buffer> {
+  const allocation = Math.min(maxBytes, Math.max(0, Math.trunc(expectedBytes))) + 1;
+  let buffer = Buffer.allocUnsafe(allocation);
   let offset = 0;
-  while (offset < buffer.byteLength) {
+  while (true) {
+    if (offset === buffer.byteLength) {
+      if (buffer.byteLength >= maxBytes + 1) break;
+      // A file can grow after stat(). Expand geometrically, capped at one byte
+      // over the hard limit, so growth is detected without a large allocation
+      // for the common small-config case.
+      const nextLength = Math.min(maxBytes + 1, Math.max(buffer.byteLength * 2, offset + 1));
+      const expanded = Buffer.allocUnsafe(nextLength);
+      buffer.copy(expanded, 0, 0, offset);
+      buffer = expanded;
+    }
     const { bytesRead } = await handle.read(buffer, offset, buffer.byteLength - offset, offset);
     if (bytesRead === 0) {
       break;
@@ -631,7 +646,7 @@ export function parseJsonc(source: string, path: string): Record<string, unknown
 }
 
 function stripJsoncComments(source: string): string {
-  let output = "";
+  const output: string[] = [];
   let inString = false;
   let escaped = false;
   let inLineComment = false;
@@ -644,7 +659,7 @@ function stripJsoncComments(source: string): string {
     if (inLineComment) {
       if (character === "\n" || character === "\r") {
         inLineComment = false;
-        output += character;
+        output.push(character);
       }
       continue;
     }
@@ -653,12 +668,12 @@ function stripJsoncComments(source: string): string {
         inBlockComment = false;
         index += 1;
       } else if (character === "\n" || character === "\r") {
-        output += character;
+        output.push(character);
       }
       continue;
     }
     if (inString) {
-      output += character;
+      output.push(character);
       if (escaped) {
         escaped = false;
       } else if (character === "\\") {
@@ -670,7 +685,7 @@ function stripJsoncComments(source: string): string {
     }
     if (character === '"') {
       inString = true;
-      output += character;
+      output.push(character);
     } else if (character === "/" && next === "/") {
       inLineComment = true;
       index += 1;
@@ -678,21 +693,21 @@ function stripJsoncComments(source: string): string {
       inBlockComment = true;
       index += 1;
     } else {
-      output += character;
+      output.push(character);
     }
   }
-  return output;
+  return output.join("");
 }
 
 function removeJsonTrailingCommas(source: string): string {
-  let output = "";
+  const output: string[] = [];
   let inString = false;
   let escaped = false;
 
   for (let index = 0; index < source.length; index += 1) {
     const character = source[index];
     if (inString) {
-      output += character;
+      output.push(character);
       if (escaped) {
         escaped = false;
       } else if (character === "\\") {
@@ -704,7 +719,7 @@ function removeJsonTrailingCommas(source: string): string {
     }
     if (character === '"') {
       inString = true;
-      output += character;
+      output.push(character);
       continue;
     }
     if (character === ",") {
@@ -716,9 +731,9 @@ function removeJsonTrailingCommas(source: string): string {
         continue;
       }
     }
-    output += character;
+    output.push(character);
   }
-  return output;
+  return output.join("");
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -41,13 +41,16 @@ Environment:
   SMOOTH_OPERATOR_BROWSER_CONNECT_TIMEOUT_MS=30000
   SMOOTH_OPERATOR_BROWSER_CDP_TIMEOUT_MS=30000
   SMOOTH_OPERATOR_ALLOWED_DOMAINS=example.com,*.example.org
-  SMOOTH_OPERATOR_ALLOW_EVAL=true (explicit page-JavaScript opt-in)
+  SMOOTH_OPERATOR_ALLOW_EVAL=true (default; set false to disable page JavaScript)
   SMOOTH_OPERATOR_HTTP_TOKEN=... (required for remote HTTP)
   SMOOTH_OPERATOR_HTTP_MAX_BODY_BYTES=2000000
 `;
 
+// Hard caps on concurrent in-flight requests. They are constants rather than
+// environment settings so the bounds stay fixed.
 const MAX_HTTP_CONCURRENCY = 32;
-// Bounded pool for long-lived SSE/subscription exchanges.
+// Bounded pool for long-lived SSE/subscription exchanges (fewer, longer
+// connections), distinct from the ordinary request pool above.
 const MAX_HTTP_STREAM_CONCURRENCY = 8;
 const HTTP_SHUTDOWN_GRACE_MS = 5_000;
 const HTTP_HANDLER_SHUTDOWN_TIMEOUT_MS = 5_000;
@@ -55,6 +58,11 @@ const HTTP_REQUEST_TIMEOUT_MS = 120_000;
 const HTTP_HEADERS_TIMEOUT_MS = 15_000;
 const HTTP_BODY_READ_TIMEOUT_MS = 30_000;
 const LOCALHOST_HOSTNAMES = ["localhost", "127.0.0.1", "[::1]"] as const;
+const AUTHORIZATION_PATTERN = /^Bearer[ \t]+(.+)$/i;
+const HTTP_NOT_FOUND_BODY = JSON.stringify({ error: "not_found" });
+const HTTP_SHUTTING_DOWN_BODY = JSON.stringify({ error: "server_shutting_down" });
+const HTTP_BUSY_BODY = JSON.stringify({ error: "server_busy" });
+const HTTP_UNAUTHORIZED_BODY = JSON.stringify({ error: "unauthorized" });
 
 export async function main(args = process.argv.slice(2)): Promise<void> {
   if (args[0] === "install") {
@@ -191,8 +199,11 @@ async function serveHttp(runtime: ServerRuntime, shutdown: (reason: string) => P
     onerror: (error) => runtime.logger.error("MCP HTTP error", safeErrorDiagnostic(error)),
   });
   const nodeHandler = toNodeHandler(handler, { onerror: (error) => runtime.logger.error("MCP HTTP adapter error", safeErrorDiagnostic(error)) });
-  const allowedHostnames = config.http.allowRemote ? config.http.allowedHosts : LOCALHOST_HOSTNAMES;
-  const allowedOriginHostnames = config.http.allowRemote ? config.http.allowedOrigins : LOCALHOST_HOSTNAMES;
+  const allowedHostnames = new Set(config.http.allowRemote ? config.http.allowedHosts : LOCALHOST_HOSTNAMES);
+  const allowedOriginHostnames = new Set(config.http.allowRemote ? config.http.allowedOrigins : LOCALHOST_HOSTNAMES);
+  // The configured token is immutable for the lifetime of this listener.
+  // Hash it once instead of re-hashing it for every authenticated request.
+  const expectedAuthDigest = config.http.token ? authDigest(config.http.token) : undefined;
   const activeHttpRequests = new Set<Promise<void>>();
   const activeHttpStreams = new Set<Promise<void>>();
   let accepting = true;
@@ -202,7 +213,7 @@ async function serveHttp(runtime: ServerRuntime, shutdown: (reason: string) => P
     request.on("error", (error: unknown) => runtime.logger.error("MCP HTTP request error", safeErrorDiagnostic(error)));
     if (!accepting) {
       response.writeHead(503, { "content-type": "application/json", "retry-after": "1" });
-      response.end(JSON.stringify({ error: "server_shutting_down" }));
+      response.end(HTTP_SHUTTING_DOWN_BODY);
       return;
     }
     if (request.aborted) {
@@ -214,7 +225,7 @@ async function serveHttp(runtime: ServerRuntime, shutdown: (reason: string) => P
     setCorsHeaders(request, response);
     if (!requestPathMatches(request, config.http.path)) {
       response.writeHead(404, { "content-type": "application/json" });
-      response.end(JSON.stringify({ error: "not_found" }));
+      response.end(HTTP_NOT_FOUND_BODY);
       return;
     }
     if (request.method === "OPTIONS") {
@@ -227,16 +238,16 @@ async function serveHttp(runtime: ServerRuntime, shutdown: (reason: string) => P
       response.end();
       return;
     }
-    if (!authorized(request, config.http.token)) {
+    if (!authorized(request, expectedAuthDigest)) {
       response.writeHead(401, { "content-type": "application/json", "www-authenticate": "Bearer" });
-      response.end(JSON.stringify({ error: "unauthorized" }));
+      response.end(HTTP_UNAUTHORIZED_BODY);
       return;
     }
     let streamPool = isPotentialHttpStream(request) ? activeHttpStreams : activeHttpRequests;
     const poolLimit = streamPool === activeHttpStreams ? MAX_HTTP_STREAM_CONCURRENCY : MAX_HTTP_CONCURRENCY;
     if (streamPool.size >= poolLimit) {
       response.writeHead(503, { "content-type": "application/json", "retry-after": "1" });
-      response.end(JSON.stringify({ error: "server_busy" }));
+      response.end(HTTP_BUSY_BODY);
       return;
     }
     const slot: { pending?: Promise<void> } = {};
@@ -359,14 +370,14 @@ function requestPathMatches(request: IncomingMessage, expectedPath: string): boo
   }
 }
 
-function validateRequestHost(request: IncomingMessage, response: import("node:http").ServerResponse, allowedHostnames: readonly string[]): boolean {
+function validateRequestHost(request: IncomingMessage, response: import("node:http").ServerResponse, allowedHostnames: ReadonlySet<string>): boolean {
   const rawHost = request.headers.host;
   if (typeof rawHost !== "string" || !rawHost || rawHost.length > 255 || /[\u0000-\u0020/?#@]/.test(rawHost)) {
     return rejectHttpHeader(request, response, "Host header is not allowed.");
   }
   try {
     const parsed = new URL(`http://${rawHost}`);
-    if (parsed.username || parsed.password || parsed.pathname !== "/" || parsed.search || parsed.hash || !allowedHostnames.includes(parsed.hostname)) {
+    if (parsed.username || parsed.password || parsed.pathname !== "/" || parsed.search || parsed.hash || !allowedHostnames.has(parsed.hostname)) {
       return rejectHttpHeader(request, response, "Host header is not allowed.");
     }
   } catch {
@@ -375,7 +386,7 @@ function validateRequestHost(request: IncomingMessage, response: import("node:ht
   return true;
 }
 
-function validateRequestOrigin(request: IncomingMessage, response: import("node:http").ServerResponse, allowedOriginHostnames: readonly string[]): boolean {
+function validateRequestOrigin(request: IncomingMessage, response: import("node:http").ServerResponse, allowedOriginHostnames: ReadonlySet<string>): boolean {
   const rawOrigin = request.headers.origin;
   if (rawOrigin === undefined || rawOrigin === "") {
     return true;
@@ -385,7 +396,7 @@ function validateRequestOrigin(request: IncomingMessage, response: import("node:
   }
   try {
     const parsed = new URL(rawOrigin);
-    if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || parsed.username || parsed.password || parsed.pathname !== "/" || parsed.search || parsed.hash || !allowedOriginHostnames.includes(parsed.hostname)) {
+    if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || parsed.username || parsed.password || parsed.pathname !== "/" || parsed.search || parsed.hash || !allowedOriginHostnames.has(parsed.hostname)) {
       return rejectHttpHeader(request, response, "Origin header is not allowed.");
     }
   } catch {
@@ -426,7 +437,7 @@ function closeIncompleteRequestAfterResponse(request: IncomingMessage, response:
 async function dispatchHttpRequest(
   request: IncomingMessage,
   response: import("node:http").ServerResponse,
-  nodeHandler: (request: IncomingMessage, response: import("node:http").ServerResponse) => Promise<void>,
+  nodeHandler: (request: IncomingMessage, response: import("node:http").ServerResponse, parsedBody?: unknown) => Promise<void>,
   maxBodyBytes: number,
   promoteToStream?: () => void,
 ): Promise<void> {
@@ -449,9 +460,23 @@ async function dispatchHttpRequest(
     return;
   }
   const body = await readRequestBody(request, maxBodyBytes, HTTP_BODY_READ_TIMEOUT_MS);
-  if (isSubscriptionRequestBody(body)) {
+  const parsedBody = parseRequestBody(body);
+  if (parsedBody !== undefined && isSubscriptionRequestBody(parsedBody)) {
     promoteToStream?.();
   }
+  // Pass the parsed body through the adapter's documented fast path. This
+  // avoids replaying the buffered request through a second stream and avoids
+  // another UTF-8 decode/JSON parse inside createMcpHandler. Invalid or empty
+  // bodies retain the replay path so the adapter emits its normal parse
+  // errors and legacy routing behavior.
+  if (parsedBody !== undefined) {
+    await nodeHandler(request, response, parsedBody);
+    return;
+  }
+  // The original request stream has already been consumed by the bounded
+  // reader. Recreate it only for malformed/empty bodies, preserving the
+  // adapter's parse-error and legacy-routing behavior without paying this
+  // replay cost on valid MCP traffic.
   const replay = Readable.from(body) as unknown as IncomingMessage;
   Object.assign(replay, {
     method: request.method,
@@ -462,6 +487,17 @@ async function dispatchHttpRequest(
     httpVersionMinor: request.httpVersionMinor,
   });
   await nodeHandler(replay, response);
+}
+
+function parseRequestBody(body: Buffer): unknown | undefined {
+  if (body.byteLength === 0) {
+    return undefined;
+  }
+  try {
+    return JSON.parse(body.toString("utf8")) as unknown;
+  } catch {
+    return undefined;
+  }
 }
 
 async function readRequestBody(request: IncomingMessage, maxBodyBytes: number, timeoutMs: number): Promise<Buffer> {
@@ -484,7 +520,13 @@ async function readRequestBody(request: IncomingMessage, maxBodyBytes: number, t
       total = nextTotal;
       chunks.push(buffer);
     }
-    return Buffer.concat(chunks, total);
+    // Most MCP requests fit in one incoming chunk. Returning it directly
+    // avoids an extra full-body copy while retaining the same bounded buffer
+    // accounting for multi-chunk requests.
+    if (chunks.length === 0) {
+      return Buffer.alloc(0);
+    }
+    return chunks.length === 1 ? chunks[0] : Buffer.concat(chunks, total);
   };
   try {
     bodyPromise = read();
@@ -523,38 +565,35 @@ function isPotentialHttpStream(request: IncomingMessage): boolean {
   return request.method === "GET";
 }
 
-function isSubscriptionRequestBody(body: Buffer): boolean {
-  try {
-    const parsed: unknown = JSON.parse(body.toString("utf8"));
-    if (Array.isArray(parsed)) {
-      return parsed.some((item) => isSubscriptionMessage(item));
-    }
-    return isSubscriptionMessage(parsed);
-  } catch {
-    return false;
+function isSubscriptionRequestBody(body: unknown): boolean {
+  if (Array.isArray(body)) {
+    return body.some((item) => isSubscriptionMessage(item));
   }
+  return isSubscriptionMessage(body);
 }
 
 function isSubscriptionMessage(value: unknown): boolean {
   return Boolean(value && typeof value === "object" && (value as { method?: unknown }).method === "subscriptions/listen");
 }
 
-function authorized(request: IncomingMessage, token: string | undefined): boolean {
-  if (!token) {
+function authDigest(value: string | Buffer): Buffer {
+  return createHash("sha256").update(value).digest();
+}
+
+function authorized(request: IncomingMessage, expectedDigest: Buffer | undefined): boolean {
+  if (!expectedDigest) {
     return true;
   }
   const header = request.headers.authorization;
   if (typeof header !== "string") {
     return false;
   }
-  const match = header.match(/^Bearer[ \t]+(.+)$/i);
+  const match = AUTHORIZATION_PATTERN.exec(header);
   if (!match) {
     return false;
   }
-  const presented = Buffer.from(match[1]);
-  const expected = createHash("sha256").update(token).digest();
-  const presentedDigest = createHash("sha256").update(presented).digest();
-  return presentedDigest.length === expected.length && timingSafeEqual(presentedDigest, expected);
+  const presentedDigest = authDigest(match[1]);
+  return presentedDigest.length === expectedDigest.length && timingSafeEqual(presentedDigest, expectedDigest);
 }
 
 if (isMainModule()) {

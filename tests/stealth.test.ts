@@ -1,11 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import { buildFingerprintProfile } from "@/server/browser/fingerprints";
-import {
-  buildStealthInitScript,
-  buildStealthLaunchArgs,
-  STEALTH_BASELINE_ARGS,
-} from "@/server/browser/stealth";
+import { NATIVE_BROWSER_LAUNCH_ARGS, nativeBrowserLaunchArgs } from "@/server/browser/compatibility";
+import { buildStealthInitScript, STEALTH_BASELINE_ARGS } from "@/server/browser/stealth";
 
 // `new Function` compiles the source without running it, so a throw here is a
 // pure syntax error — proving the init script is well-formed page-JS.
@@ -13,44 +10,54 @@ function compiles(source: string) {
   expect(() => new Function(source)).not.toThrow();
 }
 
-const MARKERS = ["webdriver", "Google Inc.", "HeadlessChrome", "'chrome'", "permissions"];
+const MARKERS = ["webdriver", "permissions"];
 
-describe("buildStealthLaunchArgs", () => {
-  const profile = buildFingerprintProfile({ version: 145, language: "de-DE" });
+describe("nativeBrowserLaunchArgs — stealth baseline", () => {
+  it("appends the stealth baseline flags when enabled", () => {
+    const result = nativeBrowserLaunchArgs({ enabled: true });
+    for (const flag of STEALTH_BASELINE_ARGS) {
+      expect(result).toContain(flag);
+    }
+  });
+
+  it("omits stealth flags when disabled", () => {
+    const result = nativeBrowserLaunchArgs();
+    expect(result).not.toContain("--disable-blink-features=AutomationControlled");
+    expect(result).not.toContain("--lang=en-US");
+    expect(result).not.toContain("--window-size=1920,1080");
+  });
 
   it("returns a fresh array without mutating the shared baseline", () => {
-    const before = [...STEALTH_BASELINE_ARGS];
-    const returned = buildStealthLaunchArgs(profile, false);
+    const baselineBefore = [...STEALTH_BASELINE_ARGS];
+    const nativeBefore = [...NATIVE_BROWSER_LAUNCH_ARGS];
+    const returned = nativeBrowserLaunchArgs({ enabled: true, gpu: true });
     expect(returned).not.toBe(STEALTH_BASELINE_ARGS);
-    // Mutating the returned array must not affect the shared baseline.
+    expect(returned).not.toBe(NATIVE_BROWSER_LAUNCH_ARGS);
+    // Mutating the returned array must not affect the shared baseline or the
+    // native defaults.
     const mutable = [...returned];
     mutable.push("--test-only");
-    expect([...STEALTH_BASELINE_ARGS]).toEqual(before);
+    expect([...STEALTH_BASELINE_ARGS]).toEqual(baselineBefore);
+    expect([...NATIVE_BROWSER_LAUNCH_ARGS]).toEqual(nativeBefore);
     expect([...returned]).not.toContain("--test-only");
   });
 
-  it("interpolates --lang and --window-size from the profile", () => {
-    const result = buildStealthLaunchArgs(profile, false);
-    expect(result).toContain("--disable-blink-features=AutomationControlled");
-    expect(result).toContain(`--lang=${profile.languages[0]}`);
-    expect(result).toContain(`--window-size=${profile.viewport.width},${profile.viewport.height}`);
-  });
-
   it("appends GPU flags only when gpu is true", () => {
-    const without = buildStealthLaunchArgs(profile, false);
-    const withGpu = buildStealthLaunchArgs(profile, true);
-    expect(without).not.toContain("--use-angle=vulkan");
-    expect(without).not.toContain("--enable-vulkan");
+    const withoutGpu = nativeBrowserLaunchArgs({ enabled: true });
+    const withGpu = nativeBrowserLaunchArgs({ enabled: true, gpu: true });
+    expect(withoutGpu).not.toContain("--use-angle=vulkan");
+    expect(withoutGpu).not.toContain("--enable-vulkan");
     expect(withGpu).toContain("--use-angle=vulkan");
     expect(withGpu).toContain("--enable-vulkan");
-    expect(withGpu.length).toBe(without.length + 2);
+    expect(withGpu.length).toBe(withoutGpu.length + 2);
   });
 
-  it("produces a clean, deduped set", () => {
-    const result = buildStealthLaunchArgs(profile, true);
-    expect(result.filter((arg) => arg.startsWith("--lang"))).toHaveLength(1);
-    expect(result.filter((arg) => arg.startsWith("--window-size"))).toHaveLength(1);
+  it("produces a clean, deduped set with only explicit viewport claims", () => {
+    const result = nativeBrowserLaunchArgs({ enabled: true, gpu: true });
+    expect(result.filter((arg) => arg.startsWith("--lang"))).toHaveLength(0);
+    expect(result.filter((arg) => arg.startsWith("--window-size"))).toHaveLength(0);
     expect(result.filter((arg) => arg.startsWith("--disable-blink-features"))).toHaveLength(1);
+    expect(nativeBrowserLaunchArgs({ enabled: true, viewport: { width: 1366, height: 768 } })).toContain("--window-size=1366,768");
   });
 });
 
@@ -72,23 +79,11 @@ describe("buildStealthInitScript — balanced", () => {
     expect(source).toContain("Object.getPrototypeOf(navigator)");
   });
 
-  it("sets navigator.languages to the profile languages", () => {
-    expect(source).toContain(JSON.stringify(profile.languages));
-  });
-
-  it("forces the Google Inc. vendor", () => {
-    expect(source).toContain("Google Inc.");
-  });
-
-  it("strips the HeadlessChrome brand", () => {
-    expect(source).toContain("HeadlessChrome");
-    expect(source).toContain("indexOf('Headless')");
-  });
-
-  it("fabricates window.chrome", () => {
-    expect(source).toContain("'chrome'");
-    expect(source).toContain("runtime");
-    expect(source).toContain("defineProperty(window");
+  it("does not fabricate unsupported UA, platform, version, or browser claims", () => {
+    expect(source).not.toContain("Google Inc.");
+    expect(source).not.toContain("HeadlessChrome");
+    expect(source).not.toContain("userAgentData");
+    expect(source).not.toContain("FULL_VERSION_LIST");
   });
 
   it("guards permissions.query against insecure origins", () => {
@@ -103,23 +98,18 @@ describe("buildStealthInitScript — max", () => {
   const balanced = buildStealthInitScript(profile, {});
   const source = buildStealthInitScript(profile, { max: true });
 
-  it("keeps every balanced marker", () => {
+  it("keeps the supported balanced markers", () => {
     for (const marker of MARKERS) {
       expect(source).toContain(marker);
     }
-    expect(source).toContain(JSON.stringify(profile.languages));
     expect(balanced).not.toContain("hardwareConcurrency");
   });
 
-  it("adds the max markers", () => {
-    expect(source).toContain("hardwareConcurrency");
-    expect(source).toContain("deviceMemory");
-    expect(source).toContain("plugins");
-    expect(source).toContain("mimeTypes");
-    expect(source).toContain("canPlayType");
-    expect(source).toContain("contentWindow");
-    expect(source).toContain("Intl");
-    expect(source).toContain("timeZone");
+  it("does not add unsupported identity patches in max mode", () => {
+    expect(source).not.toContain("hardwareConcurrency");
+    expect(source).not.toContain("deviceMemory");
+    expect(source).not.toContain("plugins");
+    expect(source).not.toContain("contentWindow");
   });
 
   it("is syntactically valid page-JS", () => {
@@ -128,12 +118,13 @@ describe("buildStealthInitScript — max", () => {
 });
 
 describe("buildStealthInitScript — coherence & determinism", () => {
-  it("interpolates the profile (languages + brands), not drift", () => {
-    const profile = buildFingerprintProfile({ version: 145, language: "de-DE" });
-    const source = buildStealthInitScript(profile, {});
-    expect(source).toContain(JSON.stringify(profile.languages));
-    expect(source).toContain(JSON.stringify(profile.brands));
-    expect(source).toContain('"145"'); // brand versions derived from profile.version
+  it("interpolates only an explicit viewport, not a fabricated identity", () => {
+    const profile = buildFingerprintProfile({ version: 145, language: "de-DE", viewport: { width: 1366, height: 768 } });
+    const source = buildStealthInitScript(profile, { applyViewport: true });
+    expect(source).toContain("1366");
+    expect(source).toContain("768");
+    expect(source).not.toContain(JSON.stringify(profile.brands));
+    expect(source).not.toContain('"145"');
   });
 
   it("is deterministic for identical inputs", () => {

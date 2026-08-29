@@ -51,12 +51,20 @@ export interface TypeOptions {
 }
 
 const DEFAULT_TYPE: Required<Omit<TypeOptions, "rng">> & { rng: () => number } = {
-  minDelayMs: 45,
-  maxDelayMs: 160,
-  thinkPauseChance: 0.08,
-  thinkPauseMinMs: 300,
-  thinkPauseMaxMs: 900,
+  // Keep interactions recognizably human without imposing multi-second
+  // waits on every short field. Callers can still inject deterministic
+  // timings and an RNG in tests.
+  minDelayMs: 5,
+  maxDelayMs: 20,
+  thinkPauseChance: 0.01,
+  thinkPauseMinMs: 40,
+  thinkPauseMaxMs: 120,
   rng: Math.random,
+};
+
+const DEFAULT_SCROLL: Required<ScrollOptions> = {
+  scrollSpeed: 90,
+  scrollDelay: 20,
 };
 
 /** Uniform sample in `[min, max)` from an injected random source. */
@@ -65,7 +73,7 @@ export function randomRange(min: number, max: number, rand: () => number = Math.
 }
 
 /** Resolve after a randomized delay within `[minMs, maxMs]`. */
-export function thinkTime(minMs = 200, maxMs = 1500, rand: () => number = Math.random): Promise<void> {
+export function thinkTime(minMs = 20, maxMs = 120, rand: () => number = Math.random): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, Math.max(0, Math.floor(randomRange(minMs, maxMs, rand))));
   });
@@ -87,12 +95,14 @@ export async function humanMouseMove(
   y1: number,
   x2: number,
   y2: number,
-  durationMs = 400,
+  durationMs = 80,
   options: MoveOptions = {},
 ): Promise<void> {
   const cursor = new GhostCursor(page, { start: { x: x1, y: y1 } });
+  const configuredDuration = options.durationMs ?? durationMs;
+  const moveDelay = Number.isFinite(configuredDuration) ? Math.max(0, Math.floor(configuredDuration)) : 0;
   await cursor.moveTo({ x: x2, y: y2 }, {
-    moveDelay: durationMs,
+    moveDelay,
     randomizeMoveDelay: options.randomizeMoveDelay ?? true,
     ...(options.moveSpeed !== undefined && { moveSpeed: options.moveSpeed }),
     ...(options.spreadOverride !== undefined && { spreadOverride: options.spreadOverride }),
@@ -126,8 +136,9 @@ export async function humanType(page: Page, text: string, options: TypeOptions =
 /** Human-like scroll to a destination via ghost-cursor. */
 export async function humanScroll(page: Page, to: ScrollDestination, options: ScrollOptions = {}): Promise<void> {
   const cursor = new GhostCursor(page);
+  const cfg = { ...DEFAULT_SCROLL, ...options };
   await cursor.scrollTo(to, {
-    ...(options.scrollSpeed !== undefined && { scrollSpeed: options.scrollSpeed }),
-    ...(options.scrollDelay !== undefined && { scrollDelay: options.scrollDelay }),
+    scrollSpeed: cfg.scrollSpeed,
+    scrollDelay: cfg.scrollDelay,
   });
 }

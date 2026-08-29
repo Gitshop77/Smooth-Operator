@@ -20,6 +20,11 @@ const RETRY_MAX_DELAY_MS = 2_000;
 const ZERO_WIDTH_PATTERN = /[\u200B-\u200D\u2060\uFEFF]/g;
 const CONTROL_CHARACTER_PATTERN = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/g;
 const ANTI_BOT_PATTERN = /(?:captcha|challenge|unusual\s+traffic|automated\s+(?:queries|requests)|access\s+denied|temporarily\s+blocked|too\s+many\s+requests)/i;
+const RESULT_ANCHOR_PATTERN = /<a\b[^>]*>[\s\S]*?<\/a>/gi;
+const RESULT_CLASS_ATTRIBUTE_PATTERN = /\bclass\s*=\s*(["'])([^"']*)\1/i;
+const RESULT_HREF_ATTRIBUTE_PATTERN = /\bhref\s*=\s*(["'])([^"']*)\1/i;
+const NEXT_RESULT_PATTERN = /<a\b[^>]*\bclass\s*=\s*(["'])[^"']*\bresult__a\b[^"']*\1/i;
+const RESULT_SNIPPET_PATTERN = /\bclass\s*=\s*(["'])[^"']*\bresult__snippet\b[^"']*\1[^>]*>([\s\S]*?)<\/[^>]+>/i;
 
 type ResearchItem = { title: string; url: string; untrustedUrl: string; snippet: string };
 
@@ -218,8 +223,7 @@ async function fetchWithRetry(url: URL, signal: AbortSignal): Promise<{ response
     await waitForRetry(retryDelayMs(response.headers, attempt), signal);
   }
 
-  // The loop always returns or throws. Keep a defensive failure for future
-  // edits so callers never receive an undefined response.
+  // Defensive fallback ensures callers never receive an undefined response.
   throw new AppError("RESEARCH_FAILED", "The search request failed.", {
     retryable: true,
     details: { classification: "unexpected", attempts: MAX_ATTEMPTS },
@@ -362,7 +366,9 @@ function parseResults(html: string, maxResults: number, maxChars: number, baseUr
   let textUsed = 0;
   let textTruncated = false;
 
-  for (const candidate of candidates.slice(0, maxResults)) {
+  for (let index = 0; index < candidates.length && index < maxResults; index += 1) {
+    const candidate = candidates[index];
+    if (!candidate) continue;
     textTruncated ||= candidate.titleTruncated || candidate.snippetTruncated;
     const remaining = maxChars - textUsed;
     if (remaining <= 0) {
@@ -396,20 +402,22 @@ function parseResultCandidates(html: string, maxCandidates: number, baseUrl: str
   const seenUrls = new Set<string>();
   // Do not rely on a particular attribute order. DuckDuckGo has emitted both
   // `class`-before-`href` and `href`-before-`class` variants over time.
-  const pattern = /<a\b[^>]*>[\s\S]*?<\/a>/gi;
+  // Reset the module-level scanner because this parser is synchronous and may
+  // be called repeatedly for independent bounded responses.
+  RESULT_ANCHOR_PATTERN.lastIndex = 0;
   let match: RegExpExecArray | null;
-  while (candidates.length < maxCandidates && (match = pattern.exec(html))) {
+  while (candidates.length < maxCandidates && (match = RESULT_ANCHOR_PATTERN.exec(html))) {
     const anchor = match[0];
     const tagEnd = anchor.indexOf(">");
     if (tagEnd < 0) {
       continue;
     }
     const openingTag = anchor.slice(0, tagEnd + 1);
-    const classMatch = /\bclass\s*=\s*(["'])([^"']*)\1/i.exec(openingTag);
+    const classMatch = RESULT_CLASS_ATTRIBUTE_PATTERN.exec(openingTag);
     if (!classMatch?.[2].split(/\s+/).includes("result__a")) {
       continue;
     }
-    const hrefMatch = /\bhref\s*=\s*(["'])([^"']*)\1/i.exec(openingTag);
+    const hrefMatch = RESULT_HREF_ATTRIBUTE_PATTERN.exec(openingTag);
     if (!hrefMatch) {
       continue;
     }
@@ -422,9 +430,9 @@ function parseResultCandidates(html: string, maxCandidates: number, baseUrl: str
     const titleContent = anchor.slice(tagEnd + 1).replace(/<\/a>\s*$/i, "");
     const title = boundedResearchText(decodeEntities(stripTags(titleContent)).trim(), MAX_RESULT_TITLE_CHARS);
     const tailWindow = html.slice(match.index + match[0].length, match.index + match[0].length + 3_000);
-    const nextResult = /<a\b[^>]*\bclass\s*=\s*(["'])[^"']*\bresult__a\b[^"']*\1/i.exec(tailWindow);
+    const nextResult = NEXT_RESULT_PATTERN.exec(tailWindow);
     const tail = nextResult ? tailWindow.slice(0, nextResult.index) : tailWindow;
-    const snippetMatch = /\bclass\s*=\s*(["'])[^"']*\bresult__snippet\b[^"']*\1[^>]*>([\s\S]*?)<\/[^>]+>/i.exec(tail);
+    const snippetMatch = RESULT_SNIPPET_PATTERN.exec(tail);
     const snippet = snippetMatch
       ? boundedResearchText(decodeEntities(stripTags(snippetMatch[2])).trim(), MAX_RESULT_SNIPPET_CHARS)
       : { value: "", truncated: false };

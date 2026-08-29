@@ -6,6 +6,8 @@ const MAX_SAFE_URL_LENGTH = 4_096;
 const MAX_SAFE_QUERY_PARAMETERS = 64;
 const MAX_SAFE_PATH_LENGTH = 2_048;
 const QUERY_TRUNCATION_KEY = "__smooth_operator_truncated";
+const MAX_GLOB_CACHE_ENTRIES = 128;
+const globPatternCache = new Map<string, RegExp | null>();
 
 export function sanitizeUrl(rawUrl: string): string {
   if (rawUrl.length > MAX_SAFE_INPUT_LENGTH) {
@@ -52,6 +54,15 @@ export function globMatches(value: string, glob: string): boolean {
   if (value.length > MAX_SAFE_INPUT_LENGTH || glob.length > MAX_SAFE_INPUT_LENGTH) {
     return false;
   }
+  const cached = globPatternCache.get(glob);
+  if (cached !== undefined || globPatternCache.has(glob)) {
+    if (!cached) return false;
+    // Promote hot patterns so a burst of one-off waits cannot evict a pattern
+    // used by a long-lived URL wait loop.
+    globPatternCache.delete(glob);
+    globPatternCache.set(glob, cached);
+    return cached.test(value);
+  }
   // URL globs use the browser-use convention: `*` stays within one URL
   // component while `**` may cross `/` boundaries. Treating every star as
   // `.*` makes a pattern such as `https://example.test/*` unexpectedly match
@@ -68,9 +79,21 @@ export function globMatches(value: string, glob: string): boolean {
       expression += character.replace(/[.+?^${}()|[\]\\]/g, "\\$&");
     }
   }
+  let compiled: RegExp;
   try {
-    return new RegExp(`${expression}$`).test(value);
+    compiled = new RegExp(`${expression}$`);
   } catch {
+    if (globPatternCache.size >= MAX_GLOB_CACHE_ENTRIES) {
+      const oldest = globPatternCache.keys().next().value;
+      if (oldest !== undefined) globPatternCache.delete(oldest);
+    }
+    globPatternCache.set(glob, null);
     return false;
   }
+  if (globPatternCache.size >= MAX_GLOB_CACHE_ENTRIES) {
+    const oldest = globPatternCache.keys().next().value;
+    if (oldest !== undefined) globPatternCache.delete(oldest);
+  }
+  globPatternCache.set(glob, compiled);
+  return compiled.test(value);
 }

@@ -3,6 +3,7 @@ import { stderr } from "node:process";
 export type LogLevel = "debug" | "info" | "warn" | "error";
 type LogFields = Record<string, unknown>;
 type LogSink = (line: string) => void;
+const EMPTY_FIELDS: LogFields = Object.freeze({});
 
 const LEVEL_WEIGHT: Record<LogLevel, number> = {
   debug: 10,
@@ -179,23 +180,23 @@ export class Logger {
     return this.minLevel;
   }
 
-  debug(message: string, fields: LogFields = {}): void {
+  debug(message: string, fields?: LogFields): void {
     this.write("debug", message, fields);
   }
 
-  info(message: string, fields: LogFields = {}): void {
+  info(message: string, fields?: LogFields): void {
     this.write("info", message, fields);
   }
 
-  warn(message: string, fields: LogFields = {}): void {
+  warn(message: string, fields?: LogFields): void {
     this.write("warn", message, fields);
   }
 
-  error(message: string, fields: LogFields = {}): void {
+  error(message: string, fields?: LogFields): void {
     this.write("error", message, fields);
   }
 
-  private write(level: LogLevel, message: string, fields: LogFields): void {
+  private write(level: LogLevel, message: string, fields?: LogFields): void {
     if (LEVEL_WEIGHT[level] < this.minWeight) {
       return;
     }
@@ -205,7 +206,7 @@ export class Logger {
       level,
       message,
       ...this.context,
-      ...fields,
+      ...(fields ?? EMPTY_FIELDS),
     });
     this.sink(JSON.stringify(line));
   }

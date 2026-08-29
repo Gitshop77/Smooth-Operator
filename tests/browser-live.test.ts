@@ -220,8 +220,14 @@ describe("live browser contract", () => {
     await service.execute({ action: "click", target: "#popup", newTab: true });
     expect((await service.listTabs()).some((tab) => tab.url.includes("/popup"))).toBe(true);
     await service.execute({ action: "navigate", url: `${baseUrl}/challenge` });
-    expect(await service.execute({ action: "detect_challenge" })).toMatchObject({ status: "present", bypassAttempted: false });
-    await expect(service.execute({ action: "click", target: "#action-button" })).rejects.toMatchObject({ code: "CHALLENGE_REQUIRES_HUMAN" });
+    expect(await service.execute({ action: "detect_challenge" })).toMatchObject({ status: "present" });
+    expect(await service.execute({ action: "solve_challenge", includeScreenshot: true })).toMatchObject({
+      solved: false,
+      workflow: "ai_action_required",
+      verification: "challenge_present",
+      screenshotBase64: expect.any(String),
+      refs: expect.any(Array),
+    });
     expect(await service.execute({ action: "wait_for_human", timeoutMs: 500, pollMs: 250 })).toMatchObject({ status: "timed_out" });
     const abortController = new AbortController();
     const cancellableWait = service.execute({ action: "wait_for_human", timeoutMs: 10_000, pollMs: 250 }, abortController.signal);

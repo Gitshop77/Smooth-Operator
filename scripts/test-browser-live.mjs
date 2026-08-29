@@ -51,15 +51,23 @@ async function discoverChrome() {
     ? ["chrome.exe", "brave.exe", "msedge.exe", "chromium.exe"]
     : ["google-chrome", "google-chrome-stable", "google-chrome-beta", "google-chrome-unstable", "brave-browser", "brave", "microsoft-edge", "microsoft-edge-stable", "chromium", "chromium-browser"];
   const locator = process.platform === "win32" ? "where.exe" : "which";
-  for (const command of commands) {
+  // The locator calls are independent. Run them together, then retain the
+  // documented command preference when selecting the first usable result;
+  // this avoids paying the full per-command timeout on machines without a
+  // browser while keeping discovery deterministic.
+  const located = await Promise.all(commands.map(async (command) => {
     try {
       const result = await execFileAsync(locator, [command], { maxBuffer: 64_000, timeout: 5_000 });
       const candidate = result.stdout.trim().split(/\r?\n/, 1)[0];
-      if (candidate && await executable(candidate)) {
-        return candidate;
-      }
+      return candidate && await executable(candidate) ? candidate : undefined;
     } catch {
       // Try the next well-known channel name.
+      return undefined;
+    }
+  }));
+  for (const candidate of located) {
+    if (candidate) {
+      return candidate;
     }
   }
   throw new Error("No executable Chrome/Chromium installation was found. Install Chrome or set SMOOTH_OPERATOR_TEST_BROWSER_EXECUTABLE before running the opt-in live suite.");

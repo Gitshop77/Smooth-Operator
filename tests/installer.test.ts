@@ -72,7 +72,7 @@ describe("harness installer", () => {
     const configPath = join(directory, "claude_desktop_config.json");
     try {
       await writeFile(configPath, `{
-        // Keep this URL intact while comments are removed.
+        // Preserve this URL while stripping JSONC comments and trailing commas.
         "mcpServers": {
           "existing": { "command": "node", "args": ["https://example.test/a//b",], },
         },

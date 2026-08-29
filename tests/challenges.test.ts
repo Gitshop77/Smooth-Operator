@@ -14,7 +14,6 @@ describe("challenge classification", () => {
 
     expect(result.detected).toBe(true);
     expect(result.humanActionRequired).toBe(true);
-    expect(result.bypassAttempted).toBe(false);
     expect(result.matches.map((match) => match.kind)).toEqual(expect.arrayContaining(["cloudflare-js", "cloudflare-turnstile"]));
   });
 
@@ -29,7 +28,6 @@ describe("challenge classification", () => {
       detected: false,
       matches: [],
       humanActionRequired: false,
-      bypassAttempted: false,
     });
   });
 
@@ -52,7 +50,6 @@ describe("challenge classification", () => {
     const result = classifyChallenge({ title: "Verification", text: "Please verify you are human to continue." });
     expect(result.status).toBe("present");
     expect(result.matches).toEqual([{ kind: "generic-challenge", confidence: "low", indicators: ["verify you are human", "please verify"] }]);
-    expect(result.bypassAttempted).toBe(false);
   });
 
   it("fails closed on vendor-less automated-access wording", () => {
@@ -61,7 +58,6 @@ describe("challenge classification", () => {
       text: "Our systems detected automated access. Access to this site has been denied.",
     });
     expect(result.matches).toEqual([{ kind: "generic-challenge", confidence: "low", indicators: ["unusual traffic", "automated access", "access to this site has been denied"] }]);
-    expect(result.bypassAttempted).toBe(false);
   });
 
   it("requires corroboration for auth walls and rate limits", () => {
@@ -83,28 +79,24 @@ describe("challenge classification", () => {
   });
 });
 
-describe("classifyChallenge bypassAttempted option", () => {
-  it("defaults bypassAttempted to false when no options are passed", () => {
+describe("classifyChallenge evidence", () => {
+  it("returns a bounded classification without solver state", () => {
     const result = classifyChallenge({ title: "Verification", text: "Please verify you are human to continue." });
-    expect(result.bypassAttempted).toBe(false);
+    expect(result).not.toHaveProperty("bypassAttempted");
+    expect(result).not.toHaveProperty("scoreBased");
   });
 
-  it("returns bypassAttempted true when requested via options", () => {
-    const result = classifyChallenge(
-      { title: "Verification", text: "Please verify you are human to continue." },
-      { bypassAttempted: true },
-    );
-    expect(result.bypassAttempted).toBe(true);
-  });
-
-  it("keeps detection evidence intact while reporting bypassAttempted", () => {
-    const result = classifyChallenge(
-      { title: "Just a moment...", html: '<div class="cf-turnstile"></div>', visibleMarkers: ["DIV cf-turnstile"] },
-      { bypassAttempted: true },
-    );
+  it("keeps detection evidence intact", () => {
+    const result = classifyChallenge({ title: "Just a moment...", html: '<div class="cf-turnstile"></div>', visibleMarkers: ["DIV cf-turnstile"] });
     expect(result.detected).toBe(true);
     expect(result.humanActionRequired).toBe(true);
-    expect(result.bypassAttempted).toBe(true);
+  });
+
+  it("puts enterprise and version-specific kinds before overlapping generic markers", () => {
+    const enterprise = classifyChallenge({ visibleMarkers: ["DIV recaptcha-enterprise g-recaptcha"] });
+    expect(enterprise.matches[0]?.kind).toBe("recaptcha-enterprise");
+    const geetest = classifyChallenge({ visibleMarkers: ["DIV geetest-v4 geetest"] });
+    expect(geetest.matches[0]?.kind).toBe("geetest-v4");
   });
 });
 

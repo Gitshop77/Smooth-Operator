@@ -9,11 +9,8 @@ const ERROR_DETAILS_MAX_BYTES = 8_000;
 const ERROR_DETAIL_VALUE_MAX_CHARS = 1_000;
 const ERROR_TRUNCATION_MARKER = "…[TRUNCATED]";
 const ERROR_CODE_PATTERN = /^[A-Z][A-Z0-9_]*$/;
-// Solver error codes exported for the CAPTCHA resolver (Task 6). AppErrors are
-// constructed there, not here; these are only stable, redactable identifiers.
-export const SOLVER_TIMEOUT = "SOLVER_TIMEOUT";
-export const SOLVER_REFUSED = "SOLVER_REFUSED";
 const UTF8_ENCODER = new TextEncoder();
+const ERROR_TRUNCATION_MARKER_BYTES = UTF8_ENCODER.encode(ERROR_TRUNCATION_MARKER).byteLength;
 
 export class AppError extends Error {
   readonly code: string;
@@ -103,19 +100,6 @@ export function toolResult<T>(value: T): CallToolResult {
     content: [{ type: "text", text: JSON.stringify(safeValue) }],
     structuredContent,
   };
-}
-
-export async function callTool<T>(operation: () => Promise<T>, onError?: (error: unknown) => void): Promise<CallToolResult> {
-  try {
-    return toolResult(await operation());
-  } catch (error) {
-    try {
-      onError?.(error);
-    } catch {
-      // Diagnostics must never change the protocol response path.
-    }
-    return toolError(error);
-  }
 }
 
 export function requireField<T>(value: T | undefined, field: string): T {
@@ -214,7 +198,7 @@ function boundErrorDetails(value: unknown): ErrorDetails {
 function jsonByteLength(value: unknown): number {
   try {
     const json = JSON.stringify(value);
-    return json === undefined ? 0 : UTF8_ENCODER.encode(json).byteLength;
+    return json === undefined ? 0 : Buffer.byteLength(json, "utf8");
   } catch {
     return Number.POSITIVE_INFINITY;
   }
@@ -225,18 +209,22 @@ function truncateWithMarker(value: string, maxBytes: number): string {
   if (bytes.byteLength <= maxBytes) {
     return value;
   }
-  const markerBytes = UTF8_ENCODER.encode(ERROR_TRUNCATION_MARKER).byteLength;
+  const markerBytes = ERROR_TRUNCATION_MARKER_BYTES;
   return `${truncateUtf8(value, Math.max(0, maxBytes - markerBytes))}${ERROR_TRUNCATION_MARKER}`;
 }
 
 function truncateUtf8(value: string, maxBytes: number): string {
   const bytes = UTF8_ENCODER.encode(value);
-  if (bytes.byteLength <= maxBytes) {
+  const boundedMaxBytes = Math.max(0, Math.floor(maxBytes));
+  if (bytes.byteLength <= boundedMaxBytes) {
     return value;
+  }
+  if (bytes.byteLength === value.length) {
+    return value.slice(0, boundedMaxBytes);
   }
   const decoder = new TextDecoder();
   let low = 0;
-  let high = Math.min(bytes.byteLength, Math.max(0, Math.floor(maxBytes)));
+  let high = Math.min(bytes.byteLength, boundedMaxBytes);
   while (low < high) {
     const midpoint = Math.ceil((low + high) / 2);
     const candidate = decoder.decode(bytes.slice(0, midpoint));

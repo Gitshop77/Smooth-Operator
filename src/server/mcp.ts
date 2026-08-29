@@ -34,7 +34,7 @@ import {
   WaitRequestSchema,
   type BrowserAction,
 } from "./contracts";
-import { AppError, callTool as safeCallTool, safeErrorDiagnostic, toolError, toolResult } from "./errors";
+import { AppError, safeErrorDiagnostic, toolError } from "./errors";
 import { redactValue } from "./logger";
 import type { ServerRuntime } from "./runtime";
 import { SERVER_VERSION } from "./version";
@@ -56,15 +56,20 @@ const MCP_OUTPUT_INTERACTIVE_LIMIT = 80;
 const MCP_OUTPUT_ENTRY_LIMIT = 20;
 const MCP_OUTPUT_NODE_LIMIT = 80;
 const MCP_OUTPUT_MATCH_LIMIT = 12;
+const UTF8_ENCODER = new TextEncoder();
 const MCP_OUTPUT_TRUNCATION_MARKER = "\n[MCP_OUTPUT_TRUNCATED]\n";
+const MCP_OUTPUT_TRUNCATION_MARKER_BYTES = UTF8_ENCODER.encode(MCP_OUTPUT_TRUNCATION_MARKER).byteLength;
 const MCP_ERROR_CODE_MAX_BYTES = 200;
 const MCP_ERROR_MESSAGE_MAX_BYTES = 4_000;
-const MCP_ERROR_DETAILS_MAX_BYTES = 8_000;
-const UTF8_ENCODER = new TextEncoder();
+const MCP_JSON_TEXT_CACHE = new WeakMap<object, string>();
 const NetworkIdleSchema = z.object({
   timeoutMs: z.number().int().min(100).max(120_000).optional(),
   pageId: z.string().trim().min(1).max(200).optional(),
 }).strict();
+const WaitForElementRequestSchema = SelectorRequestSchema.extend({
+  state: z.enum(["visible", "hidden", "attached", "detached"]).optional(),
+  timeoutMs: z.number().int().min(100).max(120_000).optional(),
+});
 const SelectRequestSchema = SelectorRequestSchema.extend({
   optionValue: z.string().trim().min(1).max(2_000).optional(),
   optionValues: z.array(z.string().trim().min(1).max(2_000)).min(1).max(200).optional(),
@@ -235,6 +240,17 @@ const BrowserUseExtractSchema = z.object({
   pageId: z.string().trim().min(1).max(200).optional(),
   frameId: z.string().trim().min(1).max(200).optional(),
 }).strict();
+const BrowserWorkflowPromptSchema = z.object({
+  task: z.string().trim().min(1).max(10_000),
+  url: z.string().trim().min(1).max(8_000).optional(),
+}).strict();
+const QuestionPromptSchema = z.object({
+  question: z.string().trim().min(1).max(4_000),
+}).strict();
+// ResourceTemplate is immutable after construction; sharing its parsed URI
+// template avoids recompiling the same pattern for every stateless HTTP
+// request while each McpServer still owns its registered callback wrapper.
+const BrowserPageResourceTemplate = new ResourceTemplate("smooth-operator://browser/page/{pageId}", { list: undefined });
 
 const READ_ONLY: ToolAnnotations = { readOnlyHint: true, openWorldHint: false };
 const MUTATING: ToolAnnotations = { readOnlyHint: false, idempotentHint: false, destructiveHint: false, openWorldHint: false };
@@ -244,7 +260,7 @@ const BROWSER_READ_ONLY: ToolAnnotations = { ...READ_ONLY, openWorldHint: true }
 const BROWSER_MUTATING: ToolAnnotations = { ...MUTATING, openWorldHint: true };
 const BROWSER_DESTRUCTIVE: ToolAnnotations = { ...DESTRUCTIVE, openWorldHint: true };
 
-const MCP_INSTRUCTIONS = [
+export const MCP_INSTRUCTIONS = [
   "Use browser_snapshot or browser_get_state before interacting so element refs/indexes and viewport coordinates are current.",
   "Serialize dependent browser calls as observe -> one navigation or mutation -> observe. Parallel calls are appropriate only for independent read-only observations; a parallel snapshot and action do not form a transaction.",
   "Give each request a bounded timeout or cancellation signal. After a timeout or cancellation, inspect current state before retrying a mutation; cancellation is not proof that a mutation did not happen.",
@@ -256,7 +272,8 @@ const MCP_INSTRUCTIONS = [
   "Prefer stable refs, indexes, and selectors over coordinates; use coordinates only when the page cannot expose a reliable target.",
   "For open shadow roots, Puppeteer pierce/ selectors may be used explicitly; closed shadow roots remain unavailable.",
   "Use browser_batch for short validated sequences, but keep destructive actions separate when user confirmation is needed.",
-  "CAPTCHA handling is opt-in: stealth + human-in-the-loop by default; an optional solver can be enabled via config. Use browser_challenge to detect, browser_wait_for_human for human takeover, and browser_solve_challenge only when a solver is configured.",
+  "Use an efficient observe -> act -> verify loop: observe with browser_snapshot or browser_get_state, perform one bounded browser action, then observe again to verify the resulting state. Keep refs and indexes fresh after navigation, scrolling, or DOM changes; parallelize only independent read-only observations.",
+  "browser_solve_challenge is an internal connected-AI loop. It collects a fresh challenge classification plus bounded visual/state evidence, then the connected AI uses normal browser actions and calls it again to verify. Never claim a challenge is solved unless the final classification explicitly reports it absent; unknown or failed classification is not success.",
   "The server contains no LLM or agent planner; the MCP client is responsible for reasoning, retries, and task completion.",
 ].join(" ");
 
@@ -383,7 +400,7 @@ function registerBrowserTools(server: McpServer, runtime: ServerRuntime): void {
   registerAction(server, runtime, "browser_close_all", "Close browser connection", "Browser-use-compatible alias for browser_close.", EmptyInputSchema, "close_browser", undefined, BROWSER_DESTRUCTIVE);
 
   registerAction(server, runtime, "browser_wait", "Wait", "Wait for a bounded period while remaining cancellable.", WaitRequestSchema, "wait");
-  registerAction(server, runtime, "browser_wait_for_element", "Wait for an element", "Wait for a CSS selector to become visible, hidden, attached, or detached.", SelectorRequestSchema.extend({ state: z.enum(["visible", "hidden", "attached", "detached"]).optional(), timeoutMs: z.number().int().min(100).max(120_000).optional() }), "wait_for_element");
+  registerAction(server, runtime, "browser_wait_for_element", "Wait for an element", "Wait for a CSS selector to become visible, hidden, attached, or detached.", WaitForElementRequestSchema, "wait_for_element");
   registerAction(server, runtime, "browser_wait_for_text", "Wait for text", "Wait until text appears on the current page.", WaitForTextRequestSchema, "wait_for_text");
   registerAction(server, runtime, "browser_wait_for_url", "Wait for URL", "Wait until the current URL matches a glob pattern.", WaitForUrlRequestSchema, "wait_for_url");
   registerAction(server, runtime, "browser_wait_for_network_idle", "Wait for network idle", "Wait for a bounded network-idle window.", NetworkIdleSchema, "wait_for_network_idle");
@@ -420,11 +437,36 @@ function registerBrowserTools(server: McpServer, runtime: ServerRuntime): void {
   registerAction(server, runtime, "browser_hover", "Hover an element", "Move the pointer over a CSS selector or snapshot ref.", TargetRequestSchema, "hover");
   registerAction(server, runtime, "browser_move", "Move the pointer", "Move the pointer to bounded top-level viewport coordinates without clicking. Use this to inspect hover-driven UI before choosing a click point.", MoveRequestSchema, "move", (input) => ({ ...input, coordinateX: input.coordinateX ?? input.coordinate_x, coordinateY: input.coordinateY ?? input.coordinate_y }));
   registerAction(server, runtime, "browser_press_and_hold", "Press and hold or drag", "Press a mouse button on an element for a bounded duration. Optional startCoordinateX/startCoordinateY and endCoordinateX/endCoordinateY drag with interpolated mouse events; path supplies a bounded explicit pointer path for drawing or selection gestures.", HoldRequestSchema, "press_and_hold");
-  registerAction(server, runtime, "browser_challenge", "Detect a web challenge", "Detect common CAPTCHA and anti-bot challenge markers. Solving is opt-in: use browser_solve_challenge (when a solver is configured) or browser_wait_for_human for a human-only step.", EmptyInputSchema, "detect_challenge");
-  registerAction(server, runtime, "browser_wait_for_human", "Wait for human takeover", "Wait for a user to complete a visible challenge or sign-in step in the browser. Solving is opt-in via browser_solve_challenge; this tool performs no solving.", WaitForHumanRequestSchema, "wait_for_human");
-  registerAction(server, runtime, "browser_solve_challenge", "Solve a web challenge", "Attempt to solve a detected CAPTCHA or anti-bot challenge via an opt-in solver service (capsolver, 2captcha, or anticaptcha) when configured. Falls back to human-in-the-loop when no solver is configured or the challenge is unsupported; the result reports `bypassAttempted`.", SolveChallengeRequestSchema, "solve_challenge");
+  registerAction(server, runtime, "browser_challenge", "Detect a web challenge", "Detect bounded challenge markers and return a fresh classification for the current page. A detected challenge is not evidence that it has been solved.", EmptyInputSchema, "detect_challenge");
+  registerAction(server, runtime, "browser_wait_for_human", "Wait for human takeover", "Optionally wait for a user to complete a visible challenge or sign-in step in the browser. The result includes a fresh final classification.", WaitForHumanRequestSchema, "wait_for_human");
+  server.registerTool(
+    "browser_solve_challenge",
+    {
+      title: "Solve a web challenge",
+      description: "Run the internal connected-AI challenge loop: collect fresh challenge classification and bounded visual/state evidence, let the connected AI use normal browser actions, then call again to verify. The result is successful only when the final classification explicitly reports the challenge absent.",
+      inputSchema: SolveChallengeRequestSchema,
+      annotations: BROWSER_READ_ONLY,
+    },
+    async (input, ctx) => {
+      const { include_screenshot, full_page, full, max_dim, ...fields } = input;
+      const normalized: InputRecord = { ...fields };
+      if (normalized.includeScreenshot === undefined && include_screenshot !== undefined) {
+        normalized.includeScreenshot = include_screenshot;
+      }
+      if (normalized.fullPage === undefined && (full_page !== undefined || full !== undefined)) {
+        normalized.fullPage = full_page ?? full;
+      }
+      if (normalized.maxDimension === undefined && max_dim !== undefined) {
+        normalized.maxDimension = max_dim;
+      }
+      return callVisualTool(() => runtime.run({
+        action: "solve_challenge",
+        ...normalized,
+      } as BrowserAction, ctx.mcpReq.signal), runtime);
+    },
+  );
 
-  registerAction(server, runtime, "browser_evaluate", "Evaluate page JavaScript", "Run page JavaScript given either a code or expression argument, only when the explicit eval gate is enabled; output is redacted and bounded.", EvaluateRequestSchema, "evaluate");
+  registerAction(server, runtime, "browser_evaluate", "Evaluate page JavaScript", "Run page JavaScript given either a code or expression argument. Page evaluation is available in the native profile by default and can be disabled with SMOOTH_OPERATOR_ALLOW_EVAL=false; output is redacted and bounded.", EvaluateRequestSchema, "evaluate");
   server.registerTool(
     "browser_exec",
     {
@@ -514,8 +556,9 @@ function actionAnnotations(action: BrowserAction["action"]): ToolAnnotations {
     case "get_storage":
       return BROWSER_READ_ONLY;
     case "navigate":
-    case "solve_challenge":
       return BROWSER_MUTATING;
+    case "solve_challenge":
+      return BROWSER_READ_ONLY;
     case "evaluate":
       return BROWSER_DESTRUCTIVE;
     case "close_tab":
@@ -607,7 +650,7 @@ function registerResources(server: McpServer, runtime: ServerRuntime): void {
     "browser-current-snapshot",
     "smooth-operator://browser/page/current",
     { title: "Current browser snapshot", description: "Bounded current-page text and controls marked as untrusted data.", mimeType: "application/json" },
-    async (uri, ctx) => safeResourceRead(async () => jsonResource(uri.href, boundMcpOutput(await runtime.snapshot({ maxChars: MCP_PAGE_TEXT_MAX_CHARS }, ctx.mcpReq.signal))), runtime),
+    async (uri, ctx) => safeResourceRead(async () => jsonResource(uri.href, await runtime.snapshot({ maxChars: MCP_PAGE_TEXT_MAX_CHARS }, ctx.mcpReq.signal)), runtime),
   );
   server.registerResource(
     "browser-downloads",
@@ -628,12 +671,11 @@ function registerResources(server: McpServer, runtime: ServerRuntime): void {
     async (uri, ctx) => safeResourceRead(async () => jsonResource(uri.href, await runtime.run({ action: "get_console_log" }, ctx.mcpReq.signal)), runtime),
   );
 
-  const pageTemplate = new ResourceTemplate("smooth-operator://browser/page/{pageId}", { list: undefined });
   server.registerResource(
     "browser-page",
-    pageTemplate,
+    BrowserPageResourceTemplate,
     { title: "Browser page snapshot", description: "A bounded snapshot for a specific connected tab.", mimeType: "application/json" },
-    async (uri, variables, ctx) => safeResourceRead(async () => jsonResource(uri.href, boundMcpOutput(await runtime.snapshot({ pageId: resourcePageId(variables), maxChars: MCP_PAGE_TEXT_MAX_CHARS }, ctx.mcpReq.signal))), runtime),
+    async (uri, variables, ctx) => safeResourceRead(async () => jsonResource(uri.href, await runtime.snapshot({ pageId: resourcePageId(variables), maxChars: MCP_PAGE_TEXT_MAX_CHARS }, ctx.mcpReq.signal)), runtime),
   );
 }
 
@@ -665,7 +707,7 @@ function registerPrompts(server: McpServer): void {
     {
       title: "Browser workflow",
       description: "A reusable user-facing workflow for inspecting a page before acting.",
-      argsSchema: z.object({ task: z.string().trim().min(1).max(10_000), url: z.string().trim().min(1).max(8_000).optional() }).strict(),
+      argsSchema: BrowserWorkflowPromptSchema,
     },
     ({ task, url }) => ({
       messages: [{
@@ -679,7 +721,7 @@ function registerPrompts(server: McpServer): void {
     {
       title: "Extract from the current page",
       description: "A reusable prompt for evidence-grounded page extraction.",
-      argsSchema: z.object({ question: z.string().trim().min(1).max(4_000) }).strict(),
+      argsSchema: QuestionPromptSchema,
     },
     ({ question }) => ({
       messages: [{
@@ -693,7 +735,7 @@ function registerPrompts(server: McpServer): void {
     {
       title: "Research question",
       description: "A reusable prompt for bounded web search with untrusted source handling.",
-      argsSchema: z.object({ question: z.string().trim().min(1).max(4_000) }).strict(),
+      argsSchema: QuestionPromptSchema,
     },
     ({ question }) => ({
       messages: [{
@@ -706,6 +748,17 @@ function registerPrompts(server: McpServer): void {
 
 function jsonResource(uri: string, value: unknown): { contents: Array<{ uri: string; mimeType: string; text: string }> } {
   return { contents: [{ uri, mimeType: "application/json", text: jsonText(sanitizeMcpOutput(value)) }] };
+}
+
+function safeToolResult(value: unknown): CallToolResult {
+  // `value` must already be the result of sanitizeMcpOutput. Keep this helper
+  // private to the MCP boundary so the general-purpose errors.toolResult API
+  // continues to redact arbitrary callers by default.
+  const structuredContent = isRecord(value) ? value : { value };
+  return {
+    content: [{ type: "text", text: jsonText(value) }],
+    structuredContent,
+  };
 }
 
 async function safeResourceRead<T>(operation: () => T | Promise<T>, runtime?: Pick<ServerRuntime, "logger">): Promise<T> {
@@ -736,78 +789,24 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function jsonByteLength(value: unknown): number {
   try {
     const json = JSON.stringify(value);
-    return json === undefined ? 0 : UTF8_ENCODER.encode(json).byteLength;
+    // Node's native UTF-8 byte counter avoids allocating a second encoded
+    // buffer for every bounded-size check.
+    return json === undefined ? 0 : Buffer.byteLength(json, "utf8");
   } catch {
     return Number.POSITIVE_INFINITY;
   }
 }
 
-function boundErrorDetails(value: unknown): unknown {
-  const safe = redactValue(value);
-  if (jsonByteLength(safe) <= MCP_ERROR_DETAILS_MAX_BYTES) {
-    return safe;
-  }
-  if (!isRecord(safe)) {
-    return { truncated: true, mcpOutputTruncated: true, warning: "Error details were omitted because they exceeded the MCP response budget." };
-  }
-
-  const bounded: Record<string, unknown> = {};
-  const copyScalar = (key: string): void => {
-    const item = safe[key];
-    if (typeof item === "string") {
-      bounded[key] = truncateUtf8(item, 1_000);
-    } else if (typeof item === "number" || typeof item === "boolean" || item === null) {
-      bounded[key] = item;
-    }
-  };
-  for (const key of ["classification", "status", "attempts", "maxAttempts", "retryAfterMs", "timeoutMs", "failedIndex", "failedAction", "completedActions", "hint", "warning", "truncated", "mcpOutputTruncated", "omittedItems", "resultsTruncated", "omittedResults"]) {
-    copyScalar(key);
-  }
-
-  const sourceResults = Array.isArray(safe.completedResults) ? safe.completedResults : undefined;
-  if (sourceResults) {
-    const retained: unknown[] = [];
-    for (const item of sourceResults) {
-      const boundedItem = typeof item === "string" ? truncateMcpText(item, 1_000).value : boundMcpOutput(item);
-      const candidate = { ...bounded, completedResults: [...retained, boundedItem] };
-      if (jsonByteLength(candidate) > MCP_ERROR_DETAILS_MAX_BYTES - 256) {
-        break;
-      }
-      retained.push(boundedItem);
-    }
-    bounded.completedResults = retained;
-    if (retained.length < sourceResults.length) {
-      bounded.resultsTruncated = true;
-      bounded.omittedResults = sourceResults.length - retained.length;
-    }
-  }
-
-  if (isRecord(safe.batch)) {
-    const batch: Record<string, unknown> = {};
-    for (const key of ["failedIndex", "failedAction", "completedActions"]) {
-      const item = safe.batch[key];
-      if (typeof item === "string" || typeof item === "number" || typeof item === "boolean" || item === null) {
-        batch[key] = typeof item === "string" ? truncateUtf8(item, 1_000) : item;
-      }
-    }
-    bounded.batch = batch;
-  }
-
-  if (jsonByteLength(bounded) <= MCP_ERROR_DETAILS_MAX_BYTES) {
-    return bounded;
-  }
-  delete bounded.batch;
-  while (jsonByteLength(bounded) > MCP_ERROR_DETAILS_MAX_BYTES && Array.isArray(bounded.completedResults) && (bounded.completedResults as unknown[]).length > 0) {
-    bounded.completedResults = (bounded.completedResults as unknown[]).slice(0, -1);
-    bounded.resultsTruncated = true;
-    bounded.omittedResults = sourceResults ? sourceResults.length - (bounded.completedResults as unknown[]).length : undefined;
-  }
-  return jsonByteLength(bounded) <= MCP_ERROR_DETAILS_MAX_BYTES
-    ? bounded
-    : { truncated: true, mcpOutputTruncated: true, warning: "Error details were omitted because they exceeded the MCP response budget." };
-}
-
 function jsonText(value: unknown): string {
+  if (value !== null && typeof value === "object") {
+    const cached = MCP_JSON_TEXT_CACHE.get(value);
+    if (cached !== undefined) {
+      return cached;
+    }
+    const text = JSON.stringify(value) ?? "null";
+    MCP_JSON_TEXT_CACHE.set(value, text);
+    return text;
+  }
   return JSON.stringify(value) ?? "null";
 }
 
@@ -829,12 +828,18 @@ function parseBrowserExecCode(code: string): BrowserAction[] {
 
 function truncateUtf8(value: string, maxBytes: number): string {
   const bytes = UTF8_ENCODER.encode(value);
-  if (bytes.byteLength <= maxBytes) {
+  const boundedMaxBytes = Math.max(0, Math.floor(maxBytes));
+  if (bytes.byteLength <= boundedMaxBytes) {
     return value;
+  }
+  // Most protocol metadata is ASCII. Slicing by bytes is also slicing by
+  // characters in that case, so avoid the decoder/binary-search path.
+  if (bytes.byteLength === value.length) {
+    return value.slice(0, boundedMaxBytes);
   }
   const decoder = new TextDecoder();
   let low = 0;
-  let high = Math.min(bytes.byteLength, Math.max(0, Math.floor(maxBytes)));
+  let high = Math.min(bytes.byteLength, boundedMaxBytes);
   while (low < high) {
     const midpoint = Math.ceil((low + high) / 2);
     const candidate = decoder.decode(bytes.slice(0, midpoint));
@@ -851,7 +856,7 @@ function truncateMcpText(value: string, maxBytes: number): { value: string; trun
   if (UTF8_ENCODER.encode(value).byteLength <= maxBytes) {
     return { value, truncated: false };
   }
-  const markerBytes = UTF8_ENCODER.encode(MCP_OUTPUT_TRUNCATION_MARKER).byteLength;
+  const markerBytes = MCP_OUTPUT_TRUNCATION_MARKER_BYTES;
   const wrapped = /^(<untrusted_[a-z0-9_]+>)([\s\S]*)(<\/untrusted_[a-z0-9_]+>)$/i.exec(value);
   if (wrapped) {
     const fixedBytes = UTF8_ENCODER.encode(`${wrapped[1]}${wrapped[3]}`).byteLength + markerBytes;
@@ -1092,7 +1097,16 @@ function sanitizeMcpOutput(value: unknown, options: McpOutputOptions = {}): unkn
   const redacted = isRecord(redactedValue) && redactedValue.__truncated === true && redactedValue.mcpOutputTruncated !== true
     ? { ...redactedValue, mcpOutputTruncated: true, warning: "The MCP result exceeded the safety collection limit; use a narrower request or a paginated tool." }
     : redactedValue;
-  return jsonByteLength(redacted) > MCP_OUTPUT_MAX_BYTES ? boundMcpOutput(redacted, options) : redacted;
+  // Cache the final safe serialization so the MCP text fallback does not
+  // stringify the same bounded object again. The cache is weak and therefore
+  // cannot retain request results beyond their normal lifetime.
+  const redactedText = jsonText(redacted);
+  if (Buffer.byteLength(redactedText, "utf8") <= MCP_OUTPUT_MAX_BYTES) {
+    return redacted;
+  }
+  const finalValue = boundMcpOutput(redacted, options);
+  jsonText(finalValue);
+  return finalValue;
 }
 
 function boundedResultLimit(value: unknown): number {
@@ -1103,15 +1117,24 @@ function boundedResultLimit(value: unknown): number {
 }
 
 async function callTool(operation: () => Promise<unknown>, logger?: Pick<ServerRuntime, "logger">, options: McpOutputOptions = {}): Promise<CallToolResult> {
-  return boundToolError(await safeCallTool(
-    async () => sanitizeMcpOutput(await operation(), options) ?? null,
-    (error) => logger?.logger.warn("MCP tool operation failed", safeErrorDiagnostic(error)),
-  ));
+  try {
+    // sanitizeMcpOutput is the trust boundary for MCP tool values. Build the
+    // result directly from that safe projection so errors.toolResult does not
+    // walk the entire output tree a second time.
+    return safeToolResult(sanitizeMcpOutput(await operation(), options) ?? null);
+  } catch (error) {
+    try {
+      logger?.logger.warn("MCP tool operation failed", safeErrorDiagnostic(error));
+    } catch {
+      // Diagnostics must never change the protocol response path.
+    }
+    return boundToolError(toolError(error));
+  }
 }
 
 async function callBatchTool(operation: () => Promise<unknown>, logger?: Pick<ServerRuntime, "logger">): Promise<CallToolResult> {
   try {
-    return toolResult(sanitizeMcpOutput(await operation(), { preserveBatchResults: true }) ?? null);
+    return safeToolResult(sanitizeMcpOutput(await operation(), { preserveBatchResults: true }) ?? null);
   } catch (error) {
     logger?.logger.warn("MCP batch operation failed", safeErrorDiagnostic(error));
     return boundToolError(toolError(error));
@@ -1140,7 +1163,7 @@ async function callVisualTool(operation: () => Promise<unknown>, logger?: Pick<S
         structuredContent: safeRecord,
       };
     }
-    return toolResult(sanitizeMcpOutput(rawValue) ?? null);
+    return safeToolResult(sanitizeMcpOutput(rawValue) ?? null);
   } catch (error) {
     logger?.logger.warn("MCP visual tool operation failed", safeErrorDiagnostic(error));
     return boundToolError(toolError(error));
@@ -1175,7 +1198,10 @@ function boundToolError(result: CallToolResult): CallToolResult {
   }
 
   if (rawError.details !== undefined) {
-    error.details = boundErrorDetails(rawError.details);
+    // toolError() has already applied the shared error redaction and 8 KiB
+    // detail bound. Reusing that safe projection avoids a second traversal
+    // without widening the response budget.
+    error.details = rawError.details;
   }
 
   const payload = { ok: false, error };

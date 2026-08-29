@@ -2,11 +2,32 @@
 
 ## Interactive wizard (directly to your harness)
 
-`smooth-operator install <harness>` is interactive by default — it asks 7 curated questions (browser mode, browser executable, headless, allowed domains, blocked domains, page JavaScript, and data directory) with recommended defaults in brackets. Omitting `<harness>` is allowed too: on a TTY the installer prompts for the target first (default `opencode`), while piped or CI environments print usage and exit instead. Use `smooth-operator install opencode --yes` to skip prompts and use recommended defaults. The wizard normalizes and validates its choices before saving them to `~/.smooth-operator/config.json` (0600, bounded, owner-only, and symlink-safe). Mode, executable path, headless, domains, and allowEval are authoritative on every run while unrelated settings are preserved, and the harness is then registered. Personal-Chrome mode derives `browserUrl` after launching the helper on port 9222; it is not a separate prompt.
+`smooth-operator install <harness>` is interactive by default — it asks exactly 3
+curated questions (browser mode/profile, browser executable, and
+security/data-directory settings) with recommended defaults in brackets.
+Omitting `<harness>` is allowed too: on a TTY the installer prompts for the
+target first (default `opencode`), while piped or CI environments print usage
+and exit instead. Use `smooth-operator install opencode --yes` to skip prompts
+and use recommended defaults. The wizard normalizes and validates its choices
+before saving them to `~/.smooth-operator/config.json` (0600, bounded,
+owner-only, and symlink-safe). Managed mode owns one private persistent profile;
+connect mode attaches to an operator-owned browser and does not own or close
+its profile/process. Personal-Chrome mode derives `browserUrl` after launching
+the helper on port 9222; it is not a separate prompt.
 
 ### Personal Chrome (connect) helper
 
-When you pick “personal Chrome” (mode `connect`), the wizard finds Chrome via `discovery.ts`, spawns `chrome --remote-debugging-port=9222 --user-data-dir=~/.smooth-operator/personal-chrome --no-first-run --no-default-browser-check` detached, and polls `http://127.0.0.1:9222/json/version` (300ms × 33, ~10s) until `live`. On success it writes `SMOOTH_OPERATOR_BROWSER_MODE=connect` and `SMOOTH_OPERATOR_BROWSER_URL=http://127.0.0.1:9222` for you. No manual `9222` knowledge needed. Non-interactive environments (no TTY or `CI` set) skip prompts entirely and apply the same recommended defaults as `--yes`. The `chrome://inspect` toggle remains as an advanced opt-in (see `docs/mcp-server.md`).
+When you pick “connected browser” (mode `connect`), the wizard finds Chromium via
+`discovery.ts`, launches a dedicated debugging profile under
+`~/.smooth-operator/personal-chrome` with port `9222`, and polls the loopback
+endpoint until it is live. On success it writes
+`SMOOTH_OPERATOR_BROWSER_MODE=connect` and
+`SMOOTH_OPERATOR_BROWSER_URL=http://127.0.0.1:9222` for you. This does not
+attach to or take ownership of an operator's daily browser profile. No manual
+`9222` knowledge is needed. Non-interactive environments (no TTY or `CI` set)
+skip prompts entirely and apply the same recommended defaults as `--yes`. The
+`chrome://inspect` toggle remains as an advanced opt-in (see
+`docs/mcp-server.md`).
 
 SmoothOperator speaks MCP over stdio. The `smooth-operator install <target>`
 command registers that stdio server with a supported client. It uses

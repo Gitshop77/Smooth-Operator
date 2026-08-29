@@ -77,17 +77,6 @@ const RawConfigSchema = z
       })
       .strict()
       .optional(),
-    captchaSolver: z
-      .object({
-        provider: z.enum(["none", "capsolver", "2captcha", "anticaptcha"]).optional(),
-        apiKey: z.string().trim().min(1).max(4_096).optional(),
-        url: z.string().trim().min(1).max(4_096).optional(),
-        proxyUrl: z.string().trim().min(1).max(4_096).optional(),
-        timeoutMs: z.number().int().min(1_000).max(600_000).optional(),
-        maxBytes: z.number().int().min(1_024).max(100_000_000).optional(),
-      })
-      .strict()
-      .optional(),
   })
   .strict();
 
@@ -129,19 +118,11 @@ export interface ServerConfig {
     allowPrivateNetwork: boolean;
     allowEval: boolean;
   };
-  stealth?: {
+  stealth: {
     enabled: boolean;
     profile: "balanced" | "max";
     gpu: boolean;
     behaviorEnabled: boolean;
-  };
-  captchaSolver?: {
-    provider: "none" | "capsolver" | "2captcha" | "anticaptcha";
-    apiKey?: string;
-    url?: string;
-    proxyUrl?: string;
-    timeoutMs: number;
-    maxBytes: number;
   };
   dataDir: string;
   logLevel: LogLevel;
@@ -344,12 +325,22 @@ function assertNoSymlinkComponents(path: string): void {
   }
 }
 
-function readBoundedConfigText(descriptor: number): string {
-  // Read at most one byte beyond the configured limit. This keeps a file that
-  // grows after fstat from turning the size check into an unbounded allocation.
-  const buffer = Buffer.allocUnsafe(MAX_CONFIG_FILE_BYTES + 1);
+function readBoundedConfigText(descriptor: number, expectedBytes = MAX_CONFIG_FILE_BYTES): string {
+  // Start at the observed size (plus one byte) to avoid reserving 2 MiB for a
+  // typical tiny config. If the file grows after fstat, expand geometrically
+  // up to one byte beyond the hard limit so the race is still detected without
+  // ever allocating an unbounded buffer.
+  const allocation = Math.min(MAX_CONFIG_FILE_BYTES, Math.max(0, Math.trunc(expectedBytes))) + 1;
+  let buffer = Buffer.allocUnsafe(allocation);
   let offset = 0;
-  while (offset < buffer.byteLength) {
+  while (true) {
+    if (offset === buffer.byteLength) {
+      if (buffer.byteLength >= MAX_CONFIG_FILE_BYTES + 1) break;
+      const nextLength = Math.min(MAX_CONFIG_FILE_BYTES + 1, Math.max(buffer.byteLength * 2, offset + 1));
+      const expanded = Buffer.allocUnsafe(nextLength);
+      buffer.copy(expanded, 0, 0, offset);
+      buffer = expanded;
+    }
     const bytesRead = readSync(descriptor, buffer, offset, buffer.byteLength - offset, offset);
     if (bytesRead === 0) {
       break;
@@ -407,7 +398,7 @@ function readConfigFile(configPath: string, options: ReadConfigOptions = {}): Ra
     if (stats.size > MAX_CONFIG_FILE_BYTES) {
       throw new AppError("CONFIG_INVALID", `Configuration files must be ${MAX_CONFIG_FILE_BYTES} bytes or smaller.`);
     }
-    const parsed = JSON.parse(readBoundedConfigText(descriptor)) as unknown;
+    const parsed = JSON.parse(readBoundedConfigText(descriptor, stats.size)) as unknown;
     // The wizard intentionally preserves unrelated root sections so it can
     // coexist with harness settings. Explicit --config files remain strict;
     // the auto-discovered wizard file only consumes SmoothOperator's known
@@ -486,17 +477,6 @@ function validateConfig(config: ServerConfig): ServerConfig {
   if (config.stealth && config.stealth.profile !== "balanced" && config.stealth.profile !== "max") {
     throw new AppError("CONFIG_INVALID", "Stealth profile must be 'balanced' or 'max'.");
   }
-  if (config.captchaSolver) {
-    if (config.captchaSolver.provider !== "none" && config.captchaSolver.provider !== "capsolver" && config.captchaSolver.provider !== "2captcha" && config.captchaSolver.provider !== "anticaptcha") {
-      throw new AppError("CONFIG_INVALID", "Captcha solver provider must be one of 'none', 'capsolver', '2captcha', or 'anticaptcha'.");
-    }
-    if (config.captchaSolver.timeoutMs < 1_000 || config.captchaSolver.timeoutMs > 600_000) {
-      throw new AppError("CONFIG_INVALID", "Captcha solver timeout must be between 1000ms and 600000ms.");
-    }
-    if (config.captchaSolver.maxBytes < 1_024 || config.captchaSolver.maxBytes > 100_000_000) {
-      throw new AppError("CONFIG_INVALID", "Captcha solver max bytes must be between 1024 and 100000000.");
-    }
-  }
   return config;
 }
 
@@ -537,7 +517,6 @@ export function loadServerConfig(args: string[] = [], environment: NodeJS.Proces
   const nestedBrowser = fileConfig.browser ?? {};
   const nestedSecurity = fileConfig.security ?? {};
   const nestedStealth = fileConfig.stealth ?? {};
-  const nestedCaptchaSolver = fileConfig.captchaSolver ?? {};
   const viewportWidth = parseOptionalInteger(environment.SMOOTH_OPERATOR_BROWSER_VIEWPORT_WIDTH, nestedBrowser.viewport?.width);
   const viewportHeight = parseOptionalInteger(environment.SMOOTH_OPERATOR_BROWSER_VIEWPORT_HEIGHT, nestedBrowser.viewport?.height);
   const viewport = resolveBrowserViewport(viewportWidth, viewportHeight);
@@ -548,35 +527,18 @@ export function loadServerConfig(args: string[] = [], environment: NodeJS.Proces
   // Default to private data directory; explicit allowlist required for other roots.
   const allowedFileRoots = canonicalizeAllowedFileRoots((configuredRoots.length > 0 ? configuredRoots : [join(dataDir, "files"), join(dataDir, "downloads")]).map((path) => expandPath(path, homeDirectory)));
 
-  // Stealth and captcha solver sections are opt-in. They stay absent unless the
-  // user enables them, keeping the default server configuration untouched.
-  const stealthEnabled = parseBoolean(environment.SMOOTH_OPERATOR_STEALTH_ENABLED, false);
+  // Stealth is part of the native default profile. Environment values take
+  // precedence over installer JSON for each setting independently, so an
+  // explicit `false` remains authoritative.
+  const stealthEnabled = parseBoolean(environment.SMOOTH_OPERATOR_STEALTH_ENABLED, nestedStealth.enabled ?? true);
   const stealth: NonNullable<ServerConfig["stealth"]> = {
     enabled: stealthEnabled,
     profile: (environment.SMOOTH_OPERATOR_STEALTH_PROFILE ?? nestedStealth.profile ?? "balanced") as "balanced" | "max",
     gpu: parseBoolean(environment.SMOOTH_OPERATOR_STEALTH_GPU, nestedStealth.gpu ?? false),
-    behaviorEnabled: environment.SMOOTH_OPERATOR_BEHAVIOR_ENABLED === undefined ? stealthEnabled : parseBoolean(environment.SMOOTH_OPERATOR_BEHAVIOR_ENABLED, stealthEnabled),
+    behaviorEnabled: environment.SMOOTH_OPERATOR_BEHAVIOR_ENABLED === undefined
+      ? nestedStealth.behaviorEnabled ?? true
+      : parseBoolean(environment.SMOOTH_OPERATOR_BEHAVIOR_ENABLED, stealthEnabled),
   };
-  const isStealthConfigured =
-    environment.SMOOTH_OPERATOR_STEALTH_PROFILE !== undefined
-    || nestedStealth.profile !== undefined
-    || environment.SMOOTH_OPERATOR_STEALTH_GPU !== undefined
-    || nestedStealth.gpu !== undefined
-    || environment.SMOOTH_OPERATOR_BEHAVIOR_ENABLED !== undefined
-    || nestedStealth.behaviorEnabled !== undefined;
-  const captchaSolver: NonNullable<ServerConfig["captchaSolver"]> = {
-    provider: (environment.SMOOTH_OPERATOR_CAPTCHA_SOLVER ?? nestedCaptchaSolver.provider ?? "none") as NonNullable<ServerConfig["captchaSolver"]>["provider"],
-    apiKey: trimOptional(environment.SMOOTH_OPERATOR_CAPTCHA_SOLVER_API_KEY ?? nestedCaptchaSolver.apiKey),
-    url: trimOptional(environment.SMOOTH_OPERATOR_CAPTCHA_SOLVER_URL ?? nestedCaptchaSolver.url),
-    proxyUrl: trimOptional(environment.SMOOTH_OPERATOR_CAPTCHA_SOLVER_PROXY_URL ?? nestedCaptchaSolver.proxyUrl),
-    timeoutMs: parseInteger(environment.SMOOTH_OPERATOR_CAPTCHA_SOLVER_TIMEOUT_MS, nestedCaptchaSolver.timeoutMs ?? 120_000),
-    maxBytes: parseInteger(environment.SMOOTH_OPERATOR_CAPTCHA_SOLVER_MAX_BYTES, nestedCaptchaSolver.maxBytes ?? 1_000_000),
-  };
-  const isCaptchaSolverConfigured =
-    captchaSolver.provider !== "none"
-    || captchaSolver.apiKey !== undefined
-    || captchaSolver.url !== undefined
-    || captchaSolver.proxyUrl !== undefined;
 
   const config: ServerConfig = {
     transport: (argValue("--transport") ?? environment.SMOOTH_OPERATOR_TRANSPORT ?? fileConfig.transport ?? "stdio") as Transport,
@@ -613,10 +575,9 @@ export function loadServerConfig(args: string[] = [], environment: NodeJS.Proces
       blockedDomains: normalizeDomainList(parseList(environment.SMOOTH_OPERATOR_BLOCKED_DOMAINS, nestedSecurity.blockedDomains ?? [])),
       allowedFileRoots,
       allowPrivateNetwork: parseBoolean(environment.SMOOTH_OPERATOR_ALLOW_PRIVATE_NETWORK, nestedSecurity.allowPrivateNetwork ?? false),
-      allowEval: parseBoolean(environment.SMOOTH_OPERATOR_ALLOW_EVAL, nestedSecurity.allowEval ?? false),
+      allowEval: parseBoolean(environment.SMOOTH_OPERATOR_ALLOW_EVAL, nestedSecurity.allowEval ?? true),
     },
-    ...(stealth.enabled || isStealthConfigured ? { stealth } : {}),
-    ...(isCaptchaSolverConfigured ? { captchaSolver } : {}),
+    stealth,
     dataDir,
     logLevel: (environment.SMOOTH_OPERATOR_LOG_LEVEL ?? fileConfig.logLevel ?? "info") as LogLevel,
   };
@@ -626,8 +587,7 @@ export function loadServerConfig(args: string[] = [], environment: NodeJS.Proces
     http: config.http,
     browser: config.browser,
     security: config.security,
-    ...(config.stealth ? { stealth: config.stealth } : {}),
-    ...(config.captchaSolver ? { captchaSolver: config.captchaSolver } : {}),
+    stealth: config.stealth,
     dataDir: config.dataDir,
     logLevel: config.logLevel,
   });

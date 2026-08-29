@@ -35,6 +35,14 @@ export function testConfig(overrides: Partial<ServerConfig> = {}): ServerConfig 
       allowPrivateNetwork: false,
       allowEval: false,
     },
+    stealth: {
+      // Unit tests opt into browser identity/timing behavior explicitly. The
+      // production defaults are covered through loadServerConfig tests.
+      enabled: false,
+      profile: "balanced",
+      gpu: false,
+      behaviorEnabled: false,
+    },
     dataDir: TEST_DATA_DIR,
     logLevel: "error",
   };

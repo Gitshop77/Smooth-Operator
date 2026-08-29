@@ -1,7 +1,7 @@
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { describe, expect, it, vi } from "vitest";
 
-import { createMcpServer } from "@/server/mcp";
+import { createMcpServer, MCP_INSTRUCTIONS } from "@/server/mcp";
 import { ServerRuntime } from "@/server/runtime";
 import { AppError } from "@/server/errors";
 
@@ -33,6 +33,7 @@ const EXPECTED_READ_ONLY_TOOLS = new Set([
   "browser_computed_style",
   "browser_page_info",
   "browser_challenge",
+  "browser_solve_challenge",
   "browser_wait_for_human",
   "web_search",
   "server_health",
@@ -45,6 +46,12 @@ const EXPECTED_READ_ONLY_TOOLS = new Set([
 const CLOSED_WORLD_TOOLS = new Set(["server_health", "browser_doctor", "browser_list_sessions", "browser_close_session"]);
 
 describe("native MCP registry", () => {
+  it("publishes observe-act-verify guidance for connected-AI challenge handling", () => {
+    expect(MCP_INSTRUCTIONS).toContain("observe -> act -> verify");
+    expect(MCP_INSTRUCTIONS).toContain("final classification explicitly reports it absent");
+    expect(MCP_INSTRUCTIONS).toContain("internal connected-AI loop");
+  });
+
   it("completes a real MCP handshake and exposes only native server capabilities", async () => {
     const runtime = await ServerRuntime.create(testConfig());
     vi.spyOn(runtime, "webSearch").mockResolvedValue({ results: [] });
@@ -113,9 +120,9 @@ describe("native MCP registry", () => {
     const schemaText = [...toolByName.values()].map((tool) => JSON.stringify(tool.inputSchema)).join("\n");
     expect(schemaText).not.toContain('"mode"');
     expect(schemaText).not.toContain('"model"');
-    // `provider` is now a first-class solve_challenge solver field, so it is no
-    // longer forbidden in the raw schema; the per-request override guard lives
-    // in contracts.test against actions that do not accept it.
+    expect(schemaText).not.toContain('"provider"');
+    expect(schemaText).not.toContain('"sitekey"');
+    expect(schemaText).not.toContain('"proxyUrl"');
     expect(schemaText).not.toContain('"allowed_domains"');
     expect(schemaText).not.toContain('"allowedDomains"');
     expect(schemaText).not.toContain('"use_vision"');
@@ -144,7 +151,7 @@ describe("native MCP registry", () => {
     expect(toolByName.get("browser_find_text")?.annotations?.openWorldHint).toBe(true);
     expect(toolByName.get("browser_type")?.annotations?.readOnlyHint).not.toBe(true);
     expect(toolByName.get("browser_type")?.annotations?.openWorldHint).toBe(true);
-    expect(toolByName.get("browser_solve_challenge")?.annotations?.readOnlyHint).toBe(false);
+    expect(toolByName.get("browser_solve_challenge")?.annotations?.readOnlyHint).toBe(true);
     expect(toolByName.get("browser_solve_challenge")?.annotations?.openWorldHint).toBe(true);
     expect(toolByName.get("web_search")?.annotations?.openWorldHint).toBe(true);
     for (const name of ["browser_network_log", "browser_console_log", "browser_cookies", "browser_storage", "browser_evaluate", "browser_batch", "browser_exec"]) {
@@ -347,6 +354,43 @@ describe("native MCP registry", () => {
       const result = await client.callTool({ name: "browser_screenshot", arguments: {} });
       expect(result.isError).toBe(true);
       expect(result.structuredContent).toMatchObject({ ok: false, error: { code: "OUTPUT_TOO_LARGE" } });
+    } finally {
+      await client.close().catch(() => undefined);
+      await server.close().catch(() => undefined);
+      await runtime.close();
+    }
+  });
+
+  it("maps solve_challenge through the visual boundary and returns screenshot image content", async () => {
+    const runtime = await ServerRuntime.create(testConfig());
+    const run = vi.spyOn(runtime, "run").mockResolvedValue({
+      solved: false,
+      classification: { status: "unknown" },
+      screenshotBase64: "aGVsbG8=",
+      mimeType: "image/jpeg",
+    });
+    const server = createMcpServer(runtime);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "solve-visual-test", version: "1.0.0" });
+    try {
+      await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+      const result = await client.callTool({
+        name: "browser_solve_challenge",
+        arguments: { pageId: "page-1", include_screenshot: true, full_page: true, max_dim: 900, maxChars: 4_000 },
+      });
+      expect(result.isError).not.toBe(true);
+      expect(result.content).toEqual(expect.arrayContaining([
+        { type: "text", text: expect.any(String) },
+        { type: "image", data: "aGVsbG8=", mimeType: "image/jpeg" },
+      ]));
+      expect(run).toHaveBeenCalledWith(expect.objectContaining({
+        action: "solve_challenge",
+        pageId: "page-1",
+        includeScreenshot: true,
+        fullPage: true,
+        maxDimension: 900,
+        maxChars: 4_000,
+      }), expect.any(AbortSignal));
     } finally {
       await client.close().catch(() => undefined);
       await server.close().catch(() => undefined);

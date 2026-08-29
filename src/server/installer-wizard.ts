@@ -46,6 +46,8 @@ interface WizardRunOptions {
 interface PersonalChromeOptions {
   executablePath?: string;
   dataDir: string;
+  /** Launch the helper browser without a visible window when selected by the wizard. */
+  headless?: boolean;
   port?: number;
   spawn?: SpawnFunction;
   probe: ProbeFunction;
@@ -137,13 +139,12 @@ function recommendedDefaults(homeDir: string | undefined): WizardChoices {
     headless: false,
     allowedDomains: [],
     blockedDomains: [],
-    allowEval: false,
+    allowEval: true,
     dataDir: join(homeDir ?? homedir(), ".smooth-operator"),
-    browserExecutablePath: undefined,
   };
 }
 
-const WIZARD_STEP_TOTAL = 7;
+const WIZARD_STEP_TOTAL = 3;
 
 /** Ask which installed Chromium-based browser the server should drive. Any
  * CDP-compatible browser works, so present everything detected and allow a
@@ -152,6 +153,7 @@ async function askBrowser(session: WizardSession, ui: ReturnType<typeof createUi
   const { findChromiumExecutables } = await import("./browser/discovery.js");
   const detected = findChromiumExecutables();
   if (detected.length > 0) {
+    ui.explain(["Choose an installed Chromium browser. The first option is the preferred detected browser.", "If none of these is right, type an existing absolute executable path."]);
     detected.forEach((candidate, index) => {
       ui.option(index + 1, candidate.label, candidate.path, index === 0);
     });
@@ -205,26 +207,23 @@ function tolerantQuestion(rl: { question(prompt: string): Promise<string> }): Wi
   };
 }
 
-async function askYesNo(session: WizardSession, prompt: string, fallback: boolean): Promise<boolean> {
+async function askBinaryChoice(
+  session: WizardSession,
+  ui: ReturnType<typeof createUi>,
+  prompt: string,
+  firstLabel: string,
+  firstDescription: string,
+  secondLabel: string,
+  secondDescription: string,
+): Promise<1 | 2> {
+  ui.option(1, firstLabel, firstDescription, true);
+  ui.option(2, secondLabel, secondDescription);
   while (true) {
-    const hint = fallback ? "[Y/n]" : "[y/N]";
-    const answer = (await session.question(`${prompt} ${hint}: `)).trim().toLowerCase();
-    if (!answer) return fallback;
-    if (["y", "yes"].includes(answer)) return true;
-    if (["n", "no"].includes(answer)) return false;
+    const answer = (await session.question(`${prompt} [1]: `)).trim();
+    if (!answer || answer === "1") return 1;
+    if (answer === "2") return 2;
+    ui.failure("Enter 1 or 2.");
   }
-}
-
-function parseDomainList(raw: string): string[] | undefined {
-  if (raw.trim() === "") {
-    return [];
-  }
-  const parts = raw.split(",").map((part) => part.trim());
-  if (parts.some((part) => !part)) {
-    return undefined;
-  }
-  const domains = parts.map(normalizeWizardDomain);
-  return domains.every((domain): domain is string => domain !== undefined) ? domains : undefined;
 }
 
 function normalizeWizardDomain(value: string): string | undefined {
@@ -351,133 +350,75 @@ export async function runWizard(harness: string, opts: WizardRunOptions): Promis
     ui.note("Answer each question, or press Enter to accept the recommended default.");
     ui.note(`You can re-run \`smooth-operator install ${harness}\` at any time to change these.`);
 
-    ui.step(1, WIZARD_STEP_TOTAL, "Browser mode");
+    ui.step(1, WIZARD_STEP_TOTAL, "Browser profile ownership");
     ui.explain([
-      "Who owns the Chrome window your AI drives?",
-      "",
-      "Managed gives the AI its own private Chrome profile at ~/.smooth-operator/browser.",
-      "Your daily browser stays untouched; logins for the AI live separately.",
-      "",
-      "Connect attaches to your real Chrome instead, so the AI uses everything",
-      "you are already signed into. Only pick this if you need your existing logins.",
-      "",
-      "Disabled keeps the server but turns all browsing tools off.",
+      "Choose whether SmoothOperator owns an isolated profile or connects to a",
+      "browser profile you provide. Connected mode uses a dedicated debugging",
+      "profile when this wizard launches Chromium; it does not attach to your",
+      "daily default profile, which Chromium security does not permit safely.",
     ]);
-    ui.option(1, "Managed private Chrome", "Isolated profile owned by SmoothOperator. Safest default.", true);
-    ui.option(2, "Personal Chrome (connect)", "Reuse your real browser and its existing sign-ins.");
-    ui.option(3, "Disabled", "No browser. Tools that need a page will report an error.");
+    const ownership = await askBinaryChoice(
+      session,
+      ui,
+      "Profile ownership",
+      "Isolated managed profile",
+      "SmoothOperator owns a private, persistent profile under its data directory.",
+      "Connected/personal browser profile",
+      "Use a browser you provide, with existing sign-ins only when that browser exposes them.",
+    );
+    const mode = ownership === 1 ? "managed" : "connect";
+    const browserUrl = mode === "connect" ? "http://127.0.0.1:9222" : undefined;
 
-    let mode = "managed";
-    let browserUrl: string | undefined;
-    let headless = false;
-    let allowedDomains: string[] = [];
-    let blockedDomains: string[] = [];
-    let allowEval = false;
-    let dataDir = defaults.dataDir;
-    while (true) {
-      const answer = (await session.question("Mode [1]: ")).trim();
-      if (!answer || answer === "1") {
-        mode = "managed";
-        break;
-      }
-      if (answer === "2") {
-        mode = "connect";
-        browserUrl = "http://127.0.0.1:9222";
-        break;
-      }
-      if (answer === "3") {
-        mode = "disabled";
-        break;
-      }
-      ui.failure("Enter 1, 2, or 3.");
-    }
+    ui.step(2, WIZARD_STEP_TOTAL, "Browser display");
+    ui.explain([
+      "Headed shows a visible browser window so you can watch and intervene.",
+      "Headless runs Chromium without a window, which is useful for unattended runs.",
+    ]);
+    const display = await askBinaryChoice(
+      session,
+      ui,
+      "Browser display",
+      "Headed (visible window)",
+      "Show the browser window while SmoothOperator works.",
+      "Headless (no window)",
+      "Run Chromium without a visible window, including when connected mode launches its helper browser.",
+    );
+    const headless = display === 2;
 
-    let browserExecutablePath: string | undefined;
-    let headlessChoice = false;
-    if (mode !== "disabled") {
-      ui.step(2, WIZARD_STEP_TOTAL, "Browser");
-      ui.explain([
-        "Any Chromium-based browser works: Chrome, Brave, Edge, Chromium,",
-        "Vivaldi, Arc, Opera. The AI gets its own isolated profile inside the",
-        "browser you pick - your everyday profiles are never touched.",
-      ]);
-      browserExecutablePath = await askBrowser(session, ui);
+    ui.step(3, WIZARD_STEP_TOTAL, "Chromium browser");
+    const browserExecutablePath = await askBrowser(session, ui);
 
-      ui.step(3, WIZARD_STEP_TOTAL, "Headless mode");
-      ui.explain([
-        "Headless runs Chrome with no visible window - lighter and invisible.",
-        "Visible Chrome lets you watch clicks happen and handle CAPTCHAs or",
-        "logins yourself when a site pauses for human verification.",
-      ]);
-      headlessChoice = await askYesNo(session, "Run Chrome headless (no window)?", false);
-
-      ui.step(4, WIZARD_STEP_TOTAL, "Allowed domains");
-      ui.explain([
-        "Restrict which sites the AI may open, e.g. docs.example.com, *.wikipedia.org",
-        "Leave empty to allow every site. Blocked domains always win over allowed ones.",
-      ]);
-      while (true) {
-        const parsed = parseDomainList(await session.question("Allowed domains (comma-separated, Enter for all): "));
-        if (parsed !== undefined) {
-          allowedDomains = parsed;
-          break;
+    if (mode === "connect") {
+      ui.note(headless
+        ? "Starting a dedicated headless debugging profile on port 9222..."
+        : "Starting a dedicated headed debugging profile on port 9222...");
+      try {
+        const launched = await launchPersonalChrome({
+          dataDir: defaults.dataDir,
+          executablePath: browserExecutablePath,
+          headless,
+          spawn: opts.spawn,
+          probe: opts.probe ?? defaultProbe,
+          port: 9222,
+        });
+        ui.success(`Connected to the dedicated debugging profile at ${launched.url}`);
+      } catch (error) {
+        if (error instanceof AppError && (error.code === "INSTALL_CONFIG_INVALID" || error.code === "INSTALL_CONFIG_FAILED")) {
+          throw error;
         }
-        ui.failure("That did not look like a domain list. Example: example.com, *.shop.test");
-      }
-
-      ui.step(5, WIZARD_STEP_TOTAL, "Blocked domains");
-      ui.explain(["Never open these sites, even when everything else is allowed."]);
-      while (true) {
-        const parsed = parseDomainList(await session.question("Blocked domains (comma-separated, Enter for none): "));
-        if (parsed !== undefined) {
-          blockedDomains = parsed;
-          break;
-        }
-        ui.failure("That did not look like a domain list. Example: ads.example.com");
-      }
-
-      ui.step(6, WIZARD_STEP_TOTAL, "JavaScript execution");
-      ui.explain([
-        "browser_evaluate runs arbitrary JavaScript on a page - powerful for scraping",
-        "but it can also trigger bot defenses. Most users never need it on.",
-      ]);
-      allowEval = await askYesNo(session, "Allow the AI to run JavaScript on pages?", false);
-
-      ui.step(7, WIZARD_STEP_TOTAL, "Data directory");
-      ui.explain([
-        "Where the private Chrome profile, logs, and downloads live.",
-        "Permissions are locked to 0600 so only your user can read them.",
-      ]);
-      while (dataDir === defaults.dataDir) {
-        const answer = (await session.question(`Data directory [${defaults.dataDir}]: `)).trim();
-        if (!answer) break;
-        if (!isAbsolutePath(answer) || isFilesystemRoot(answer) || /[\u0000-\u001f\u007f]/.test(answer)) {
-          ui.failure("Enter an absolute path other than the filesystem root.");
-          continue;
-        }
-        dataDir = answer;
-        break;
-      }
-      headless = headlessChoice;
-
-      if (mode === "connect") {
-        ui.note("Starting your personal Chrome with remote debugging on port 9222...");
-        try {
-          const launched = await launchPersonalChrome({ dataDir, spawn: opts.spawn, probe: opts.probe ?? defaultProbe, port: 9222 });
-          browserUrl = launched.url;
-          ui.success(`Connected to your Chrome at ${launched.url}`);
-        } catch (error) {
-          if (error instanceof AppError && (error.code === "INSTALL_CONFIG_INVALID" || error.code === "INSTALL_CONFIG_FAILED")) {
-            throw error;
-          }
-          browserUrl = "http://127.0.0.1:9222";
-          ui.note("Could not reach Chrome on port 9222 yet - keeping the default URL.");
-        }
+        ui.note("Could not reach the dedicated debugging profile on port 9222 yet - keeping the default URL.");
       }
     }
 
-    writeSummary(ui, harness, { mode, headless, allowedDomains, blockedDomains, allowEval, dataDir, browserExecutablePath });
-    return { mode, headless, allowedDomains, blockedDomains, allowEval, dataDir, browserUrl, browserExecutablePath };
+    const choices: WizardChoices = {
+      ...defaults,
+      mode,
+      headless,
+      ...(browserUrl ? { browserUrl } : {}),
+      ...(browserExecutablePath ? { browserExecutablePath } : {}),
+    };
+    writeSummary(ui, harness, choices);
+    return choices;
   } finally {
     rl.close();
   }
@@ -486,7 +427,7 @@ export async function runWizard(harness: string, opts: WizardRunOptions): Promis
 function writeSummary(ui: ReturnType<typeof createUi>, harness: string, choices: WizardChoices): void {
   const modeLabel: Record<string, string> = {
     managed: "Managed private Chrome (isolated profile)",
-    connect: "Your personal Chrome via debugging port",
+    connect: "Dedicated Chromium debugging profile via port 9222",
     disabled: "Disabled - no browser tools",
   };
   ui.banner("Configuration Summary", `Ready to configure ${harness}`, "");
@@ -497,7 +438,9 @@ function writeSummary(ui: ReturnType<typeof createUi>, harness: string, choices:
     ...(choices.mode === "disabled" ? [] : [
       ["Allowed sites", choices.allowedDomains.length ? choices.allowedDomains.join(", ") : "all sites"],
       ["Blocked sites", choices.blockedDomains.length ? choices.blockedDomains.join(", ") : "none"],
-      ["Page JavaScript", choices.allowEval ? "enabled" : "off (recommended)"],
+      ["Page JavaScript", choices.allowEval ? "enabled" : "off"],
+      ["Stealth baseline", "enabled (balanced)"],
+      ["Behavioral realism", "enabled"],
       ["Data directory", choices.dataDir],
     ] satisfies ReadonlyArray<readonly [string, string]>),
   ]);
@@ -566,6 +509,7 @@ export async function persistWizardConfig(rawChoices: WizardChoices, homeDir: st
   // unrelated user settings (and unknown sections) survive the wizard.
   const prevBrowser = isRecord(previous.browser) ? previous.browser : {};
   const prevSecurity = isRecord(previous.security) ? previous.security : {};
+  const prevStealth = isRecord(previous.stealth) ? previous.stealth : {};
   const browserSection: Record<string, unknown> = { ...prevBrowser, mode: choices.mode, headless: choices.headless };
   // These optional browser fields are wizard-managed too. Clear stale values
   // when a rerun switches back to managed/disabled mode.
@@ -579,14 +523,25 @@ export async function persistWizardConfig(rawChoices: WizardChoices, homeDir: st
     allowedDomains: choices.allowedDomains,
     blockedDomains: choices.blockedDomains,
   };
+  // These settings are owned by the wizard's recommended native profile. A
+  // rerun must reset stale profile values while retaining any unrelated root
+  // configuration sections.
+  const stealthSection = {
+    ...prevStealth,
+    enabled: true,
+    profile: "balanced",
+    gpu: false,
+    behaviorEnabled: true,
+  };
 
-  const config: Record<string, unknown> = { ...previous, browser: browserSection, security: securitySection };
-  const defaultDataDir = resolve(join(homeDir, ".smooth-operator"));
-  if (choices.dataDir === defaultDataDir) {
-    delete config.dataDir;
-  } else {
-    config.dataDir = choices.dataDir;
-  }
+  const config: Record<string, unknown> = { ...previous, browser: browserSection, security: securitySection, stealth: stealthSection };
+  // CAPTCHA solver configuration is no longer part of the server contract;
+  // drop stale wizard-managed data during a secure config rewrite.
+  delete config.captchaSolver;
+  // Persist the wizard-owned data directory even when it is the recommended
+  // default. This makes a rerun authoritative instead of leaving a stale
+  // custom path in the merged configuration.
+  config.dataDir = choices.dataDir;
 
   const serializedConfig = `${JSON.stringify(config, null, 2)}\n`;
   if (Buffer.byteLength(serializedConfig, "utf8") > MAX_WIZARD_CONFIG_BYTES) {
@@ -638,12 +593,24 @@ export async function launchPersonalChrome(opts: PersonalChromeOptions): Promise
   }
   await ensureSecureDirectory(safeDataDir);
   const spawnFn = opts.spawn ?? (await import("node:child_process")).spawn;
-  const child = spawnFn(executable, [`--remote-debugging-port=${port}`, `--user-data-dir=${join(safeDataDir, "personal-chrome")}`, "--no-first-run", "--no-default-browser-check"], { detached: true, stdio: "ignore", windowsHide: true });
+  const args = [
+    `--remote-debugging-port=${port}`,
+    `--user-data-dir=${join(safeDataDir, "personal-chrome")}`,
+    "--no-first-run",
+    "--no-default-browser-check",
+    ...(opts.headless ? ["--headless=new"] : []),
+  ];
+  const child = spawnFn(executable, args, { detached: true, stdio: "ignore", windowsHide: true });
   child.unref();
   const probe = opts.probe;
   const attempts = opts.probeAttempts ?? DEFAULT_PROBE_ATTEMPTS;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
-    await new Promise((resolveTimeout) => setTimeout(resolveTimeout, PROBE_INTERVAL_MS));
+    // Probe immediately after spawning. Chrome often has its DevTools endpoint
+    // ready before the first 300ms tick; retaining the interval between later
+    // probes keeps startup bounded without adding avoidable latency.
+    if (attempt > 0) {
+      await new Promise((resolveTimeout) => setTimeout(resolveTimeout, PROBE_INTERVAL_MS));
+    }
     try {
       const res = await probe(`http://127.0.0.1:${port}/json/version`, 1000);
       if (res.state === "live") return { url: `http://127.0.0.1:${port}` };

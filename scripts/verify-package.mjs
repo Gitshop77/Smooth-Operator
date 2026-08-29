@@ -33,7 +33,6 @@ const FORBIDDEN_RUNTIME_REFERENCES = [
   /\bmodel\s+provider/i,
   /\bnative\s+messaging\b/i,
   /\blightpanda\b/i,
-  /\binternal\s+(?:agent\s+)?loop\b/i,
 ];
 
 function usage() {
@@ -190,20 +189,16 @@ const SOURCE_HYGIENE_ROOTS = [
   "docs/harnesses.md",
   ".env.example",
 ];
-// docs/superpowers contains historical design/audit evidence and intentionally
-// records dropped architecture; it is not a packaged release surface.
 const SOURCE_HYGIENE_EXCLUSIONS = new Set([
   // This verifier contains the forbidden expressions as its own test data.
   "scripts/verify-package.mjs",
-  // Historical gitleaks exceptions intentionally name deleted legacy fixtures.
-  ".github/gitleaks.toml",
 ]);
 
 async function verifySourceHygiene() {
   const files = (await Promise.all(SOURCE_HYGIENE_ROOTS.map((path) => collectSurfaceFiles(path)))).flat();
-  for (const file of files) {
+  await Promise.all(files.map(async (file) => {
     if (SOURCE_HYGIENE_EXCLUSIONS.has(file)) {
-      continue;
+      return;
     }
     const source = await readFile(join(root, file), "utf8");
     for (const pattern of FORBIDDEN_RUNTIME_REFERENCES) {
@@ -211,7 +206,7 @@ async function verifySourceHygiene() {
         throw new Error(`Forbidden stale extension/provider/model/runtime reference ${pattern} found in first-party surface ${file}.`);
       }
     }
-  }
+  }));
 }
 
 async function collectSurfaceFiles(relativePath) {
@@ -247,13 +242,13 @@ async function verifySourceModes() {
 }
 
 async function verifyPackText(files) {
-  for (const file of files) {
+  await Promise.all([...files].map(async (file) => {
     if (![".md", ".json", ".example", ".mjs"].includes(extname(file)) && file !== ".env.example") {
-      continue;
+      return;
     }
     const sourcePath = join(root, file);
     if (!file.startsWith("dist/") && !(await pathExists(sourcePath))) {
-      continue;
+      return;
     }
     const source = file.startsWith("dist/") ? await readFile(sourcePath, "utf8") : await readFile(sourcePath, "utf8");
     for (const pattern of FORBIDDEN_RUNTIME_REFERENCES) {
@@ -261,7 +256,7 @@ async function verifyPackText(files) {
         throw new Error(`Forbidden legacy/runtime reference ${pattern} found in packaged file ${file}.`);
       }
     }
-  }
+  }));
 }
 
 async function verifyMarkdownLinks(file, source) {

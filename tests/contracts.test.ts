@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { BatchRequestSchema, BrowserActionInputSchema, BrowserActionPlanSchema, BrowserActionSchema, ClickRequestSchema, CookieRequestSchema, EvaluateRequestSchema, ExtractRequestSchema, HtmlRequestSchema, InputRequestSchema, NavigateRequestSchema, ResearchRequestSchema, ScreenshotRequestSchema, SnapshotRequestSchema, StorageRequestSchema, TargetRequestSchema } from "@/server/contracts";
+import { BatchRequestSchema, BrowserActionInputSchema, BrowserActionPlanSchema, BrowserActionSchema, ClickRequestSchema, CookieRequestSchema, EvaluateRequestSchema, ExtractRequestSchema, HtmlRequestSchema, InputRequestSchema, NavigateRequestSchema, ResearchRequestSchema, ScreenshotRequestSchema, SnapshotRequestSchema, SolveChallengeRequestSchema, StorageRequestSchema, TargetRequestSchema } from "@/server/contracts";
 
 describe("MCP contracts", () => {
   it("accepts browser-use indexed and coordinate click forms", () => {
@@ -216,15 +216,24 @@ describe("MCP contracts", () => {
     }
   });
 
-  it("accepts the solve_challenge action and its solver fields", () => {
-    expect(BrowserActionSchema.safeParse({ action: "solve_challenge", pageId: "p1" }).success).toBe(true);
-    expect(BrowserActionSchema.safeParse({ action: "solve_challenge", pageId: "p1", sitekey: "6LeIxAcTAAAAAJcZFOqjeYgM1uz6MPxCoTabzRk1", provider: "capsolver", proxyUrl: "http://localhost:8080" }).success).toBe(true);
-    expect(BrowserActionSchema.safeParse({ action: "solve_challenge", pageId: "p1", provider: "none" }).success).toBe(true);
-    const missingPage = BrowserActionSchema.safeParse({ action: "solve_challenge" });
-    expect(missingPage.success).toBe(false);
-    if (!missingPage.success) {
-      expect(missingPage.error.issues.map((issue) => issue.message)).toContain("solve_challenge requires pageId.");
-    }
-    expect(BrowserActionSchema.safeParse({ action: "solve_challenge", pageId: "p1", proxyUrl: "ftp://example.com" }).success).toBe(false);
+  it("accepts the connected-AI solve_challenge evidence contract", () => {
+    expect(SolveChallengeRequestSchema.safeParse({}).success).toBe(true);
+    expect(SolveChallengeRequestSchema.safeParse({
+      pageId: "p1",
+      includeScreenshot: true,
+      fullPage: true,
+      maxDimension: 1_200,
+      maxChars: 8_000,
+    }).success).toBe(true);
+    expect(SolveChallengeRequestSchema.safeParse({ pageId: "p1", full_page: true, max_dim: 1_200, include_screenshot: false }).success).toBe(true);
+    expect(BrowserActionSchema.safeParse({ action: "solve_challenge" }).success).toBe(true);
+    expect(BrowserActionSchema.safeParse({ action: "solve_challenge", pageId: "p1", provider: "capsolver" }).success).toBe(false);
+    expect(BrowserActionSchema.safeParse({ action: "solve_challenge", pageId: "p1", sitekey: "external" }).success).toBe(false);
+    expect(BrowserActionSchema.safeParse({ action: "solve_challenge", pageId: "p1", proxyUrl: "https://proxy.example" }).success).toBe(false);
+    expect(SolveChallengeRequestSchema.safeParse({ includeScreenshot: true, include_screenshot: false }).success).toBe(false);
+    expect(SolveChallengeRequestSchema.safeParse({ fullPage: true, full: false }).success).toBe(false);
+    expect(SolveChallengeRequestSchema.safeParse({ maxDimension: 20_001 }).success).toBe(false);
+    expect(SolveChallengeRequestSchema.safeParse({ maxChars: 8_001 }).success).toBe(false);
+    expect(SolveChallengeRequestSchema.safeParse({ __smooth_operator_invalid_field__: true }).success).toBe(false);
   });
 });

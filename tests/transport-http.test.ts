@@ -103,6 +103,15 @@ describe("HTTP transport", () => {
     expect(slowOversized.elapsedMs).toBeLessThan(1_500);
     expect(await rawChunkedPost(port, { Authorization: `Bearer ${token}` }, ["x".repeat(700), "y".repeat(700)])).toBe(413);
     expect(await rawChunkedRequest(port, "DELETE", { Authorization: `Bearer ${token}` }, ["x".repeat(700), "y".repeat(700)])).toBe(413);
+    // The bounded reader consumes the Node request before dispatch. Malformed
+    // and empty bodies must still be replayed so the adapter preserves its
+    // normal parse-error behavior on this uncommon path.
+    const malformed = await rawPostResponse(port, { Authorization: `Bearer ${token}` }, "{\"jsonrpc\":\"2.0\",\"id\":7");
+    expect(malformed.status).toBe(400);
+    expect(malformed.body).toContain("Parse error");
+    const empty = await rawPostResponse(port, { Authorization: `Bearer ${token}` }, "");
+    expect(empty.status).toBe(400);
+    expect(empty.body).toContain("Parse error");
     await rawAbortedPost(port, { Authorization: `Bearer ${token}` });
     const valid = await request({ Authorization: `Bearer ${token}` });
     expect(valid.status).toBe(200);
@@ -145,6 +154,51 @@ describe("HTTP transport", () => {
       await legacyClient.close().catch(() => undefined);
     }
   }, 30_000);
+
+  it("accepts IPv6-loopback Host/Origin and rejects non-loopback hosts", async () => {
+    const port = await freePort();
+    const dataDir = await mkdtemp(join(tmpdir(), "smooth-operator-http-v6-"));
+    tempDirectories.push(dataDir);
+    const token = "smooth-operator-http-v6-token";
+    const child = spawn(process.execPath, [join(process.cwd(), "node_modules", "tsx", "dist", "cli.mjs"), "src/server/main.ts", "--transport", "http"], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        SMOOTH_OPERATOR_BROWSER_MODE: "disabled",
+        SMOOTH_OPERATOR_TRANSPORT: "http",
+        // Bind the listener on the IPv6 loopback so the request must reach it
+        // over ::1. The localhost allowlist still contains "[::1]".
+        SMOOTH_OPERATOR_HTTP_HOST: "::1",
+        SMOOTH_OPERATOR_HTTP_PORT: String(port),
+        SMOOTH_OPERATOR_HTTP_TOKEN: token,
+        SMOOTH_OPERATOR_HTTP_MAX_BODY_BYTES: "1024",
+        SMOOTH_OPERATOR_DATA_DIR: dataDir,
+      },
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    children.push(child);
+    await waitForReady(child);
+    const initializeBody = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "1" } } });
+
+    // Per the WHATWG URL spec, new URL("http://[::1]:PORT").hostname === "[::1]"
+    // (brackets retained), so the localhost allowlist entry "[::1]" matches.
+    const accepted = await rawPostResponseV6(port, { Host: `[::1]:${port}`, Origin: "http://[::1]", Authorization: `Bearer ${token}` }, initializeBody);
+    expect(accepted.status).toBe(200);
+    expect(accepted.body).toContain('"name":"SmoothOperator"');
+
+    // Credentials embedded in the Host are stripped by URL parsing, leaving a
+    // non-loopback hostname that must be rejected.
+    const rejectedHost = await rawPostResponseV6(port, { Host: "user:secret@evil.example", Authorization: `Bearer ${token}` }, initializeBody);
+    expect(rejectedHost.status).toBe(403);
+    expect(rejectedHost.body).toContain("Host header is not allowed.");
+    expect(rejectedHost.body).not.toContain("secret");
+    expect(rejectedHost.body).not.toContain("evil.example");
+    const rejectedOrigin = await rawPostResponseV6(port, { Origin: "https://user:secret@evil.example/path", Authorization: `Bearer ${token}` }, initializeBody);
+    expect(rejectedOrigin.status).toBe(403);
+    expect(rejectedOrigin.body).toContain("Origin header is not allowed.");
+    expect(rejectedOrigin.body).not.toContain("secret");
+    expect(rejectedOrigin.body).not.toContain("evil.example");
+  }, 30_000);
 });
 
 async function freePort(): Promise<number> {
@@ -167,6 +221,34 @@ async function rawPostResponse(port: number, headers: Record<string, string>, bo
   return new Promise((resolve, reject) => {
     const request = httpRequest({
       hostname: "127.0.0.1",
+      port,
+      path: "/mcp",
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        "content-length": String(Buffer.byteLength(body)),
+        ...headers,
+      },
+    }, (response) => {
+      const chunks: Buffer[] = [];
+      response.on("data", (chunk: Buffer | string) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+      response.once("end", () => resolve({ status: response.statusCode ?? 0, body: Buffer.concat(chunks).toString("utf8") }));
+      response.once("error", reject);
+    });
+    request.once("error", reject);
+    request.end(body);
+  });
+}
+
+// IPv6-loopback variant of rawPostResponse. The connection target is `::1`
+// while the Host/Origin headers are set explicitly (raw http.request, unlike
+// fetch, does not derive Host from the URL) so the allowlist "[::1]" path is
+// exercised end to end.
+async function rawPostResponseV6(port: number, headers: Record<string, string>, body: string): Promise<{ status: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const request = httpRequest({
+      hostname: "::1",
       port,
       path: "/mcp",
       method: "POST",

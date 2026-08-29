@@ -23,11 +23,10 @@ import { Logger, redactValue } from "../logger";
 import { SecurityPolicy } from "../policy";
 import { redactSecretPlaceholders, wrapUntrustedText } from "../security";
 import { humanMouseMove, humanType } from "./behavior";
-import { classifyChallenge, type ChallengeKind } from "./challenges";
+import { classifyChallenge } from "./challenges";
 import { nativeBrowserLaunchArgs } from "./compatibility";
 import { chromeExecutableSearchPaths, findChromeExecutable } from "./discovery";
 import { buildFingerprintProfile } from "./fingerprints";
-import { buildSolver, type SolveRequest, type SolveResult } from "./solver";
 import { buildStealthInitScript } from "./stealth";
 import { globMatches, sanitizeUrl as safeUrl } from "./utils";
 
@@ -191,7 +190,8 @@ interface PageState {
   activeNavigationGeneration?: number;
   mainFrameStatus?: number;
   policyVerifiedUrls: Set<string>;
-  challengeActive: boolean;
+  /** Most recent challenge observation, used only to label a later clear. */
+  challengeStatus?: "present" | "absent" | "unknown";
   dialogResolutionPromise?: Promise<void>;
 }
 
@@ -283,6 +283,7 @@ const POPUP_POST_CLICK_SETTLE_TIMEOUT_MS = 300;
 const MAX_DOM_TRAVERSAL_NODES = 20_000;
 const MAX_TEXT_SCAN_CHARS = 500_000;
 const MAX_MARKUP_EVIDENCE_CHARS = 120_000;
+const CHALLENGE_AI_GUIDANCE = "Use normal browser click, input, scroll, or key tools on the visible challenge controls, then call solve_challenge again to verify that the challenge is cleared.";
 const MAX_DOWNLOAD_ENTRIES = 100;
 const TARGET_GUARD_MAX_REQUEST_IDS = 128;
 const CLICK_SETTLE_TIMEOUT_MS = 10;
@@ -330,11 +331,6 @@ const COMMON_KEY_ALIASES: Readonly<Record<string, KeyInput>> = {
   WINDOWS: "Meta",
 } as const;
 const FRAME_IDS = new WeakMap<Frame, string>();
-const CHALLENGE_BLOCKED_ACTIONS = new Set<BrowserAction["action"]>([
-  "click", "input", "select_dropdown", "scroll", "scroll_to_bottom", "send_keys",
-  "upload_file", "evaluate", "run_script", "hover", "move", "press_and_hold",
-  "set_cookie", "delete_cookies", "set_storage", "clear_storage",
-]);
 const SNAPSHOT_AFTER_ACTIONS = new Set<BrowserAction["action"]>([
   "navigate", "click", "input", "select_dropdown", "scroll", "send_keys", "go_back", "go_forward", "reload",
 ]);
@@ -344,13 +340,6 @@ const DOM_MUTATING_ACTIONS = new Set<BrowserAction["action"]>([
 const PARALLEL_READ_ACTIONS = new Set<BrowserAction["action"]>([
   "wait", "wait_for_element", "wait_for_text", "wait_for_url", "wait_for_network_idle",
   "get_network_log", "get_console_log", "extract", "get_html", "dropdown_options", "page_next", "search_page", "find_elements", "list_frames", "accessibility_snapshot", "get_computed_style", "get_page_info", "get_cookies", "get_storage", "list_downloads",
-]);
-
-// Kinds that carry a human-like score (reCAPTCHA v3, non-interactive Turnstile).
-// Mirrors solver.ts's SCORE_CAPABLE_KINDS, which is not exported; kept local so
-// the solver layer stays untouched while the request is scored correctly.
-const SCORE_CAPABLE_KINDS: ReadonlySet<ChallengeKind> = new Set<ChallengeKind>([
-  "recaptcha", "recaptcha-enterprise", "cloudflare-turnstile", "openai-turnstile",
 ]);
 
 export class BrowserService {
@@ -380,6 +369,11 @@ export class BrowserService {
   private sessionGeneration = 0;
   private readonly states = new Map<string, PageState>();
   private readonly configuredDownloadContexts = new WeakSet<object>();
+  // The download directory is process/session scoped, while page setup is
+  // page scoped. Share the mkdir promise across pages so opening a tab does
+  // not repeat the same filesystem round trip. A rejected attempt is cleared
+  // so a later page can retry after a transient filesystem failure.
+  private downloadDirectoryPromise: Promise<string> | undefined;
   private readonly ids = new WeakMap<Page, string>();
   private readonly targetGuardSessions = new Map<string, TargetGuardSession>();
   private readonly targetGuardNavigationErrors = new Map<string, AppError>();
@@ -639,14 +633,19 @@ export class BrowserService {
         await this.disposeStalePageState(state);
         throw error;
       }
-      let title = "";
+      // Title retrieval and the policy admission perform independent browser
+      // / DNS work. Start them together; preserve the old fallback where a
+      // title failure is non-fatal and a policy failure yields a blocked tab.
+      let titlePromise: Promise<string>;
       try {
-        title = await page.title();
+        titlePromise = Promise.resolve(page.title()).catch(() => "");
       } catch {
-        title = "";
+        // Keep title failures non-fatal, including test adapters or a page
+        // that closes between the accessor lookup and invocation.
+        titlePromise = Promise.resolve("");
       }
       try {
-        await this.assertCurrentPageAllowed(page, state);
+        const [title] = await Promise.all([titlePromise, this.assertCurrentPageAllowed(page, state)]);
         tabs.push({ index, id: state.id, tab_id: tabIdentifier(state.id, this.states), url: safeUrl(page.url()), title: wrapUntrustedText("tab_title", redactSecretPlaceholders(title.slice(0, 1_000)), 1_000), active: state.id === this.currentPageId || (!this.currentPageId && tabs.length === 0) });
       } catch (error) {
         this.logger.warn("Existing tab hidden by navigation policy", { pageId: state.id, code: error instanceof AppError ? error.code : "POLICY_ERROR" });
@@ -1013,20 +1012,12 @@ export class BrowserService {
     }
     const timeoutMs = action.timeoutMs ?? this.config.browser.actionTimeoutMs;
     // wait_for_human resolves with its own status (timed_out / resolved /
-    // cancelled) after `timeoutMs`. Give the operation lock a buffer so a
-    // borderline-slow challenge probe cannot abort it with BROWSER_TIMEOUT
-    // before the internal deadline elapses and returns a status object.
-    // solve_challenge runs the CAPTCHA solver's own polling window inside the
-    // lock (solver.solve receives operationSignal); cap it on the solver's
-    // timeout (default 120s) so legitimate solves are not cut off by the
-    // default 15s action deadline, with a trailing buffer mirroring
-    // wait_for_human.
-    const solverTimeoutMs = this.config.captchaSolver?.timeoutMs ?? 0;
+    // cancelled) after `timeoutMs`. Give the operation lock a small buffer so
+    // a borderline-slow challenge probe can return its status object instead
+    // of being cut off by the action deadline.
     const budgetMs = action.action === "wait_for_human"
       ? timeoutMs + 5_000
-      : action.action === "solve_challenge"
-        ? Math.max(timeoutMs + 5_000, solverTimeoutMs) + 5_000
-        : timeoutMs;
+      : timeoutMs;
     return this.withOperationLock(signal, async (operationSignal) => {
       let result: unknown;
       let snapshotInvalidated = false;
@@ -1183,12 +1174,6 @@ export class BrowserService {
     const state = await this.pageState(action.pageId, signal);
     const page = state.page;
     await this.assertCurrentPageAllowed(page, state);
-    if (state.challengeActive && isChallengeBlockedAction(action.action)) {
-      throw new AppError("CHALLENGE_REQUIRES_HUMAN", "A verified browser challenge is active. Complete it in the browser, then call browser_wait_for_human before continuing.", {
-        retryable: true,
-        details: { pageId: state.id, action: action.action },
-      });
-    }
     this.assertSnapshotForAction(state, action);
     const frame = await this.frameFor(state, action.frameId);
     throwIfAborted(signal);
@@ -2582,7 +2567,16 @@ export class BrowserService {
         });
       }
       case "get_page_info":
-        return { pageId: state.id, url: safeUrl(page.url()), title: wrapUntrustedText("page_title", redactSecretPlaceholders((await page.title().catch(() => "")).slice(0, 1_000)), 1_000), viewport: page.viewport(), dimensions: await page.evaluate(() => ({ width: document.documentElement.scrollWidth, height: document.documentElement.scrollHeight, scrollY: window.scrollY })) };
+        {
+          // Title and dimensions are independent reads. Keeping them in one
+          // turn of the operation lock but issuing both immediately removes a
+          // needless CDP round-trip from this frequently used read action.
+          const [title, dimensions] = await Promise.all([
+            Promise.resolve().then(() => page.title()).catch(() => ""),
+            page.evaluate(() => ({ width: document.documentElement.scrollWidth, height: document.documentElement.scrollHeight, scrollY: window.scrollY })),
+          ]);
+          return { pageId: state.id, url: safeUrl(page.url()), title: wrapUntrustedText("page_title", redactSecretPlaceholders(title.slice(0, 1_000)), 1_000), viewport: page.viewport(), dimensions };
+        }
       case "evaluate": {
         const code = requireField(action.code ?? action.expression, "code");
         const value = await frame.evaluate((source) => (0, eval)(source), code);
@@ -2981,9 +2975,7 @@ export class BrowserService {
     return browser;
   }
 
-  // The `stealth` config section is OPTIONAL and absent unless the user enables
-  // it, so read it with safe defaults. Mirrors the plan's `config.stealth`
-  // shape but tolerates the absent-by-default case.
+  // The optional `stealth` section is absent unless enabled; use safe defaults.
   private stealthSettings(): { enabled: boolean; profile: "balanced" | "max"; gpu: boolean; behaviorEnabled: boolean } {
     const s = this.config.stealth;
     return {
@@ -3020,10 +3012,14 @@ export class BrowserService {
             throw new AppError("BROWSER_NOT_CONFIGURED", `Managed browser mode could not find Chrome. Checked: ${chromeExecutableSearchPaths().join(", ")}. Install Chrome or set SMOOTH_OPERATOR_BROWSER_EXECUTABLE.`);
           }
           connection = this.launch({
-            headless: this.stealthSettings().enabled ? true : this.config.browser.headless,
+            headless: this.config.browser.headless,
             executablePath,
             userDataDir: this.config.browser.userDataDir,
-            args: nativeBrowserLaunchArgs({ enabled: this.stealthSettings().enabled, gpu: this.stealthSettings().gpu }),
+            args: nativeBrowserLaunchArgs({
+              enabled: this.stealthSettings().enabled,
+              gpu: this.stealthSettings().gpu,
+              viewport: this.config.browser.viewport,
+            }),
             timeout: this.config.browser.connectTimeoutMs,
             protocolTimeout: this.config.browser.cdpTimeoutMs,
           });
@@ -3034,10 +3030,14 @@ export class BrowserService {
         }
         ownsBrowser = true;
         connection = this.launch({
-          headless: this.stealthSettings().enabled ? true : this.config.browser.headless,
+          headless: this.config.browser.headless,
           executablePath: this.config.browser.executablePath,
           userDataDir: this.config.browser.userDataDir,
-          args: nativeBrowserLaunchArgs({ enabled: this.stealthSettings().enabled, gpu: this.stealthSettings().gpu }),
+          args: nativeBrowserLaunchArgs({
+            enabled: this.stealthSettings().enabled,
+            gpu: this.stealthSettings().gpu,
+            viewport: this.config.browser.viewport,
+          }),
           timeout: this.config.browser.connectTimeoutMs,
           protocolTimeout: this.config.browser.cdpTimeoutMs,
         });
@@ -3597,7 +3597,14 @@ export class BrowserService {
         // the policy error for the original request.
         allowed = true;
       } else if (requestUrl.startsWith("data:") || requestUrl.startsWith("blob:")) {
-        allowed = guard.targetType === "service_worker" || guard.targetType === "shared_worker";
+        // data/blob are local, same-origin-ish subresources that cannot reach
+        // private networks, so mirror handleRequest: allow them for every
+        // non-frame navigation and block only a data/blob frame/document
+        // navigation. `resourceType` is the reliable CDP signal here (a
+        // navigation — main or sub-frame — is reported as "Document", while
+        // subresources use other types); request.frame()/navigation semantics
+        // are unavailable on the raw request-paused event.
+        allowed = resourceType !== "Document";
       } else if (/^wss?:\/\//i.test(requestUrl)) {
         await this.policy.assertNavigationAllowedAsync(requestUrl.replace(/^ws/i, "http"));
         allowed = true;
@@ -3767,7 +3774,7 @@ export class BrowserService {
       state.navigationError = undefined;
       this.clearTargetGuardNavigationError(state.page);
       state.policyVerifiedUrls?.clear();
-      state.challengeActive = false;
+      state.challengeStatus = undefined;
     } catch (error) {
       this.logger.debug("Blocked navigation recovery could not restore a blank page", { pageId: state.id, error: String(error) });
     }
@@ -3958,8 +3965,7 @@ export class BrowserService {
     }
     if (!state.downloadConfigured && !state.downloadConfigurationError) {
       try {
-        const downloadPath = resolve(this.config.dataDir, "downloads");
-        await awaitWithAbort(mkdir(downloadPath, { recursive: true, mode: 0o700 }), signal);
+        const downloadPath = await this.ensureDownloadDirectory(signal);
         try {
           // Puppeteer exposes the context at runtime, while its stable public
           // BrowserContext type does not yet declare this CDP-backed helper.
@@ -4019,12 +4025,15 @@ export class BrowserService {
     // Stealth fingerprint bundle: inject once per page behind a one-shot guard,
     // mirroring the navigation-guard block above. `evaluateOnNewDocument` runs
     // in the main world before page scripts, so a single CDP call covers every
-    // document/iframe the page creates. Gated on the opt-in master switch; the
-    // default path performs a single boolean read and no CDP call.
+    // document/iframe the page creates. The native profile enables this by
+    // default, while an explicit false keeps the raw browser path available.
     const stealth = this.stealthSettings();
     if (stealth.enabled && !state.stealthInjected) {
       try {
-        const source = buildStealthInitScript(buildFingerprintProfile({ profile: stealth.profile }), { max: stealth.profile === "max" });
+        const source = buildStealthInitScript(
+          buildFingerprintProfile({ profile: stealth.profile, viewport: this.config.browser.viewport }),
+          { max: stealth.profile === "max", applyViewport: this.config.browser.viewport !== undefined },
+        );
         await state.page.evaluateOnNewDocument(source);
         state.stealthInjected = true;
       } catch (error) {
@@ -4036,6 +4045,25 @@ export class BrowserService {
     // receive a targetcreated callback. Release their initial CDP pause only
     // after page-level request interception is ready, just as for new pages.
     await this.releaseTargetGuardForPage(state.page);
+  }
+
+  private async ensureDownloadDirectory(signal?: AbortSignal): Promise<string> {
+    const downloadPath = resolve(this.config.dataDir, "downloads");
+    const existing = this.downloadDirectoryPromise;
+    if (existing) {
+      return await awaitWithAbort(existing, signal);
+    }
+    const directory = mkdir(downloadPath, { recursive: true, mode: 0o700 }).then(() => downloadPath);
+    const shared = directory.catch((error: unknown) => {
+      if (this.downloadDirectoryPromise === shared) {
+        this.downloadDirectoryPromise = undefined;
+      }
+      throw error;
+    });
+    this.downloadDirectoryPromise = shared;
+    // Cancelling one caller must not evict a still-running shared mkdir and
+    // cause another page to start duplicate filesystem work.
+    return await awaitWithAbort(shared, signal);
   }
 
   private async handleRequest(state: PageState, request: HTTPRequest): Promise<void> {
@@ -4125,7 +4153,7 @@ export class BrowserService {
       }
       this.ids.delete(page);
     }
-    const state: PageState = { id: randomUUID(), page, lifecycleGeneration: this.lifecycleGeneration, disposed: false, refs: new Map(), domRevision: 0, networkEnabled: false, consoleEnabled: false, network: [], console: [], dialogs: [], listenersInstalled: false, timeoutsConfigured: false, viewportConfigured: false, downloadConfigured: false, navigationGuardInstalled: false, stealthInjected: false, navigationGeneration: 0, policyVerifiedUrls: new Set(), challengeActive: false };
+    const state: PageState = { id: randomUUID(), page, lifecycleGeneration: this.lifecycleGeneration, disposed: false, refs: new Map(), domRevision: 0, networkEnabled: false, consoleEnabled: false, network: [], console: [], dialogs: [], listenersInstalled: false, timeoutsConfigured: false, viewportConfigured: false, downloadConfigured: false, navigationGuardInstalled: false, stealthInjected: false, navigationGeneration: 0, policyVerifiedUrls: new Set() };
     this.ids.set(page, state.id);
     this.states.set(state.id, state);
     this.installListeners(state);
@@ -4212,8 +4240,11 @@ export class BrowserService {
       state.snapshotInteractive = undefined;
       try {
         const mainFrame = state.page.mainFrame();
-        if (frame === mainFrame && mainFrame.url() !== "about:blank") {
-          state.challengeActive = false;
+        // Challenge observations are page-content evidence and must be
+        // refreshed after every main-frame navigation; no action-blocking
+        // latch is retained.
+        if (frame === mainFrame) {
+          state.challengeStatus = undefined;
         }
       } catch (error) {
         this.logger.debug("Browser frame navigation event was unavailable after page disposal", { pageId: state.id, error: String(error) });
@@ -4927,7 +4958,7 @@ export class BrowserService {
     try {
       // A failed pre-move is not a click failure — a failed hover must not
       // fail the click itself, so keep it defensive and swallowed.
-      await humanMouseMove(state.page, 0, 0, centerX, centerY, 300);
+      await humanMouseMove(state.page, 0, 0, centerX, centerY, 80);
     } catch {
       // Ignore: fall through to the normal click primitive.
     }
@@ -5003,7 +5034,7 @@ export class BrowserService {
         const rect = element.getBoundingClientRect();
         return style.display !== "none" && style.visibility !== "hidden" && Number.parseFloat(style.opacity || "1") > 0 && rect.width > 0 && rect.height > 0;
       };
-      // Check descendants before their containers. This preserves the old
+      // Check descendants before their containers. This preserves the
       // reverse-descendant preference (important for SVG containers whose
       // aggregate text matches a smaller text node) without materializing a
       // selector result for the whole body.
@@ -5915,7 +5946,8 @@ export class BrowserService {
           const name = element.getAttribute("name") ?? "";
           const src = element.getAttribute("src") ?? "";
           const siteKey = element.getAttribute("data-sitekey") ?? "";
-          appendMarkup(`<${tag} id="${id.slice(0, 500)}" class="${className.slice(0, 2_000)}" name="${name.slice(0, 500)}" src="${src.slice(0, 4_096)}" data-sitekey="${siteKey.slice(0, 1_000)}">`);
+          const action = element.getAttribute("data-action") ?? "";
+          appendMarkup(`<${tag} id="${id.slice(0, 500)}" class="${className.slice(0, 2_000)}" name="${name.slice(0, 500)}" src="${src.slice(0, 4_096)}" data-sitekey="${siteKey.slice(0, 1_000)}" data-action="${action.slice(0, 500)}">`);
           if (tag === "iframe" && src && frameSources.length < 100) {
             frameSources.push(src.slice(0, 4_096));
           }
@@ -5942,22 +5974,22 @@ export class BrowserService {
       }, { maxNodes: MAX_DOM_TRAVERSAL_NODES, textChars: 100_000, htmlChars: MAX_MARKUP_EVIDENCE_CHARS }), signal);
       throwIfAborted(signal);
       const classification = classifyChallenge({ ...evidence, status: state.mainFrameStatus });
-      if (classification.status === "present") {
-        state.challengeActive = true;
-      } else if (classification.status === "absent") {
-        state.challengeActive = false;
-      }
+      // Keep the observation only so solve_challenge can distinguish an
+      // initial no-challenge check from a later verification after the AI's
+      // interaction. This is not an action gate: clicks, input, scrolling,
+      // and other normal browser actions remain available at all times.
+      state.challengeStatus = classification.status;
       return { ...classification, url: safeUrl(state.page.url()), title: wrapUntrustedText("challenge_title", redactSecretPlaceholders(evidence.title.slice(0, 1_000)), 1_000) };
     } catch {
       throwIfAborted(signal);
-      // A failed probe is not evidence that a challenge is absent. Keep an
-      // existing latch set and make human-wait callers distinguish this state.
+      // A failed probe is not evidence that a challenge is absent. Report an
+      // explicitly unverified state so the connected AI can retry safely.
+      state.challengeStatus = "unknown";
       return {
         status: "unknown",
         detected: false,
         matches: [],
         humanActionRequired: true,
-        bypassAttempted: false,
         verification: "unverified",
         url: safeUrl(state.page.url()),
       };
@@ -5998,104 +6030,94 @@ export class BrowserService {
   }
 
   /**
-   * Opt-in CAPTCHA solver hook. Runs the configured solver when a challenge is
-   * present and supported, injects the returned token, re-fires the callback,
-   * and re-detects. `bypassAttempted` is `true` only when a solver actually
-   * ran (plan §6.5); `detectChallenge` stays a pure detector.
+   * Return a visual handoff for the connected AI. The server deliberately
+   * performs no challenge interaction here: it detects, captures one bounded
+   * snapshot, and gives the AI stable refs and normal browser-tool guidance.
+   * A successful result is emitted only for a fresh absent detection.
    */
   private async solveChallenge(state: PageState, action: BrowserAction, signal?: AbortSignal): Promise<unknown> {
     throwIfAborted(signal);
-    // No provider/API key → graceful human-in-the-loop fallback (no solver ran).
-    const solver = buildSolver(this.config, this.logger);
-    if (!solver) {
-      const detection = await this.detectChallenge(state, signal);
-      return { solved: false, resolution: "no_solver_configured", bypassAttempted: false, pageId: state.id, classification: detection };
-    }
-    // Detect the current challenge before attempting anything.
+    const previousChallengeStatus = state.challengeStatus;
     const detection = await this.detectChallenge(state, signal);
-    if (!isChallengePresent(detection)) {
-      return { solved: false, resolution: "no_challenge", bypassAttempted: false, pageId: state.id, classification: detection };
+    if (isChallengeUnknown(detection)) {
+      state.challengeStatus = "unknown";
+      return {
+        solved: false,
+        verified: false,
+        resolution: "challenge_state_unverified",
+        verification: "unknown",
+        workflow: "verification_unavailable",
+        pageId: state.id,
+        classification: detection,
+        nextAction: "Retry solve_challenge to verify the page state. If a challenge is visible, use the normal browser tools to interact with it first.",
+        guidance: "Retry solve_challenge to verify the page state. If a challenge is visible, use the normal browser tools to interact with it first.",
+      };
     }
-    const kind = challengeKindFrom(detection);
-    if (!kind) {
-      return { solved: false, resolution: "challenge_kind_unknown", bypassAttempted: false, pageId: state.id, classification: detection };
+
+    if (isChallengeAbsent(detection)) {
+      const cleared = previousChallengeStatus === "present";
+      state.challengeStatus = "absent";
+      return {
+        solved: true,
+        verified: true,
+        resolution: cleared ? "challenge_cleared" : "no_challenge",
+        verification: "verified",
+        workflow: "verified",
+        pageId: state.id,
+        classification: detection,
+      };
     }
-    if (!solver.supports(kind, SCORE_CAPABLE_KINDS.has(kind))) {
-      return { solved: false, resolution: "solver_unsupported", bypassAttempted: false, pageId: state.id, provider: solver.name, kind, classification: detection };
-    }
-    const sitekey = await this.extractSiteKey(state, detection, signal);
-    const req: SolveRequest = {
-      sitekey,
-      pageurl: state.page.url(),
-      kind,
-      scoreBased: SCORE_CAPABLE_KINDS.has(kind),
-      proxyUrl: this.config.captchaSolver?.proxyUrl,
-    };
-    let result: SolveResult;
-    try {
-      result = await solver.solve(req, signal ?? new AbortController().signal);
-    } catch (error) {
-      // The solver WAS attempted → honest reporting even on failure.
-      return { solved: false, resolution: "solver_failed", bypassAttempted: true, pageId: state.id, provider: solver.name, kind, error: describeSolverError(error), classification: detection };
-    }
-    try {
-      await this.injectSolverToken(state, result, signal);
-    } catch (error) {
-      return { solved: false, resolution: "injection_failed", bypassAttempted: true, pageId: state.id, provider: solver.name, kind, error: describeSolverError(error), classification: detection };
-    }
-    // Refresh refs, then re-detect with a fresh probe to confirm the outcome.
-    this.assertSnapshotForAction(state, action);
-    throwIfAborted(signal);
-    const finalDetection = await this.detectChallenge(state, signal);
-    const cleared = isChallengeAbsent(finalDetection);
-    return {
-      solved: cleared,
-      resolution: cleared ? "challenge_cleared" : "challenge_persisted",
-      bypassAttempted: true,
+
+    // A present challenge is an AI handoff. Capture exactly one fresh bounded
+    // snapshot so refs, viewport, frame, and revision all describe the same
+    // document as the screenshot.
+    state.challengeStatus = "present";
+    const includeScreenshot = action.includeScreenshot ?? action.include_screenshot ?? true;
+    const requestedMaxDimension = action.maxDimension ?? action.max_dim;
+    const maxDimension = Number.isFinite(requestedMaxDimension)
+      ? Math.min(1_600, Math.max(100, Math.floor(requestedMaxDimension as number)))
+      : 1_600;
+    const requestedMaxChars = action.maxChars;
+    const maxChars = Number.isFinite(requestedMaxChars)
+      ? Math.min(8_000, Math.max(1_000, Math.floor(requestedMaxChars as number)))
+      : 8_000;
+    const snapshot = await this.snapshotUnlocked({
       pageId: state.id,
-      provider: solver.name,
-      kind,
-      classification: finalDetection,
-    };
-  }
-
-  /** Probe the first `data-sitekey` in a bounded way for the solve request. */
-  private async extractSiteKey(state: PageState, detection: unknown, signal?: AbortSignal): Promise<string | undefined> {
-    const inline = extractSiteKeyFromMarkup(detection);
-    if (inline) return inline;
-    try {
-      return await awaitWithAbort(state.page.evaluate(() => {
-        const element = document.querySelector("[data-sitekey]") as HTMLElement | null;
-        return element ? (element.getAttribute("data-sitekey") ?? "").slice(0, 1_000) : "";
-      }), signal);
-    } catch {
-      return undefined;
-    }
-  }
-
-  /** Best-effort token injection + callback re-fire; never throws out of evaluate. */
-  private async injectSolverToken(state: PageState, result: SolveResult, signal?: AbortSignal): Promise<void> {
+      frameId: action.frameId,
+      includeScreenshot,
+      fullPage: action.fullPage ?? action.full_page ?? action.full ?? false,
+      maxDimension,
+      maxChars,
+      signal,
+    });
     throwIfAborted(signal);
-    await awaitWithAbort(state.page.evaluate((payload: { token: string; field: string; reFireEvent?: string }) => {
-      let injected = false;
-      try {
-        const widget = document.querySelector("[data-sitekey]") as unknown as Record<string, unknown> | null;
-        if (widget) {
-          widget[payload.field] = payload.token;
-          injected = true;
-        }
-        const win = window as unknown as Record<string, unknown>;
-        if (!injected && !(payload.field in win)) {
-          win[payload.field] = payload.token;
-        }
-        if (typeof payload.reFireEvent === "string" && typeof win[payload.reFireEvent] === "function") {
-          (win[payload.reFireEvent] as () => unknown)();
-        }
-      } catch {
-        // Injection is best-effort; a hostile page must never throw out of evaluate.
-      }
-      return injected;
-    }, { token: result.token, field: result.fieldSelector, reFireEvent: result.reFireEvent }), signal);
+
+    const { screenshotBase64, screenshot, ...snapshotWithoutImage } = snapshot;
+    const screenshotMimeType = screenshot?.format === "jpeg" ? "image/jpeg" : "image/png";
+    const stableRefs = snapshot.interactive.map((element) => ({ ...element }));
+    return {
+      solved: false,
+      verified: true,
+      resolution: "challenge_present",
+      verification: "challenge_present",
+      workflow: "ai_action_required",
+      pageId: snapshot.pageId,
+      frameId: snapshot.frameId,
+      snapshotId: snapshot.snapshotId,
+      domRevision: snapshot.domRevision,
+      viewport: snapshot.viewport,
+      refs: stableRefs,
+      interactive: stableRefs,
+      classification: detection,
+      snapshot: snapshotWithoutImage,
+      nextAction: CHALLENGE_AI_GUIDANCE,
+      guidance: CHALLENGE_AI_GUIDANCE,
+      ...(includeScreenshot && screenshotBase64 && screenshot ? {
+        screenshotBase64,
+        mimeType: screenshotMimeType,
+        metadata: screenshot,
+      } : {}),
+    };
   }
 
   private async listDownloads(signal?: AbortSignal): Promise<unknown> {
@@ -6943,52 +6965,8 @@ function isChallengeAbsent(value: unknown): boolean {
   return Boolean(value && typeof value === "object" && "status" in value && (value as { status?: unknown }).status === "absent");
 }
 
-function isChallengePresent(value: unknown): boolean {
-  return Boolean(value && typeof value === "object" && "status" in value && (value as { status?: unknown }).status === "present");
-}
-
 function isChallengeUnknown(value: unknown): boolean {
   return Boolean(value && typeof value === "object" && "status" in value && (value as { status?: unknown }).status === "unknown");
-}
-
-function challengeKindFrom(value: unknown): ChallengeKind | undefined {
-  if (!value || typeof value !== "object") return undefined;
-  const matches = (value as { matches?: unknown }).matches;
-  if (!Array.isArray(matches) || matches.length === 0) return undefined;
-  const first = matches[0] as { kind?: unknown };
-  return typeof first?.kind === "string" ? (first.kind as ChallengeKind) : undefined;
-}
-
-/**
- * Scan classification markup (if present) for the first `data-sitekey`. The
- * detector does not expose markup, so this prefers inline markup when present
- * and lets the caller fall back to a bounded live-DOM probe when it is not.
- */
-function extractSiteKeyFromMarkup(value: unknown): string | undefined {
-  if (!value || typeof value !== "object") return undefined;
-  const candidate = value as { html?: string; visibleMarkers?: unknown };
-  const haystacks: string[] = [candidate.html].filter((html): html is string => typeof html === "string");
-  if (Array.isArray(candidate.visibleMarkers)) {
-    haystacks.push(...candidate.visibleMarkers.filter((marker): marker is string => typeof marker === "string"));
-  }
-  for (const haystack of haystacks) {
-    if (typeof haystack !== "string") continue;
-    const match = /data-sitekey\s*=\s*["']([^"']{1,1000})["']/i.exec(haystack);
-    if (match) return match[1].slice(0, 1_000);
-  }
-  return undefined;
-}
-
-function describeSolverError(error: unknown): string {
-  const appError = asAppError(error);
-  if (appError) {
-    return `${appError.code}: ${appError.message.slice(0, 500)}`;
-  }
-  return String(error ?? "").slice(0, 500);
-}
-
-function isChallengeBlockedAction(action: BrowserAction["action"]): boolean {
-  return CHALLENGE_BLOCKED_ACTIONS.has(action);
 }
 
 function safeOrigin(rawUrl: string): string {

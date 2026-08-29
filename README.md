@@ -27,7 +27,7 @@ Or straight from GitHub:
 npm install -g github:Gitshop77/Smooth-Operator && smooth-operator install opencode
 ~~~
 
-The wizard asks 7 focused questions covering browser mode, executable, headless operation, domain policy, page JavaScript, and the data directory. Run `smooth-operator install` with no harness to pick one interactively (TTY only; piped/CI runs print usage and exit). `--yes` applies the recommended defaults, so give it a target: `smooth-operator install opencode --yes`. Personal Chrome mode launches a dedicated debugging profile on `9222` and derives `browserUrl` automatically.
+The wizard asks exactly 3 focused questions: browser profile ownership, browser display, and the Chromium executable. Run `smooth-operator install` with no harness to pick one interactively (TTY only; piped/CI runs print usage and exit). `--yes` applies the recommended defaults, so give it a target: `smooth-operator install opencode --yes`. Personal Chrome mode launches a dedicated debugging profile on `9222` and derives `browserUrl` automatically. Managed mode owns one private persistent profile; connected mode launches and attaches to a dedicated debugging profile and does not claim ownership of an operator's daily browser.
 
 Requires Node 22.23.2+ and an installed Chromium-based browser. Profile at `~/.smooth-operator/browser` — sign in once.
 
@@ -44,14 +44,20 @@ Ask: *“Scrape pricing into a table”*, *“Fill this form with ~/resume.pdf�
 
 ## How to use
 
-Talk to your harness normally. It can call `browser_navigate` → `browser_snapshot` → `browser_click` and the rest of the MCP surface as needed. Logins and CAPTCHA challenges pause for human handoff in the Chrome window.
+Talk to your harness normally. It can call `browser_navigate` → `browser_snapshot` → `browser_click` and the rest of the MCP surface as needed. For a challenge, `browser_solve_challenge` returns fresh bounded visual/state evidence for the connected AI; the AI uses ordinary browser actions and calls it again to verify the final classification. Human handoff remains available for logins or challenges that require the user.
 
-Stealth (an identity-preserving baseline plus a JS fingerprint bundle) and an optional CAPTCHA solver are **opt-in and off by default**. Enable them with `SMOOTH_OPERATOR_STEALTH_ENABLED` and `SMOOTH_OPERATOR_CAPTCHA_SOLVER_*`; see `docs/STEALTH-GUIDE.md` for details and responsible use.
+Stealth and short behavioral timing are enabled in the recommended native profile. Page JavaScript is also available by default; set the explicit environment flags to `false` when a stricter profile is needed. See `docs/STEALTH-GUIDE.md` for details and responsible use.
+
+For the fastest supported operation, keep behavioral timing off with
+`SMOOTH_OPERATOR_BEHAVIOR_ENABLED=false`; the native browser remains bounded and
+cancellable. All local browser tools and page features are available by default;
+remote HTTP, private-network access, and file roots remain explicitly gated.
+Faster calls do not bypass challenges or grant permission to automate a site.
 
 ## Why
 
 - Zero setup — managed, headed, persistent browser by default
-- Secure by default — domain and file policy, bounded outputs, redaction, and JavaScript disabled unless explicitly enabled
+- Secure by default — domain and file policy, bounded outputs, redaction, and explicit safety boundaries
 - Reliable — private profiles, stale-reference recovery, reconnect handling, and structured errors
 - Flexible — stdio by default, Streamable HTTP when you need it, plus connect and disabled modes
 

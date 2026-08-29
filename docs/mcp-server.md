@@ -43,6 +43,16 @@ smooth-operator --help
 
 (The registry package is `smooth-operator-mcp`; plain `smooth-operator` is an unrelated library. You can also install straight from GitHub: `npm install -g github:Gitshop77/Smooth-Operator`.)
 
+The interactive installer asks exactly three questions: (1) browser profile
+ownership, (2) headed or headless display, and (3) which Chromium executable to
+use. Its recommended defaults are a managed private persistent profile, headed
+display, and the first detected Chromium executable. It also enables page eval,
+balanced stealth, and short behavioral timing in the native profile; pass the
+corresponding environment flags as `false` when those capabilities are not
+wanted. Managed mode owns its profile. Connected mode launches and attaches to
+a dedicated debugging profile and does not claim ownership of an operator's
+daily browser.
+
 From a checkout:
 
 ```sh
@@ -155,10 +165,13 @@ evaluating page content.
 
 The managed browser is headed by default for sign-in and human handoff. On CI or a
 displayless host, explicitly set `SMOOTH_OPERATOR_BROWSER_HEADLESS=true` or use
-Xvfb. By default the server adds no fingerprint spoofing, CAPTCHA solving, proxy
-rotation, or other evasion behavior. These are opt-in: `SMOOTH_OPERATOR_STEALTH_ENABLED`
-turns on a stealth baseline + JS fingerprint bundle, and `SMOOTH_OPERATOR_CAPTCHA_SOLVER_*`
-enables an optional solver. See `STEALTH-GUIDE.md`.
+Xvfb. If you set both `SMOOTH_OPERATOR_BROWSER_VIEWPORT_WIDTH` and
+`SMOOTH_OPERATOR_BROWSER_VIEWPORT_HEIGHT`, that explicit viewport is applied to
+the browser and any opt-in stealth page metrics. All local browser tools and
+features are available by default, including page evaluation and the balanced
+stealth/short-behavior profile. Set their environment flags to `false` for a
+stricter or faster profile. See `STEALTH-GUIDE.md` for challenge handling and
+the remaining boundaries.
 
 ### Managed mode (default)
 
@@ -287,15 +300,47 @@ variables include:
 | `SMOOTH_OPERATOR_BROWSER_EXECUTABLE` | unset | Managed-mode override; required for explicit launch mode |
 | `SMOOTH_OPERATOR_BROWSER_USER_DATA_DIR` | `${SMOOTH_OPERATOR_DATA_DIR}/browser` | Dedicated persistent browser profile |
 | `SMOOTH_OPERATOR_BROWSER_HEADLESS` | `false` | Set `true` for CI/displayless managed or launch use |
+| `SMOOTH_OPERATOR_BROWSER_VIEWPORT_WIDTH` / `_HEIGHT` | unset | Set both to apply an explicit viewport |
+| `SMOOTH_OPERATOR_BROWSER_AUTO_LAUNCH` | `false` | Backward-compatible connect-mode recovery option |
+| `SMOOTH_OPERATOR_BROWSER_TIMEOUT_MS` | `15000` | Per-action deadline |
+| `SMOOTH_OPERATOR_BROWSER_CONNECT_TIMEOUT_MS` | `30000` | Browser connection deadline |
+| `SMOOTH_OPERATOR_BROWSER_CDP_TIMEOUT_MS` | `30000` | DevTools command deadline |
+| `SMOOTH_OPERATOR_MAX_SCREENSHOT_BYTES` | `8000000` | Screenshot byte cap |
+| `SMOOTH_OPERATOR_MAX_HTML_CHARS` | `200000` | HTML output cap |
 | `SMOOTH_OPERATOR_ALLOWED_DOMAINS` | unset | Comma-separated allowlist |
 | `SMOOTH_OPERATOR_BLOCKED_DOMAINS` | unset | Comma-separated denylist |
 | `SMOOTH_OPERATOR_ALLOWED_FILE_ROOTS` | data `files`, `downloads` | Explicit roots replace defaults |
 | `SMOOTH_OPERATOR_ALLOW_PRIVATE_NETWORK` | `false` | Allows non-loopback private targets when true |
-| `SMOOTH_OPERATOR_ALLOW_EVAL` | `false` | Required, with full policy, for page JavaScript |
+| `SMOOTH_OPERATOR_ALLOW_EVAL` | `true` | Set `false` to disable page JavaScript |
+| `SMOOTH_OPERATOR_STEALTH_ENABLED` | `true` | Set `false` to preserve raw automation signals |
+| `SMOOTH_OPERATOR_STEALTH_PROFILE` | `balanced` | `balanced` or `max` compatibility label |
+| `SMOOTH_OPERATOR_STEALTH_GPU` | `false` | Adds opt-in GPU launch flags |
+| `SMOOTH_OPERATOR_BEHAVIOR_ENABLED` | `true` | Set `false` for fastest raw interactions |
+| `SMOOTH_OPERATOR_HTTP_HOST` | `127.0.0.1` | HTTP bind host |
+| `SMOOTH_OPERATOR_HTTP_PORT` | `3344` | HTTP bind port |
+| `SMOOTH_OPERATOR_HTTP_PATH` | `/mcp` | HTTP endpoint path |
 | `SMOOTH_OPERATOR_HTTP_TOKEN` | unset | Required for HTTP; 32+ chars for remote mode |
 | `SMOOTH_OPERATOR_ALLOW_REMOTE_HTTP` | `false` | Allows non-loopback HTTP only with a strong token |
 | `SMOOTH_OPERATOR_HTTP_MAX_BODY_BYTES` | `2000000` | Bounded HTTP request body |
+| `SMOOTH_OPERATOR_ALLOWED_HOSTS` | `localhost,127.0.0.1,[::1]` | HTTP Host allowlist |
+| `SMOOTH_OPERATOR_ALLOWED_ORIGINS` | `localhost,127.0.0.1,[::1]` | HTTP Origin allowlist |
 | `SMOOTH_OPERATOR_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, or `error` |
+
+### Fast operation mode
+
+The default configuration is a native managed browser with short bounded
+behavioral timing, the conservative stealth baseline, and page evaluation
+available. For the fastest raw interactions, set
+`SMOOTH_OPERATOR_BEHAVIOR_ENABLED=false` and, when appropriate,
+`SMOOTH_OPERATOR_STEALTH_ENABLED=false`; set `SMOOTH_OPERATOR_ALLOW_EVAL=false`
+when page JavaScript is not needed. Tool calls remain bounded and cancellable;
+no hidden planning loop is introduced.
+
+Raw MCP/tool-call speed is not the main bot-detection vector. Sites can score
+network and browser identity, IP reputation, session history, and interaction
+timing independently. A faster call does not bypass a challenge or make an
+automated session legitimate; use the internal AI workflow or human handoff
+only where the target permits automation.
 
 ## Security enforcement layers
 
@@ -316,13 +361,15 @@ are always applied, with explicit opt-ins where documented:
   unknown schemes are rejected.
 - Upload and PDF destinations must stay within configured file roots after
   realpath and symlink checks. Download paths and generated files are bounded.
-- Page JavaScript is disabled by default. It is available only when the full
-  security policy and `SMOOTH_OPERATOR_ALLOW_EVAL=true` are configured; enabling it
-  lets page code observe and mutate page state with the browser's privileges.
+- Page JavaScript is available in the native profile by default and can be
+  disabled with `SMOOTH_OPERATOR_ALLOW_EVAL=false`; when enabled, page code can
+  observe and mutate page state with the browser's privileges.
 - Page text, HTML, titles, attributes, search snippets, cookies, and logs are
   treated as untrusted data, normalized, bounded, and redacted before output.
-- CAPTCHA and anti-bot markers are reported for human handoff. The server does
-  not bypass them, rotate identities, or solve challenges.
+- Challenge and anti-bot markers are reported from bounded evidence. The server
+  does not rotate identities or silently bypass challenges. The connected-AI
+  challenge loop collects fresh classification and visual/state evidence,
+  allows ordinary browser actions, and verifies with a subsequent call.
 
 Run the server with a dedicated browser profile and the smallest domain and
 file-root allowlists that fit the task. Browser automation can still perform
@@ -349,25 +396,28 @@ individual descriptions and limits are returned by `tools/list`.
 `browser_close_tab`, `browser_click`, `browser_input`, `browser_select`,
 `browser_scroll`, `browser_scroll_to_bottom`, `browser_key`,
 `browser_wait`, `browser_wait_for_element`, `browser_wait_for_text`, `browser_wait_for_url`,
-`browser_wait_for_network_idle`, `browser_hover`, `browser_press_and_hold`,
+`browser_wait_for_network_idle`, `browser_hover`, `browser_move`, `browser_press_and_hold`,
 `browser_type`, `browser_close`, and `browser_close_all`.
 
-**Explicitly gated capabilities:** `browser_screenshot`, `browser_pdf`,
+**Available local capabilities:** `browser_screenshot`, `browser_pdf`,
 `browser_upload`, `browser_downloads`, `browser_network_log`,
-`browser_console_log`, `browser_dialog`, `browser_cookies`,
-`browser_storage`, `browser_evaluate`, `browser_batch`,
-`browser_exec`, `browser_wait_for_human`, `browser_solve_challenge`,
-`browser_close_session`, and the explicit browser-session lifecycle controls.
+`browser_console_log`, `browser_dialog`, `browser_cookies`, `browser_storage`,
+`browser_batch`, `browser_exec`, `browser_wait_for_human`,
+`browser_solve_challenge`, and all other browser tools are available by default.
+`browser_close_session` remains a local lifecycle control and does not change
+browser permissions. Page evaluation is available by default and can be
+disabled explicitly with `SMOOTH_OPERATOR_ALLOW_EVAL=false`.
 
-`browser_evaluate` is page JavaScript and is disabled by default. `browser_exec`
+`browser_evaluate` is page JavaScript and is available by default (set
+`SMOOTH_OPERATOR_ALLOW_EVAL=false` when it is not wanted). `browser_exec`
 accepts only a JSON array of validated browser actions; it is not a shell,
 Python, or arbitrary code runner. Destructive batch actions require explicit
 confirmation. `browser_wait_for_human` pauses for an operator to complete a
-visible sign-in or challenge, `browser_solve_challenge` attempts to solve a
-detected challenge via the opt-in solver service (configured with
-`SMOOTH_OPERATOR_CAPTCHA_SOLVER_*`) and falls back to human-in-the-loop
-otherwise, and `browser_close_session` closes the one native browser session by
-its explicit session identifier. Both challenge tools report `bypassAttempted`.
+visible sign-in or challenge. `browser_solve_challenge` is an internal
+connected-AI observe/act/verify loop: it returns bounded evidence and is
+successful only when a fresh final classification explicitly reports the
+challenge absent. `browser_close_session` closes the one native browser session
+by its explicit session identifier.
 
 Actions that leave a usable page—navigation, click, input, select, scroll, key,
 back, forward, and reload—accept optional `includeSnapshot: true`. The action
@@ -404,7 +454,7 @@ not a per-result multiplier. URL fields and fixed untrusted-data wrapper
 markers are outside that text budget. The response body is bounded before
 parsing, redirects are rejected, cancellation and timeout are propagated, and
 credentials/query secret placeholders are removed from result URLs. Transient
-provider failures use at most three bounded attempts; anti-bot responses are
+retrieval failures use at most three bounded attempts; anti-bot responses are
 reported without attempting a bypass.
 
 ### Resources
@@ -420,7 +470,10 @@ The server publishes read-only resources:
 - `smooth-operator://browser/logs/console`
 
 Resource output is bounded and follows the same redaction and policy rules as
-tool output.
+tool output. The capabilities resource also reports the native defaults and
+effective feature flags for local browser tools, page evaluation, stealth, and
+behavioral timing, plus whether challenge success requires an explicit absent
+classification.
 
 ### Prompts
 
@@ -443,7 +496,6 @@ mode remains under the operator's ownership.
 To clean up a local installation:
 
 ```sh
-smooth-operator install claude-desktop   # inspect config before removal
 npm uninstall -g smooth-operator-mcp
 ```
 

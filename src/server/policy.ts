@@ -7,25 +7,48 @@ import { domainToASCII } from "node:url";
 import type { ServerConfig } from "./config";
 import { AppError } from "./errors";
 
+const NORMALIZED_HOST_CACHE_LIMIT = 256;
+const normalizedHostCache = new Map<string, string>();
+
 function normalizeHost(host: string): string {
   const trimmed = host.trim().replace(/^\[|\]$/g, "").replace(/^\.+|\.+$/g, "");
   if (!trimmed) {
     return "";
   }
+  // URL policy checks revisit the same hosts for redirects, DNS answers, and
+  // allow/deny matching. Cache only normal-sized hostnames and keep the cache
+  // bounded so attacker-controlled high-cardinality hosts cannot grow memory.
+  if (trimmed.length <= 512) {
+    const cached = normalizedHostCache.get(trimmed);
+    if (cached !== undefined || normalizedHostCache.has(trimmed)) {
+      normalizedHostCache.delete(trimmed);
+      normalizedHostCache.set(trimmed, cached ?? "");
+      return cached ?? "";
+    }
+  }
+  let normalized: string;
   // Canonicalize Unicode patterns to IDNA before suffix matching.
   if (isIP(trimmed)) {
-    return trimmed.toLowerCase();
+    normalized = trimmed.toLowerCase();
+  } else {
+    try {
+      const ascii = domainToASCII(trimmed);
+      normalized = ascii ? ascii.toLowerCase() : "";
+    } catch {
+      normalized = "";
+    }
   }
-  try {
-    const ascii = domainToASCII(trimmed);
-    return ascii ? ascii.toLowerCase() : "";
-  } catch {
-    return "";
+  if (trimmed.length <= 512) {
+    if (normalizedHostCache.size >= NORMALIZED_HOST_CACHE_LIMIT) {
+      const oldest = normalizedHostCache.keys().next().value;
+      if (oldest !== undefined) normalizedHostCache.delete(oldest);
+    }
+    normalizedHostCache.set(trimmed, normalized);
   }
+  return normalized;
 }
 
-function isLoopbackHost(host: string): boolean {
-  const normalized = normalizeHost(host);
+function isLoopbackHostNormalized(normalized: string): boolean {
   return normalized === "localhost" || normalized === "localhost.localdomain" || normalized === "127.0.0.1" || normalized === "::1" || normalized === "[::1]";
 }
 
@@ -48,8 +71,7 @@ function isPrivateIpv4(host: string): boolean {
     || first >= 224;
 }
 
-function isPrivateIpv6(host: string): boolean {
-  const normalized = normalizeHost(host);
+function isPrivateIpv6Normalized(normalized: string): boolean {
   const parsed = parseIpv6(normalized);
   if (!parsed) {
     return false;
@@ -144,31 +166,42 @@ function parseIpv6Side(rawParts: string[]): { parts: number[]; embeddedIpv4?: st
 
 function isPrivateHost(host: string): boolean {
   const normalized = normalizeHost(host);
-  const ipVersion = isIP(normalized);
-  return isLoopbackHost(normalized) || (ipVersion === 4 && isPrivateIpv4(normalized)) || (ipVersion === 6 && isPrivateIpv6(normalized));
+  return isPrivateHostNormalized(normalized);
 }
 
-function matchesDomain(host: string, pattern: string): boolean {
-  if (typeof pattern !== "string") {
-    return false;
+function isPrivateHostNormalized(normalized: string): boolean {
+  const ipVersion = isIP(normalized);
+  return isLoopbackHostNormalized(normalized) || (ipVersion === 4 && isPrivateIpv4(normalized)) || (ipVersion === 6 && isPrivateIpv6Normalized(normalized));
+}
+
+interface CompiledDomainPattern {
+  readonly wildcard: boolean;
+  readonly normalized: string;
+}
+
+/**
+ * Compile domain policy once when a policy is created. Navigation is a hot
+ * path (every URL and redirect is checked), so repeatedly parsing IDNA and
+ * re-validating the same configured patterns is unnecessary work. Invalid
+ * patterns are retained as `undefined` by the caller so existing fail-closed
+ * errors are still reported from the first policy check rather than silently
+ * ignored.
+ */
+function compileDomainPattern(pattern: string): CompiledDomainPattern | undefined {
+  if (!isValidDomainPattern(pattern)) {
+    return undefined;
   }
-  const normalized = normalizeHost(host);
-  const rawPattern = pattern.trim().replace(/^\[|\]$/g, "").replace(/^\.+|\.+$/g, "");
+  const rawPattern = pattern.trim().replace(/^\.+|\.+$/g, "");
   const wildcard = rawPattern.startsWith("*.");
-  const normalizedPattern = normalizeHost(wildcard ? rawPattern.slice(2) : rawPattern);
-  if (!normalized || !normalizedPattern || rawPattern.includes("*") && !wildcard) {
-    return false;
+  const normalized = normalizeHost(wildcard ? rawPattern.slice(2) : rawPattern);
+  return normalized ? { wildcard, normalized } : undefined;
+}
+
+function matchesCompiledDomain(host: string, pattern: CompiledDomainPattern): boolean {
+  if (pattern.wildcard) {
+    return host.endsWith(`.${pattern.normalized}`) && host !== pattern.normalized;
   }
-  if (wildcard) {
-    // A wildcard represents one or more complete labels.  Reject malformed
-    // forms such as `*.*.example` rather than turning them into a broad
-    // substring match.
-    if (rawPattern.slice(2).includes("*") || normalizedPattern.includes("." + ".")) {
-      return false;
-    }
-    return normalized.endsWith(`.${normalizedPattern}`) && normalized !== normalizedPattern;
-  }
-  return normalized === normalizedPattern;
+  return host === pattern.normalized;
 }
 
 function isValidDomainPattern(pattern: string): boolean {
@@ -275,7 +308,7 @@ function hasNoSymlinkSegments(path: string): boolean {
 }
 
 export interface AllowedFileRootMetadata {
-  /** Stable identifier suitable for a future tool-level root selector. */
+  /** Stable identifier for an allowed file root. */
   id: string;
   /** The canonical path the policy actually compares against. */
   path: string;
@@ -330,13 +363,23 @@ export class SecurityPolicy {
   private readonly dnsInFlight = new Map<string, Promise<Array<{ address: string }>>>();
   private readonly allowedFileRoots: string[];
   private readonly allowedFileRootMetadata: AllowedFileRootMetadata[];
+  private readonly allowedDomainPatterns: CompiledDomainPattern[];
+  private readonly blockedDomainPatterns: CompiledDomainPattern[];
+  private readonly hasInvalidAllowedDomainPattern: boolean;
+  private readonly hasInvalidBlockedDomainPattern: boolean;
 
   constructor(private readonly config: ServerConfig) {
     this.allowedFileRoots = canonicalizeAllowedFileRoots(config.security.allowedFileRoots);
     this.allowedFileRootMetadata = this.allowedFileRoots.map((path, index) => ({ id: `root-${index + 1}`, path }));
+    const allowed = config.security.allowedDomains.map(compileDomainPattern);
+    const blocked = config.security.blockedDomains.map(compileDomainPattern);
+    this.allowedDomainPatterns = allowed.filter((pattern): pattern is CompiledDomainPattern => pattern !== undefined);
+    this.blockedDomainPatterns = blocked.filter((pattern): pattern is CompiledDomainPattern => pattern !== undefined);
+    this.hasInvalidAllowedDomainPattern = allowed.some((pattern) => pattern === undefined);
+    this.hasInvalidBlockedDomainPattern = blocked.some((pattern) => pattern === undefined);
   }
 
-  /** Safe root metadata for a future tool-level workspace selector. */
+  /** Return safe metadata for configured file roots. */
   getAllowedFileRoots(): AllowedFileRootMetadata[] {
     return this.allowedFileRootMetadata.map((root) => ({ ...root }));
   }
@@ -359,16 +402,19 @@ export class SecurityPolicy {
     if (!host) {
       throw new AppError("URL_INVALID", "The URL host is invalid.");
     }
-    if (this.config.security.blockedDomains.some((pattern) => !isValidDomainPattern(pattern))) {
+    if (this.hasInvalidBlockedDomainPattern) {
       throw new AppError("CONFIG_INVALID", "Configured blocked-domain patterns are invalid.");
     }
-    if (this.config.security.blockedDomains.some((pattern) => matchesDomain(host, pattern))) {
+    if (this.blockedDomainPatterns.some((pattern) => matchesCompiledDomain(host, pattern))) {
       throw new AppError("DOMAIN_BLOCKED", `Navigation to '${host}' is blocked by policy.`);
     }
-    if (isPrivateHost(host) && !this.config.security.allowPrivateNetwork && !isLoopbackHost(host)) {
+    if (isPrivateHostNormalized(host) && !this.config.security.allowPrivateNetwork && !isLoopbackHostNormalized(host)) {
       throw new AppError("PRIVATE_NETWORK_BLOCKED", "Private-network navigation is disabled by policy.");
     }
-    if (this.config.security.allowedDomains.length > 0 && !this.config.security.allowedDomains.some((pattern) => matchesDomain(host, pattern))) {
+    if (this.hasInvalidAllowedDomainPattern) {
+      throw new AppError("CONFIG_INVALID", "Configured allowlist domain patterns are invalid.");
+    }
+    if (this.allowedDomainPatterns.length > 0 && !this.allowedDomainPatterns.some((pattern) => matchesCompiledDomain(host, pattern))) {
       throw new AppError("DOMAIN_NOT_ALLOWED", `Navigation to '${host}' is outside the configured allowlist.`);
     }
     return url;
@@ -377,7 +423,7 @@ export class SecurityPolicy {
   async assertNavigationAllowedAsync(rawUrl: string): Promise<URL> {
     const url = this.assertNavigationAllowed(rawUrl);
     const host = normalizeHost(url.hostname);
-    if (this.config.security.allowPrivateNetwork || isLoopbackHost(host) || isIP(host)) {
+    if (this.config.security.allowPrivateNetwork || isLoopbackHostNormalized(host) || isIP(host)) {
       return url;
     }
     const cached = this.dnsCache.get(host);
@@ -462,10 +508,8 @@ export class SecurityPolicy {
         details: this.filePathDetails("unresolved_symbolic_link"),
       });
     }
-    const root = this.allowedFileRoots.find((candidate) => {
-      const lexicalRoot = resolve(candidate);
-      const canonicalRoot = canonicalPath(lexicalRoot) ?? lexicalRoot;
-
+    const root = this.allowedFileRoots.find((canonicalRoot) => {
+      const lexicalRoot = canonicalRoot;
       // Compare the resolved path when it exists (or has an existing parent).
       // This both accepts macOS /var -> /private/var canonicalization and
       // prevents a child symlink from escaping an explicitly allowed root.

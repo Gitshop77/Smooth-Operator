@@ -23,16 +23,34 @@ interface ChromeExecutableCandidate extends ChromeExecutable {}
  * Chromium browsers. Any CDP-compatible executable can also be set manually
  * via SMOOTH_OPERATOR_BROWSER_EXECUTABLE or browser.executablePath config. */
 export function findChromeExecutable(fs: FileSystem = nodeFs): ChromeExecutable | null {
-  return chromeExecutableCandidates().find((candidate) => fs.existsSync(candidate.path)) ?? null;
+  // Candidate generation is cheap, but duplicate PATH entries and platform
+  // aliases are common. Deduping before touching the filesystem keeps startup
+  // discovery deterministic and avoids redundant existsSync calls.
+  return dedupeCandidates(chromeExecutableCandidates()).find((candidate) => fs.existsSync(candidate.path)) ?? null;
 }
 
 /** All installed Chromium-based browsers found on this machine. */
 export function findChromiumExecutables(fs: FileSystem = nodeFs): ChromeExecutable[] {
-  return chromeExecutableCandidates().filter((candidate) => fs.existsSync(candidate.path));
+  return dedupeCandidates(chromeExecutableCandidates()).filter((candidate) => fs.existsSync(candidate.path));
 }
 
 export function chromeExecutableSearchPaths(): string[] {
-  return chromeExecutableCandidates().map((candidate) => candidate.path);
+  return dedupeCandidates(chromeExecutableCandidates()).map((candidate) => candidate.path);
+}
+
+function dedupeCandidates(candidates: readonly ChromeExecutableCandidate[]): ChromeExecutableCandidate[] {
+  const seen = new Set<string>();
+  const unique: ChromeExecutableCandidate[] = [];
+  for (const candidate of candidates) {
+    // Windows paths are case-insensitive. Lower-casing only for the key keeps
+    // the original spelling available to callers while avoiding duplicate
+    // probes when PATH or environment variables repeat an entry.
+    const key = process.platform === "win32" ? candidate.path.toLowerCase() : candidate.path;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(candidate);
+  }
+  return unique;
 }
 
 function chromeExecutableCandidates(): ChromeExecutableCandidate[] {

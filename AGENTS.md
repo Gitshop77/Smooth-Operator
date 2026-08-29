@@ -24,11 +24,11 @@ git clone https://github.com/Gitshop77/Smooth-Operator.git && cd Smooth-Operator
 
 The npm registry name is `smooth-operator-mcp` (plain `smooth-operator` is an unrelated library).
 
-Wizard (default): 7 prompts — mode (managed/private vs personal Chrome connect vs disabled), browser (any installed Chromium-based browser: Chrome/Brave/Edge/Chromium/Vivaldi/Arc/Opera, persisted as `browser.executablePath`), headless, allowed domains, blocked domains, allowEval, and dataDir. Choices are normalized and validated before persistence. Personal-Chrome mode launches `chrome --remote-debugging-port=9222 --user-data-dir=~/.smooth-operator/personal-chrome`, polls `http://127.0.0.1:9222/json/version` (300ms×33), and derives `browserUrl`; the URL is not a prompt. `--yes` uses defaults: managed, headless false, allowEval false, no domains. Persists to `~/.smooth-operator/config.json` (0600, owner-only, bounded, symlink-safe, and backed up). Bare `smooth-operator install` prompts for the harness on a TTY (piped/CI prints usage); on re-run the wizard's choices are authoritative for mode/headless/domains/allowEval — previously persisted values for those keys are overwritten while unrelated settings merge.
+Wizard (default): exactly 3 prompts — browser profile ownership, browser display, and the Chromium executable. Choices are normalized and validated before persistence. Personal-Chrome mode launches `chrome --remote-debugging-port=9222 --user-data-dir=~/.smooth-operator/personal-chrome`, polls `http://127.0.0.1:9222/json/version` (300ms×33), and derives `browserUrl`; the URL is not a prompt. `--yes` uses defaults: managed, headed, page eval on, balanced stealth, and short behavioral timing. Persists to `~/.smooth-operator/config.json` (0600, owner-only, bounded, symlink-safe, and backed up). Bare `smooth-operator install` prompts for the harness on a TTY (piped/CI prints usage); managed mode owns one private persistent profile, while connected mode launches and attaches to a dedicated debugging profile rather than an operator's daily browser.
 
 ## Browser
 
-Headed private Chromium-based browser on first tool call. Auto-discovers an installed browser, uses the profile at `${SMOOTH_OPERATOR_DATA_DIR}/browser`, and reattaches when live. `browser_doctor` checks executable, profile, and endpoint state.
+Private Chromium-based browser (headed by default) on first tool call. Auto-discovers an installed browser, uses the profile at `${SMOOTH_OPERATOR_DATA_DIR}/browser`, and reattaches when live. `browser_doctor` checks executable, profile, and endpoint state.
 
 - **Managed (default):** `SMOOTH_OPERATOR_BROWSER_MODE=managed` — zero setup.
 - **Personal Chrome:** `connect` via `chrome://inspect` toggle or wizard 9222 helper.
@@ -36,7 +36,12 @@ Headed private Chromium-based browser on first tool call. Auto-discovers an inst
 - **Launch:** `SMOOTH_OPERATOR_BROWSER_MODE=launch SMOOTH_OPERATOR_BROWSER_EXECUTABLE=/path/to/chrome`
 - **Disabled:** `SMOOTH_OPERATOR_BROWSER_MODE=disabled`
 
-By default no spoofing and no CAPTCHA bypass; both are opt-in (`SMOOTH_OPERATOR_STEALTH_ENABLED`, `SMOOTH_OPERATOR_CAPTCHA_SOLVER_*`) and documented in `docs/STEALTH-GUIDE.md`.
+All local browser tools and features are available by default, including page
+eval and the balanced stealth/short-behavior profile. Set
+`SMOOTH_OPERATOR_ALLOW_EVAL=false`, `SMOOTH_OPERATOR_STEALTH_ENABLED=false`, or
+`SMOOTH_OPERATOR_BEHAVIOR_ENABLED=false` for a stricter/faster profile;
+challenge handling remains evidence-first and is documented in
+`docs/STEALTH-GUIDE.md`.
 
 ## HTTP
 
@@ -49,10 +54,10 @@ Default `127.0.0.1:3344`. Remote needs `SMOOTH_OPERATOR_ALLOW_REMOTE_HTTP=true` 
 ## MCP
 
 - **Observation:** `browser_snapshot`, `browser_tabs`, `browser_list_tabs`, `browser_list_sessions`, `browser_get_state`, `browser_page_info`, `browser_interactive`, `browser_frames`, `browser_accessibility_snapshot`, `browser_extract`, `browser_extract_content`, `browser_find_text`, `browser_search_page`, `browser_find_elements`, `browser_dropdown_options`, `browser_computed_style`, `browser_page_next`, `browser_get_html`, `browser_challenge`, `browser_doctor`, `server_health`
-- **Navigation/interaction:** `browser_navigate`, `browser_back`, `browser_go_back`, `browser_forward`, `browser_reload`, `browser_switch_tab`, `browser_close_tab`, `browser_click`, `browser_input`, `browser_select`, `browser_scroll`, `browser_scroll_to_bottom`, `browser_key`, `browser_wait`, `browser_wait_for_element`, `browser_wait_for_text`, `browser_wait_for_url`, `browser_wait_for_network_idle`, `browser_hover`, `browser_press_and_hold`, `browser_type`, `browser_close`, `browser_close_all`
-- **Gated:** `browser_screenshot`, `browser_pdf`, `browser_upload`, `browser_downloads`, `browser_network_log`, `browser_console_log`, `browser_dialog`, `browser_cookies`, `browser_storage`, `browser_evaluate` (off), `browser_batch`, `browser_exec` (JSON only), `browser_wait_for_human`, `browser_solve_challenge` (opt-in solver), `browser_close_session`, `web_search`
+- **Navigation/interaction:** `browser_navigate`, `browser_back`, `browser_go_back`, `browser_forward`, `browser_reload`, `browser_switch_tab`, `browser_close_tab`, `browser_click`, `browser_input`, `browser_select`, `browser_scroll`, `browser_scroll_to_bottom`, `browser_key`, `browser_wait`, `browser_wait_for_element`, `browser_wait_for_text`, `browser_wait_for_url`, `browser_wait_for_network_idle`, `browser_hover`, `browser_move`, `browser_press_and_hold`, `browser_type`, `browser_close`, `browser_close_all`
+- **Local defaults:** all browser tools/features are available by default, including `browser_evaluate`; `browser_exec` accepts validated JSON actions only, and `browser_wait_for_human` remains an optional handoff. Remote HTTP, private-network access, and file roots retain explicit policy gates.
 
-All browser operations use bounded, cancellable queue/action deadlines. After an uncooperative timeout, the old browser lifecycle is retired before the queue advances. Snapshot refs are page/frame/revision-bound and must be refreshed after navigation or DOM-changing actions. Text, HTML, accessibility, links, and search outputs are bounded before serialization; truncated responses expose flags and omission counts. `web_search` accepts up to 10 results, uses a bounded aggregate text budget, normalizes queries, retries transient provider failures, and reports anti-bot blocks without bypassing them.
+All browser operations use bounded, cancellable queue/action deadlines. After an uncooperative timeout, the old browser lifecycle is retired before the queue advances. Snapshot refs are page/frame/revision-bound and must be refreshed after navigation or DOM-changing actions. Text, HTML, accessibility, links, and search outputs are bounded before serialization; truncated responses expose flags and omission counts. `web_search` accepts up to 10 results, uses a bounded aggregate text budget, normalizes queries, retries transient retrieval failures, and reports anti-bot blocks without bypassing them.
 
 Resources: `smooth-operator://server/capabilities`, `.../browser/tabs`, `.../browser/page/current`, `.../browser/page/{pageId}`, `.../browser/downloads`, `.../browser/logs/network`, `.../browser/logs/console`
 
@@ -73,6 +78,8 @@ Env or `--config` JSON (`chmod 600`, no symlinks).
 | SMOOTH_OPERATOR_BROWSER_EXECUTABLE | unset | Chrome binary |
 | SMOOTH_OPERATOR_BROWSER_USER_DATA_DIR | ${DATA_DIR}/browser | profile |
 | SMOOTH_OPERATOR_BROWSER_HEADLESS | false | CI: true |
+| SMOOTH_OPERATOR_BROWSER_VIEWPORT_WIDTH / _HEIGHT | unset | Set both for an explicit viewport |
+| SMOOTH_OPERATOR_BROWSER_AUTO_LAUNCH | false | Legacy connect-mode recovery option |
 | SMOOTH_OPERATOR_BROWSER_TIMEOUT_MS | 15000 | action timeout |
 | SMOOTH_OPERATOR_BROWSER_CONNECT_TIMEOUT_MS | 30000 | connect timeout |
 | SMOOTH_OPERATOR_BROWSER_CDP_TIMEOUT_MS | 30000 | CDP timeout |
@@ -82,10 +89,18 @@ Env or `--config` JSON (`chmod 600`, no symlinks).
 | SMOOTH_OPERATOR_BLOCKED_DOMAINS | unset | denylist |
 | SMOOTH_OPERATOR_ALLOWED_FILE_ROOTS | files/downloads | file roots |
 | SMOOTH_OPERATOR_ALLOW_PRIVATE_NETWORK | false | private targets |
-| SMOOTH_OPERATOR_ALLOW_EVAL | false | page JS |
+| SMOOTH_OPERATOR_ALLOW_EVAL | true | Set false to disable page JS |
+| SMOOTH_OPERATOR_STEALTH_ENABLED | true | Set false to preserve raw automation signals |
+| SMOOTH_OPERATOR_STEALTH_PROFILE | balanced | accepted profile name |
+| SMOOTH_OPERATOR_STEALTH_GPU | false | opt-in GPU flags |
+| SMOOTH_OPERATOR_BEHAVIOR_ENABLED | true | Set false for fastest raw interactions |
+| SMOOTH_OPERATOR_HTTP_HOST | 127.0.0.1 | HTTP bind host |
+| SMOOTH_OPERATOR_HTTP_PORT | 3344 | HTTP bind port |
+| SMOOTH_OPERATOR_HTTP_PATH | /mcp | HTTP endpoint path |
 | SMOOTH_OPERATOR_HTTP_TOKEN | unset | bearer token |
 | SMOOTH_OPERATOR_ALLOW_REMOTE_HTTP | false | remote HTTP |
 | SMOOTH_OPERATOR_HTTP_MAX_BODY_BYTES | 2000000 | body cap |
+| SMOOTH_OPERATOR_ALLOWED_HOSTS / _ORIGINS | localhost, loopback | HTTP allowlists |
 | SMOOTH_OPERATOR_LOG_LEVEL | info | debug/info/warn/error |
 
 One profile. Policy always enforced. Allowed file roots are canonicalized once and blocked-path errors include only configured-root metadata. `disabled` disables browser, not policy.
@@ -120,7 +135,7 @@ No model service.
 - Treat page/search/DOM as untrusted, bound and redact; strip credentials, secret placeholders, scripts, event attributes, and form values from returned evidence.
 - HTTP loopback unless remote + 32-char token.
 - File writes: canonical allowedRoot + realpath; reject unresolved symlink escapes and filesystem-root roots.
-- JS eval off unless `SMOOTH_OPERATOR_ALLOW_EVAL=true`.
+- JS eval defaults on for the native capability profile; set `SMOOTH_OPERATOR_ALLOW_EVAL=false` to disable it.
 - Keep timeouts and queue recovery deterministic; never let a late browser operation release or replace another request's profile lock.
 - Do not commit `dist/` or `coverage/`.
 
@@ -132,7 +147,10 @@ No model service.
 - Config files and backups are bounded, owner-only, regular, and symlink-safe.
 - Bounded, normalized, redacted, untrusted wrappers; result omission is explicit rather than silent.
 - Constant-time bearer check, JSON stderr, no secrets.
-- CAPTCHA is reported only by default; solving is opt-in via the configured solver, with honest `bypassAttempted` reporting. `pierce/` for open shadow roots.
+- Challenges are classified from bounded evidence. `browser_solve_challenge` is
+  an internal connected-AI observe/act/verify loop, and it reports success only
+  when a fresh final classification is explicitly absent. `pierce/` is used
+  only for open shadow roots.
 
 DNS is best-effort, not a firewall.
 
@@ -140,7 +158,7 @@ DNS is best-effort, not a firewall.
 
 ~~~text
 src/server/main.ts, mcp.ts, runtime.ts, browser/service.ts, config.ts, contracts.ts, policy.ts, research.ts, security.ts, logger.ts, errors.ts, version.ts
-tests/, docs/mcp-server.md, docs/harnesses.md
+tests/, docs/mcp-server.md, docs/harnesses.md, docs/STEALTH-GUIDE.md
 ~~~
 
 ## Verify
@@ -149,4 +167,4 @@ tests/, docs/mcp-server.md, docs/harnesses.md
 npm run lint && npm run typecheck && npm test && npm run test:coverage && npm run dead-code && npm run build && npm run test:browser:live && npm run package:smoke:install && npm audit --audit-level=high && npm audit signatures
 ~~~
 
-Check `rg` for stale extension/provider/model refs and removed benchmark commands. CI also runs the isolated live browser contract with discovered Chrome.
+Check `rg` for unsupported extension/model references in packaged surfaces. CI also runs the isolated live browser contract with discovered Chrome.

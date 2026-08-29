@@ -1,31 +1,7 @@
 [extend]
 useDefault = true
 
-# These paths contain deliberately fake secret-shaped fixtures in deleted
-# pre-rewrite commits. They are historical scan exceptions only: none is part
-# of the current package, source tree, or release artifact. Keep this list
-# narrow so full-history scans remain useful without preserving old runtime
-# code or treating test fixtures as production secrets.
 [allowlist]
-description = "Historical unit-test fixtures: fake secret-shaped values only"
-paths = [
-  '''cockpit/src/lib/redact-client\.test\.ts''',
-  '''docs/findings/wave3-agent-root\.md''',
-  '''docs/superpowers/plans/2026-08-15-audit-findings\.md''',
-  '''tests/bundle-secret-hygiene\.test\.ts''',
-  '''tests/cookies-storage\.test\.ts''',
-  '''tests/cowork-events\.test\.ts''',
-  '''tests/lightpanda-result-sanitize\.test\.ts''',
-  '''tests/loop-warning-message\.test\.ts''',
-  '''tests/observation-window-placeholder\.test\.ts''',
-  '''tests/phase14-critical-flows\.test\.ts''',
-  '''tests/phase14-destructive-actions\.test\.ts''',
-  '''tests/phase14-no-silent-changes\.test\.ts''',
-  '''tests/phase15-mutation-controls\.test\.ts''',
-  '''tests/messages-redaction\.test\.ts''',
-  '''tests/provider-config-ui\.test\.ts''',
-  '''tests/security\.test\.ts''',
-  '''tests/sidepanel-controls\.test\.ts''',
-  '''tests/shared\.test\.ts''',
-  '''tests/redaction-parity\.test\.ts''',
-]
+description = "Public CAPTCHA fixture sitekey"
+regexTarget = "secret"
+regexes = ['''6LeIxAcTAAAAAJcZFOqjeYgM1uz6MPxCoTabzRk1''']

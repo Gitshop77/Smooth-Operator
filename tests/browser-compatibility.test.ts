@@ -17,7 +17,7 @@ describe("native browser compatibility profile", () => {
     expect(config.browser.userDataDir).toBe(join(dataDir, "browser"));
   });
 
-  it("returns a fresh copy of the audited launch defaults", () => {
+  it("returns a fresh copy of the native launch defaults", () => {
     const first = nativeBrowserLaunchArgs();
     const second = nativeBrowserLaunchArgs();
 
@@ -38,8 +38,8 @@ describe("native browser compatibility profile", () => {
   it("appends the stealth baseline only when enabled", () => {
     const args = nativeBrowserLaunchArgs({ enabled: true });
     expect(args).toContain("--disable-blink-features=AutomationControlled");
-    expect(args).toContain("--lang=en-US");
-    expect(args).toContain("--window-size=1920,1080");
+    expect(args).not.toContain("--lang=en-US");
+    expect(args).not.toContain("--window-size=1920,1080");
   });
 
   it("appends GPU flags only when enabled and gpu is requested", () => {
@@ -52,11 +52,10 @@ describe("native browser compatibility profile", () => {
     expect(withGpu).toContain("--enable-vulkan");
   });
 
-  it("dedups stealth flags by --key (exactly one --lang entry)", () => {
-    const args = nativeBrowserLaunchArgs({ enabled: true });
-    const langFlags = args.filter((a) => a.split("=")[0] === "--lang");
-    expect(langFlags).toHaveLength(1);
-    expect(langFlags[0]).toBe("--lang=en-US");
+  it("adds exactly one explicit viewport flag when configured", () => {
+    const args = nativeBrowserLaunchArgs({ enabled: true, viewport: { width: 1366, height: 768 } });
+    const viewportFlags = args.filter((a) => a.split("=")[0] === "--window-size");
+    expect(viewportFlags).toEqual(["--window-size=1366,768"]);
   });
 
   it("returns a fresh array per call and never mutates the shared set", () => {

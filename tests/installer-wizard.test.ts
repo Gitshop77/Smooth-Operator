@@ -6,10 +6,23 @@ import { describe, expect, it, vi } from "vitest";
 import { createUi } from "@/server/ui";
 import { launchPersonalChrome, persistWizardConfig, promptForHarness, runWizard } from "@/server/installer-wizard";
 
-const rlState = vi.hoisted(() => ({ answers: [] as string[] }));
+const rlState = vi.hoisted(() => ({ answers: [] as string[], prompts: [] as string[] }));
+const discoveryState = vi.hoisted(() => ({
+  executables: [
+    { path: "/opt/google-chrome", label: "Google Chrome", channel: "stable" },
+    { path: "/opt/brave", label: "Brave", channel: "stable" },
+  ],
+}));
+vi.mock("@/server/browser/discovery", () => ({
+  findChromiumExecutables: () => discoveryState.executables,
+  findChromeExecutable: () => discoveryState.executables[0] ?? null,
+}));
 vi.mock("node:readline/promises", () => ({
   createInterface: () => ({
-    question: () => Promise.resolve(rlState.answers.shift() ?? ""),
+    question: (prompt: string) => {
+      rlState.prompts.push(prompt);
+      return Promise.resolve(rlState.answers.shift() ?? "");
+    },
     close: () => undefined,
   }),
 }));
@@ -17,7 +30,7 @@ vi.mock("node:readline/promises", () => ({
 describe("wizard --yes", () => {
   it("returns recommended defaults without prompts", async () => {
     const result = await runWizard("opencode", { yes: true, stdin: null as any, stdout: null as any, spawn: null as any, probe: null as any, homeDir: "/tmp/test-home", env: {} });
-    expect(result).toEqual({ mode: "managed", headless: false, allowedDomains: [], blockedDomains: [], allowEval: false, dataDir: expect.stringContaining(".smooth-operator") });
+    expect(result).toEqual({ mode: "managed", headless: false, allowedDomains: [], blockedDomains: [], allowEval: true, dataDir: expect.stringContaining(".smooth-operator") });
   });
 });
 
@@ -32,8 +45,31 @@ describe("wizard non-interactive fallback", () => {
     });
     expect(result).toEqual({
       mode: "managed", headless: false, allowedDomains: [], blockedDomains: [],
-      allowEval: false, dataDir: join("/tmp/test-home", ".smooth-operator"),
+      allowEval: true, dataDir: join("/tmp/test-home", ".smooth-operator"),
     });
+  });
+
+  it("asks exactly three questions in profile, display, and browser order", async () => {
+    rlState.answers = ["", "2", ""];
+    rlState.prompts = [];
+    const output: string[] = [];
+    const result = await runWizard("opencode", {
+      yes: false,
+      stdin: { isTTY: true } as never,
+      stdout: { isTTY: true, write: (chunk: string | Uint8Array) => { output.push(String(chunk)); return true; } } as never,
+      homeDir: "/tmp/test-home",
+      env: {},
+    });
+    expect(rlState.prompts).toEqual(["Profile ownership [1]: ", "Browser display [1]: ", "Browser [1]: "]);
+    expect(result).toMatchObject({ mode: "managed", headless: true, allowEval: true, allowedDomains: [], blockedDomains: [], browserExecutablePath: "/opt/google-chrome" });
+    const rendered = output.join("");
+    expect(rendered).toContain("Isolated managed profile");
+    expect(rendered).toContain("Connected/personal browser profile");
+    expect(rendered).toContain("Headed (visible window)");
+    expect(rendered).toContain("Headless (no window)");
+    expect(rendered).toContain("Google Chrome");
+    expect(rendered.indexOf("Google Chrome")).toBeLessThan(rendered.indexOf("Brave"));
+    expect(rendered).not.toContain("Disabled");
   });
 
   it("treats an injected CI environment as non-interactive even for TTY-shaped streams", async () => {
@@ -96,6 +132,7 @@ describe("persistWizardConfig merges instead of replacing", () => {
       expect(merged.browser.url).toBe("http://127.0.0.1:9222");
       expect(merged.security.allowPrivateNetwork).toBe(true);
       expect(merged.security.allowedDomains).toEqual(["example.com"]);
+      expect(merged.stealth).toEqual({ enabled: true, profile: "balanced", gpu: false, behaviorEnabled: true });
       expect(merged.logLevel).toBe("debug");
       expect(merged.mcp).toEqual({ servers: {} });
       await expect(readFile(`${join(configDir, "config.json")}.bak`, "utf8")).resolves.toBe(existingJson);
@@ -112,6 +149,8 @@ describe("persistWizardConfig merges instead of replacing", () => {
       await writeFile(join(configDir, "config.json"), JSON.stringify({
         browser: { mode: "connect", headless: true, url: "http://127.0.0.1:9222", executablePath: "/tmp/old-browser", actionTimeoutMs: 20_000 },
         security: { allowEval: true, allowedDomains: ["x.com"] },
+        stealth: { enabled: false, profile: "max", gpu: true, behaviorEnabled: false },
+        captchaSolver: { provider: "none" },
         dataDir: join(home, "old-data"),
         logLevel: "debug",
       }, null, 2));
@@ -129,9 +168,11 @@ describe("persistWizardConfig merges instead of replacing", () => {
       expect(merged.security.allowEval).toBe(false);
       expect(merged.security.allowedDomains).toEqual([]);
       expect(merged.security.blockedDomains).toEqual([]);
+      expect(merged.stealth).toEqual({ enabled: true, profile: "balanced", gpu: false, behaviorEnabled: true });
+      expect(merged.captchaSolver).toBeUndefined();
       expect(merged.browser.actionTimeoutMs).toBe(20_000);
       expect(merged.logLevel).toBe("debug");
-      expect(merged.dataDir).toBeUndefined();
+      expect(merged.dataDir).toBe(join(home, ".smooth-operator"));
     } finally {
       await rm(home, { recursive: true, force: true });
     }
@@ -270,6 +311,32 @@ describe("persistWizardConfig browser selection", () => {
 });
 
 describe("personal Chrome launcher", () => {
+  it("probes immediately after spawning when DevTools is already ready", async () => {
+    const home = await mkdtemp(join(tmpdir(), "smooth-operator-wizard-launch-ready-"));
+    try {
+      const spawn = vi.fn((_executable: string, _args: string[]) => ({ unref: vi.fn() }));
+      const probe = vi.fn(async () => ({ state: "live", version: { Browser: "Chrome/124" } }));
+      await expect(launchPersonalChrome({ executablePath: "/bin/chrome", dataDir: home, spawn: spawn as never, probe, probeAttempts: 1 })).resolves.toEqual({ url: "http://127.0.0.1:9222" });
+      expect(spawn).toHaveBeenCalledTimes(1);
+      expect(spawn.mock.calls[0]?.[1]).not.toContain("--headless=new");
+      expect(probe).toHaveBeenCalledTimes(1);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  it("passes the headless selection to a helper-launched browser", async () => {
+    const home = await mkdtemp(join(tmpdir(), "smooth-operator-wizard-launch-headless-"));
+    try {
+      const spawn = vi.fn((_executable: string, _args: string[]) => ({ unref: vi.fn() }));
+      const probe = vi.fn(async () => ({ state: "live" }));
+      await expect(launchPersonalChrome({ executablePath: "/bin/chrome", dataDir: home, headless: true, spawn: spawn as never, probe, probeAttempts: 1 })).resolves.toEqual({ url: "http://127.0.0.1:9222" });
+      expect(spawn.mock.calls[0]?.[1]).toContain("--headless=new");
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
   it("rejects unsafe data directories and ports before spawning Chrome", async () => {
     const spawn = vi.fn();
     const probe = vi.fn();
