@@ -62,6 +62,23 @@ const MCP_OUTPUT_TRUNCATION_MARKER_BYTES = UTF8_ENCODER.encode(MCP_OUTPUT_TRUNCA
 const MCP_ERROR_CODE_MAX_BYTES = 200;
 const MCP_ERROR_MESSAGE_MAX_BYTES = 4_000;
 const MCP_JSON_TEXT_CACHE = new WeakMap<object, string>();
+const MCP_OUTPUT_CONTRACT_ARRAY_KEYS: ReadonlySet<string> = new Set([
+  "links",
+  "results",
+  "entries",
+  "interactive",
+  "nodes",
+  "matches",
+  "frames",
+]);
+const MCP_OUTPUT_ARRAY_BOUNDS: ReadonlyArray<readonly [string, string]> = [
+  ["links", "linksTruncated"],
+  ["entries", "entriesTruncated"],
+  ["interactive", "interactiveTruncated"],
+  ["nodes", "nodesTruncated"],
+  ["matches", "matchesTruncated"],
+  ["frames", "framesTruncated"],
+];
 const NetworkIdleSchema = z.object({
   timeoutMs: z.number().int().min(100).max(120_000).optional(),
   pageId: z.string().trim().min(1).max(200).optional(),
@@ -195,28 +212,14 @@ const BrowserExecCodeSchema = z.string().trim().min(1).max(80_000).superRefine((
     context.addIssue({ code: "custom", message: "code must be a JSON array of validated browser actions." });
     return;
   }
-  if (!BrowserActionPlanSchema.safeParse(parsed).success) {
-    context.addIssue({ code: "custom", message: "code must be a non-empty JSON array of validated browser actions without nested scripts or screenshots." });
+  if (!Array.isArray(parsed) || parsed.length === 0 || parsed.length > 100) {
+    context.addIssue({ code: "custom", message: "code must be a non-empty JSON array of at most 100 browser actions." });
   }
 });
 const BrowserExecRequestSchema = z.object({
   code: BrowserExecCodeSchema,
   confirmDestructive: z.boolean().optional(),
-}).strict().superRefine((input, context) => {
-  if (input.confirmDestructive) {
-    return;
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(input.code);
-  } catch {
-    return;
-  }
-  const actions = BrowserActionPlanSchema.safeParse(parsed);
-  if (actions.success && actions.data.some((action) => isDestructiveBatchAction(action.action))) {
-    context.addIssue({ code: "custom", path: ["confirmDestructive"], message: "This action plan contains destructive actions. Set confirmDestructive=true to execute them." });
-  }
-});
+}).strict();
 const BrowserUseStateSchema = z.object({
   include_screenshot: z.boolean().optional(),
   fullPage: z.boolean().optional(),
@@ -262,7 +265,7 @@ const BROWSER_DESTRUCTIVE: ToolAnnotations = { ...DESTRUCTIVE, openWorldHint: tr
 
 export const MCP_INSTRUCTIONS = [
   "Use browser_snapshot or browser_get_state before interacting so element refs/indexes and viewport coordinates are current.",
-  "Serialize dependent browser calls as observe -> one navigation or mutation -> observe. Parallel calls are appropriate only for independent read-only observations; a parallel snapshot and action do not form a transaction.",
+  "Use an observe -> act -> verify loop: serialize dependent browser calls as one navigation or mutation between observations. Parallel calls are appropriate only for independent read-only observations; a parallel snapshot and action do not form a transaction.",
   "Give each request a bounded timeout or cancellation signal. After a timeout or cancellation, inspect current state before retrying a mutation; cancellation is not proof that a mutation did not happen.",
   "After navigation, tab switching, scrolling that changes lazy content, or any DOM-changing action, discard old refs and indexes and capture a fresh snapshot instead of silently falling back to coordinates, text, or a different selector.",
   "Only report titles, URLs, snippets, and metadata that are explicitly present in the returned MCP fields. Absence of a field is evidence of absence: never invent titles, summaries, counts, or other metadata that the tools did not return.",
@@ -272,8 +275,7 @@ export const MCP_INSTRUCTIONS = [
   "Prefer stable refs, indexes, and selectors over coordinates; use coordinates only when the page cannot expose a reliable target.",
   "For open shadow roots, Puppeteer pierce/ selectors may be used explicitly; closed shadow roots remain unavailable.",
   "Use browser_batch for short validated sequences, but keep destructive actions separate when user confirmation is needed.",
-  "Use an efficient observe -> act -> verify loop: observe with browser_snapshot or browser_get_state, perform one bounded browser action, then observe again to verify the resulting state. Keep refs and indexes fresh after navigation, scrolling, or DOM changes; parallelize only independent read-only observations.",
-  "browser_solve_challenge is an internal connected-AI loop. Each call is one bounded verification cycle and returns fresh visual/state evidence plus attemptsRemaining; the connected AI should keep using normal browser actions and call it again until the final classification explicitly reports the challenge absent or automation_exhausted. Never claim a challenge is solved from a present, unknown, or failed classification. Human handoff is only an explicit final option after exhaustion.",
+  "browser_solve_challenge is an internal connected-AI loop. Each call is one bounded verification cycle; present and exhausted classifications include fresh visual/state evidence and attemptsRemaining. The connected AI should keep using normal browser actions and call it again until the final classification explicitly reports the challenge absent or automation_exhausted. Never claim a challenge is solved from a present, unknown, or failed classification. Human handoff is only an explicit final option after exhaustion.",
   "The server contains no LLM or agent planner; the MCP client is responsible for reasoning, retries, and task completion.",
 ].join(" ");
 
@@ -374,7 +376,10 @@ function registerBrowserTools(server: McpServer, runtime: ServerRuntime): void {
       inputSchema: BrowserUseExtractSchema,
       annotations: BROWSER_READ_ONLY,
     },
-    async (input, ctx) => callTool(() => runtime.run({ action: "extract", query: input.query, includeLinks: input.extract_links, pageId: input.pageId, frameId: input.frameId, maxChars: MCP_PAGE_TEXT_MAX_CHARS }, ctx.mcpReq.signal), runtime),
+    async (input, ctx) => {
+      const { extract_links, ...fields } = input;
+      return callTool(() => runtime.run({ action: "extract", ...fields, includeLinks: extract_links, maxChars: MCP_PAGE_TEXT_MAX_CHARS }, ctx.mcpReq.signal), runtime);
+    },
   );
 
   registerAction(server, runtime, "browser_navigate", "Navigate the browser", "Open an HTTP(S) URL after domain and private-network policy validation. DNS is checked before navigation but the browser resolver is not pinned. Set includeSnapshot=true for one trailing snapshot.", NavigateRequestSchema, "navigate", (input) => {
@@ -416,7 +421,10 @@ function registerBrowserTools(server: McpServer, runtime: ServerRuntime): void {
     async (input, ctx) => callTool(() => runtime.run({ action: consoleAction(input.operation), pageId: input.pageId }, ctx.mcpReq.signal), runtime),
   );
 
-  registerAction(server, runtime, "browser_find_text", "Find text", "Find and center the first matching text on the page.", PageQuerySchema, "find_text", (input) => ({ ...input, text: input.query }));
+  registerAction(server, runtime, "browser_find_text", "Find text", "Find and center the first matching text on the page.", PageQuerySchema, "find_text", (input) => {
+    const { query, ...fields } = input;
+    return { ...fields, text: query };
+  });
   registerAction(server, runtime, "browser_extract", "Extract page text", "Extract at most 8,000 page-text characters from the page or a CSS selector. Check truncated, offset, nextOffset, hasMore, and revision; use browser_page_next for later slices.", ExtractRequestSchema, "extract", (input) => ({ ...input, maxChars: input.maxChars ?? MCP_PAGE_TEXT_MAX_CHARS }));
   registerAction(server, runtime, "browser_upload", "Upload a file", "Upload a file from an allowed server file root into a file input.", UploadRequestSchema, "upload_file");
   registerAction(server, runtime, "browser_screenshot", "Capture a screenshot", "Capture a bounded PNG or JPEG screenshot of the current page.", ScreenshotRequestSchema, "screenshot", (input) => {
@@ -435,7 +443,10 @@ function registerBrowserTools(server: McpServer, runtime: ServerRuntime): void {
   registerAction(server, runtime, "browser_computed_style", "Read computed style", "Read a small safe subset of computed style for an element.", SelectorRequestSchema, "get_computed_style");
   registerAction(server, runtime, "browser_page_info", "Read page information", "Read URL, title, viewport, and document dimensions.", EmptyInputSchema, "get_page_info");
   registerAction(server, runtime, "browser_hover", "Hover an element", "Move the pointer over a CSS selector or snapshot ref.", TargetRequestSchema, "hover");
-  registerAction(server, runtime, "browser_move", "Move the pointer", "Move the pointer to bounded top-level viewport coordinates without clicking. Use this to inspect hover-driven UI before choosing a click point.", MoveRequestSchema, "move", (input) => ({ ...input, coordinateX: input.coordinateX ?? input.coordinate_x, coordinateY: input.coordinateY ?? input.coordinate_y }));
+  registerAction(server, runtime, "browser_move", "Move the pointer", "Move the pointer to bounded top-level viewport coordinates without clicking. Use this to inspect hover-driven UI before choosing a click point.", MoveRequestSchema, "move", (input) => {
+    const { coordinate_x, coordinate_y, ...fields } = input;
+    return { ...fields, coordinateX: fields.coordinateX ?? coordinate_x, coordinateY: fields.coordinateY ?? coordinate_y };
+  });
   registerAction(server, runtime, "browser_press_and_hold", "Press and hold or drag", "Press a mouse button on an element for a bounded duration. Optional startCoordinateX/startCoordinateY and endCoordinateX/endCoordinateY drag with interpolated mouse events; path supplies a bounded explicit pointer path for drawing or selection gestures.", HoldRequestSchema, "press_and_hold");
   registerAction(server, runtime, "browser_challenge", "Detect a web challenge", "Detect bounded challenge markers and return a fresh classification for the current page. A detected challenge is not evidence that it has been solved.", EmptyInputSchema, "detect_challenge");
   registerAction(server, runtime, "browser_wait_for_human", "Wait for human takeover", "Optionally wait for a user to complete a visible challenge or sign-in step in the browser. The result includes a fresh final classification.", WaitForHumanRequestSchema, "wait_for_human");
@@ -471,11 +482,24 @@ function registerBrowserTools(server: McpServer, runtime: ServerRuntime): void {
     "browser_exec",
     {
       title: "Execute a browser action program",
-      description: "Browser-use CLI compatibility entry point. The code must be a JSON array of validated browser actions; arbitrary Python or JavaScript is not executed.",
+      description: "Browser-use CLI compatibility entry point. The code must be a JSON array of validated browser actions; it is not a shell or arbitrary Python runner. Page JavaScript is limited to the explicit evaluate action and server policy.",
       inputSchema: BrowserExecRequestSchema,
       annotations: BROWSER_DESTRUCTIVE,
     },
-    async (input, ctx) => callBatchTool(() => runtime.runBatch(parseBrowserExecCode(input.code), { confirmDestructive: input.confirmDestructive }, ctx.mcpReq.signal), runtime),
+    async (input, ctx) => callBatchTool(() => {
+      const actions = parseBrowserExecCode(input.code);
+      if (!input.confirmDestructive) {
+        const destructiveIndex = actions.findIndex((action) => isDestructiveBatchAction(action.action));
+        if (destructiveIndex >= 0) {
+          const action = actions[destructiveIndex];
+          throw new AppError("DESTRUCTIVE_CONFIRMATION_REQUIRED", `Action '${action.action}' must be executed separately or with confirmDestructive=true.`, {
+            retryable: true,
+            details: { failedIndex: destructiveIndex, failedAction: action.action, hint: "Set confirmDestructive=true or run the action separately." },
+          });
+        }
+      }
+      return runtime.runBatch(actions, { confirmDestructive: input.confirmDestructive }, ctx.mcpReq.signal);
+    }, runtime),
   );
   server.registerTool(
     "browser_batch",
@@ -817,6 +841,10 @@ function parseBrowserExecCode(code: string): BrowserAction[] {
   } catch (error) {
     throw new AppError("SCRIPT_INVALID", "code must be a JSON array of validated browser actions.", { cause: error });
   }
+  // BrowserExecCodeSchema checks the outer JSON-array shape for protocol
+  // feedback. Canonical action validation stays here so it runs exactly once
+  // for the execution path and produces the normalized aliases consumed by
+  // BrowserService.
   const result = BrowserActionPlanSchema.safeParse(parsed);
   if (!result.success) {
     throw new AppError("SCRIPT_INVALID", "code must be a non-empty JSON array of validated browser actions.", {
@@ -843,7 +871,7 @@ function truncateUtf8(value: string, maxBytes: number): string {
   while (low < high) {
     const midpoint = Math.ceil((low + high) / 2);
     const candidate = decoder.decode(bytes.slice(0, midpoint));
-    if (UTF8_ENCODER.encode(candidate).byteLength <= maxBytes) {
+    if (UTF8_ENCODER.encode(candidate).byteLength <= boundedMaxBytes) {
       low = midpoint;
     } else {
       high = midpoint - 1;
@@ -972,9 +1000,8 @@ function boundMcpOutput(value: unknown, options: McpOutputOptions = {}): unknown
   capArray("nodes", MCP_OUTPUT_NODE_LIMIT, "nodesTruncated");
   capArray("matches", MCP_OUTPUT_MATCH_LIMIT, "matchesTruncated");
   capArray("frames", 20, "framesTruncated");
-  const contractArrayKeys = new Set(["links", "results", "entries", "interactive", "nodes", "matches", "frames"]);
   for (const [key, item] of Object.entries(output)) {
-    if (!contractArrayKeys.has(key) && Array.isArray(item)) {
+    if (!MCP_OUTPUT_CONTRACT_ARRAY_KEYS.has(key) && Array.isArray(item)) {
       capArray(key, MCP_OUTPUT_ARRAY_ITEM_LIMIT, `${key}Truncated`);
     }
   }
@@ -1041,10 +1068,9 @@ function boundMcpOutput(value: unknown, options: McpOutputOptions = {}): unknown
       markOutputTruncated();
     }
   }
-  const arrayBounds: Array<readonly [string, string]> = [["links", "linksTruncated"], ["entries", "entriesTruncated"], ["interactive", "interactiveTruncated"], ["nodes", "nodesTruncated"], ["matches", "matchesTruncated"], ["frames", "framesTruncated"]];
-  if (!options.preserveBatchResults) {
-    arrayBounds.push(["results", "resultsTruncated"]);
-  }
+  const arrayBounds: ReadonlyArray<readonly [string, string]> = options.preserveBatchResults
+    ? MCP_OUTPUT_ARRAY_BOUNDS
+    : [...MCP_OUTPUT_ARRAY_BOUNDS, ["results", "resultsTruncated"]];
   for (const [key, flag] of arrayBounds) {
     while (jsonByteLength(output) > MCP_OUTPUT_MAX_BYTES && Array.isArray(output[key]) && output[key].length > 1) {
       const items = output[key] as unknown[];

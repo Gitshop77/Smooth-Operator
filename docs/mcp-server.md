@@ -147,7 +147,9 @@ smooth-operator
 ```
 
 Remote mode is rejected unless the token is at least 32 characters. Do not
-use a token from a shell history, checked-in file, or shared log. A reverse
+use a token from a shell history, checked-in file, or shared log. POST requests
+must declare `Content-Type: application/json`; unsupported media types are
+rejected before their body is read. A reverse
 proxy can add TLS and network access controls, but it does not replace the
 application token, Host/Origin allowlists, or request-size limit. Allowed host
 and origin values are hostnames without a scheme; browser preflight requests
@@ -409,13 +411,16 @@ disabled explicitly with `SMOOTH_OPERATOR_ALLOW_EVAL=false`.
 `browser_evaluate` is page JavaScript and is available by default (set
 `SMOOTH_OPERATOR_ALLOW_EVAL=false` when it is not wanted). `browser_exec`
 accepts only a JSON array of validated browser actions; it is not a shell,
-Python, or arbitrary code runner. Destructive batch actions require explicit
+Python, or arbitrary code runner. Its explicit `evaluate` action still follows
+the page-evaluation policy. Destructive batch actions require explicit
 confirmation. `browser_wait_for_human` pauses for an operator to complete a
 visible sign-in or challenge. `browser_solve_challenge` is an internal
 connected-AI observe/act/verify loop: it returns bounded evidence and is
 successful only when a fresh final classification explicitly reports the
-challenge absent. `browser_close_session` closes the one native browser session
-by its explicit session identifier.
+challenge absent; present and exhausted cycles report the remaining attempt
+budget and `automation_exhausted` is the final non-success state.
+`browser_close_session`
+closes the one native browser session by its explicit session identifier.
 
 Actions that leave a usable page—navigation, click, input, select, scroll, key,
 back, forward, and reload—accept optional `includeSnapshot: true`. The action
@@ -470,8 +475,9 @@ The server publishes read-only resources:
 Resource output is bounded and follows the same redaction and policy rules as
 tool output. The capabilities resource also reports the native defaults and
 effective feature flags for local browser tools, page evaluation, stealth, and
-behavioral timing, plus whether challenge success requires an explicit absent
-classification.
+behavioral timing. Its challenge metadata includes the default and maximum
+connected-AI attempt budgets and states that success requires an explicit
+absent classification.
 
 ### Prompts
 

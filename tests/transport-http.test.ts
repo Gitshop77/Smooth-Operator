@@ -95,12 +95,18 @@ describe("HTTP transport", () => {
       body: "x".repeat(2_000),
     });
     expect(oversized.status).toBe(413);
+    const unsupported = await rawPostResponse(port, { Authorization: `Bearer ${token}`, "content-type": "text/plain" }, initializeBody);
+    expect(unsupported.status).toBe(415);
+    expect(unsupported.body).toContain("Unsupported Media Type");
     const slowOversized = await rawSlowDeclaredOversizedPost(port, { Authorization: `Bearer ${token}` });
     expect(slowOversized.status).toBe(413);
     // The sender deliberately never finishes its declared body.  A response
     // arriving promptly proves the bounded request slot is released without
     // waiting for a slow or stalled oversized sender.
     expect(slowOversized.elapsedMs).toBeLessThan(1_500);
+    const slowUnsupported = await rawSlowDeclaredOversizedPost(port, { Authorization: `Bearer ${token}`, "content-type": "text/plain" });
+    expect(slowUnsupported.status).toBe(415);
+    expect(slowUnsupported.elapsedMs).toBeLessThan(1_500);
     expect(await rawChunkedPost(port, { Authorization: `Bearer ${token}` }, ["x".repeat(700), "y".repeat(700)])).toBe(413);
     expect(await rawChunkedRequest(port, "DELETE", { Authorization: `Bearer ${token}` }, ["x".repeat(700), "y".repeat(700)])).toBe(413);
     // The bounded reader consumes the Node request before dispatch. Malformed

@@ -256,6 +256,8 @@ export class ServerRuntime {
         connectedAiLoop: true,
         humanHandoff: true,
         successRequiresAbsentClassification: true,
+        defaultMaxAttempts: 32,
+        maxAttempts: 100,
       },
       persistence: {
         fileRootsConfigured: this.config.security.allowedFileRoots.length > 0,
@@ -394,7 +396,13 @@ async function reclaimStaleLock(lockPath: string): Promise<boolean> {
     if (after.ino !== before.ino || after.dev !== before.dev) {
       return false;
     }
-    await rename(lockPath, `${lockPath}.stale-${randomUUID()}`);
+    const stalePath = `${lockPath}.stale-${randomUUID()}`;
+    await rename(lockPath, stalePath);
+    // The rename is the atomic ownership handoff. Once the old entry has a
+    // private, unique name no contender can acquire it, so remove the
+    // tombstone instead of accumulating one file per stale recovery. A
+    // cleanup failure is harmless and remains recoverable by an operator.
+    await unlink(stalePath).catch(() => undefined);
     return true;
   } catch {
     return false;

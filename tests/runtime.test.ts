@@ -1,4 +1,4 @@
-import { access, chmod, mkdir, mkdtemp, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, readdir, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -15,7 +15,7 @@ describe("runtime lifecycle", () => {
       expect(runtime.publicCapabilities()).toMatchObject({
         defaults: { browserMode: "managed", headedBrowser: true, pageEvaluation: true, stealth: true, behavioralTiming: false },
         features: { localBrowserTools: "available", pageEvaluation: false, stealth: false, behavioralTiming: false },
-        challenges: { classification: "bounded-evidence", connectedAiLoop: true, humanHandoff: true, successRequiresAbsentClassification: true },
+        challenges: { classification: "bounded-evidence", connectedAiLoop: true, humanHandoff: true, successRequiresAbsentClassification: true, defaultMaxAttempts: 32, maxAttempts: 100 },
       });
     } finally {
       await runtime.close();
@@ -191,6 +191,7 @@ describe("runtime lifecycle", () => {
     const runtime = await ServerRuntime.create(config);
     try {
       await expect(access(join(profile, ".smooth-operator-profile.lock"))).resolves.toBeUndefined();
+      expect((await readdir(profile)).some((entry) => entry.startsWith(".smooth-operator-profile.lock.stale-"))).toBe(false);
     } finally {
       await runtime.close();
     }

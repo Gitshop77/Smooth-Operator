@@ -481,6 +481,31 @@ describe("native MCP registry", () => {
     }
   });
 
+  it("validates browser_exec plans once at execution and preserves canonical aliases", async () => {
+    const runtime = await ServerRuntime.create(testConfig());
+    const runBatch = vi.spyOn(runtime, "runBatch").mockResolvedValue({ results: [{ sent: true }] });
+    const server = createMcpServer(runtime);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "exec-normalization-test", version: "1.0.0" });
+    try {
+      await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+      const result = await client.callTool({
+        name: "browser_exec",
+        arguments: { code: JSON.stringify([{ action: "key", keys: ["Enter"] }]) },
+      });
+      expect(result.isError).not.toBe(true);
+      expect(runBatch).toHaveBeenCalledWith(
+        [{ action: "send_keys", keys: ["Enter"] }],
+        { confirmDestructive: undefined },
+        expect.any(AbortSignal),
+      );
+    } finally {
+      await client.close().catch(() => undefined);
+      await server.close().catch(() => undefined);
+      await runtime.close();
+    }
+  });
+
   it("keeps oversized extraction records below the client JSON budget with explicit omission flags", async () => {
     const runtime = await ServerRuntime.create(testConfig());
     const run = vi.spyOn(runtime, "run").mockResolvedValue({

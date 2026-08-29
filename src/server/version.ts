@@ -1,2 +1,2 @@
 /** Protocol-facing server version for MCP initialization and capabilities. */
-export const SERVER_VERSION = "3.0.1";
+export const SERVER_VERSION = "3.0.2";

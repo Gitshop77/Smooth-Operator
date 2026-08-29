@@ -5,7 +5,7 @@ import process from "node:process";
 import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 
-import { createMcpHandler } from "@modelcontextprotocol/server";
+import { createMcpHandler, isJsonContentType as sdkIsJsonContentType } from "@modelcontextprotocol/server";
 import { toNodeHandler } from "@modelcontextprotocol/node";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 
@@ -63,6 +63,10 @@ const HTTP_NOT_FOUND_BODY = JSON.stringify({ error: "not_found" });
 const HTTP_SHUTTING_DOWN_BODY = JSON.stringify({ error: "server_shutting_down" });
 const HTTP_BUSY_BODY = JSON.stringify({ error: "server_busy" });
 const HTTP_UNAUTHORIZED_BODY = JSON.stringify({ error: "unauthorized" });
+const HTTP_UNSUPPORTED_MEDIA_BODY = JSON.stringify({
+  jsonrpc: "2.0",
+  error: { code: -32_000, message: "Unsupported Media Type: Content-Type must be application/json" },
+});
 
 export async function main(args = process.argv.slice(2)): Promise<void> {
   if (args[0] === "install") {
@@ -443,6 +447,17 @@ async function dispatchHttpRequest(
 ): Promise<void> {
   if (request.aborted) {
     throw new AppError("HTTP_REQUEST_ABORTED", "The HTTP client disconnected before the request completed.", { status: 499, retryable: true });
+  }
+  // The MCP adapter rejects non-JSON POSTs before it reads or parses their
+  // body. Mirror that gate here so a slow or oversized unsupported request
+  // cannot occupy a bounded request slot until the body timeout expires.
+  const contentType = request.headers["content-type"];
+  if (request.method?.toUpperCase() === "POST" && (typeof contentType !== "string" || !sdkIsJsonContentType(contentType))) {
+    response.setHeader("connection", "close");
+    closeIncompleteRequestAfterResponse(request, response);
+    response.writeHead(415, { "content-type": "application/json" });
+    response.end(HTTP_UNSUPPORTED_MEDIA_BODY);
+    return;
   }
   const contentLength = Number(request.headers["content-length"] ?? 0);
   if (Number.isFinite(contentLength) && contentLength > maxBodyBytes) {
