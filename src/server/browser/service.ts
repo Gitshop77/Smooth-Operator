@@ -17,7 +17,7 @@ function loadPuppeteer(): Promise<PuppeteerModule> {
 }
 
 import type { ServerConfig } from "../config";
-import { AppError, asAppError, requireField } from "../errors";
+import { AppError, asAppError, requireField, safeErrorDiagnostic } from "../errors";
 import { BrowserActionPlanSchema, isDestructiveBatchAction, type BrowserAction } from "../contracts";
 import { Logger, redactValue } from "../logger";
 import { SecurityPolicy } from "../policy";
@@ -575,12 +575,12 @@ export class BrowserService {
     if (owned) {
       await Promise.resolve().then(() => browser.close()).catch((error: unknown) => {
         succeeded = false;
-        this.logger.warn("Browser close failed", { error: String(error) });
+        this.logger.warn("Browser close failed", { error: safeErrorDiagnostic(error) });
       });
     } else {
       await Promise.resolve().then(() => browser.disconnect()).catch((error: unknown) => {
         succeeded = false;
-        this.logger.warn("Browser disconnect failed", { error: String(error) });
+        this.logger.warn("Browser disconnect failed", { error: safeErrorDiagnostic(error) });
       });
     }
     if (!succeeded) {
@@ -3141,7 +3141,9 @@ export class BrowserService {
     try {
       const info = await lstat(activePortPath);
       if (!info.isFile() || info.size > 4_096) {
-        this.logger.debug("Managed browser DevTools endpoint file is invalid", { path: activePortPath });
+        this.logger.debug("Managed browser DevTools endpoint file is invalid", {
+          endpointFile: { kind: "devtools-active-port", regular: info.isFile(), bounded: info.size <= 4_096 },
+        });
         return { state: "stale-probe-failed" };
       }
       raw = await readFile(activePortPath, "utf8");
@@ -3149,19 +3151,24 @@ export class BrowserService {
       if (isMissingFile(error)) {
         return { state: "no-file" };
       }
-      this.logger.debug("Managed browser DevTools endpoint file could not be read", { path: activePortPath, error: String(error) });
+      this.logger.debug("Managed browser DevTools endpoint file could not be read", {
+        endpointFile: { kind: "devtools-active-port", available: false },
+        error: safeErrorDiagnostic(error),
+      });
       return { state: "stale-probe-failed" };
     }
     const browserURL = parseDevToolsActivePort(raw);
     if (!browserURL) {
-      this.logger.debug("Managed browser DevTools endpoint file is malformed", { path: activePortPath });
+      this.logger.debug("Managed browser DevTools endpoint file is malformed", {
+        endpointFile: { kind: "devtools-active-port", available: true, valid: false },
+      });
       return { state: "stale-probe-failed" };
     }
     try {
       const version = await (this.dependencies.probeEndpoint ?? probeDevToolsEndpoint)(browserURL, 2_000);
       return { state: "live", browserURL, version };
     } catch (error) {
-      this.logger.debug("Managed browser DevTools endpoint probe failed", { browserURL, error: String(error) });
+      this.logger.debug("Managed browser DevTools endpoint probe failed", { browserURL, error: safeErrorDiagnostic(error) });
       return { state: "stale-probe-failed" };
     }
   }
@@ -3377,7 +3384,7 @@ export class BrowserService {
         return;
       }
       void this.guardTargetSession(session, event.targetInfo).catch((error: unknown) => {
-        this.logger.warn("New browser target guard failed", { error: String(error) });
+        this.logger.warn("New browser target guard failed", { error: safeErrorDiagnostic(error) });
       });
     };
     const detachedListener = (value: unknown): void => {
@@ -3427,7 +3434,7 @@ export class BrowserService {
     if (targetConnection.send) {
       void targetConnection.send("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: true, flatten: true }).catch((error: unknown) => {
         this.targetGuardUnavailable = true;
-        this.logger.warn("Browser target auto-attachment could not be enabled", { error: String(error) });
+        this.logger.warn("Browser target auto-attachment could not be enabled", { error: safeErrorDiagnostic(error) });
       });
     }
   }
@@ -3496,7 +3503,7 @@ export class BrowserService {
     };
     guard.requestPausedListener = (event: unknown): void => {
       const pending = this.handleTargetGuardRequest(guard, event).catch((error: unknown) => {
-        this.logger.debug("New target request guard callback failed", { error: String(error) });
+        this.logger.debug("New target request guard callback failed", { error: safeErrorDiagnostic(error) });
       });
       guard.pendingRequests.add(pending);
       void pending.finally(() => guard.pendingRequests.delete(pending)).catch(() => undefined);
@@ -3561,7 +3568,7 @@ export class BrowserService {
       this.targetGuardSessions.delete(sessionId);
       this.unguardedTargetSessions.add(sessionId);
       await this.closeGuardedTarget(guard);
-      this.logger.warn("New browser target could not be guarded", { error: String(error) });
+      this.logger.warn("New browser target could not be guarded", { error: safeErrorDiagnostic(error) });
       throw error;
     }
   }
@@ -3632,7 +3639,7 @@ export class BrowserService {
         await guard.session.send("Fetch.failRequest", { requestId, errorReason: "BlockedByClient" });
       }
     } catch (error) {
-      this.logger.debug("New target request could not be resolved", { error: String(error) });
+      this.logger.debug("New target request could not be resolved", { error: safeErrorDiagnostic(error) });
     } finally {
       guard.requestIds.delete(requestId);
     }
@@ -3721,7 +3728,7 @@ export class BrowserService {
         throw error;
       }
     } catch (error) {
-      this.logger.warn("New browser tab could not be prepared", { error: String(error) });
+      this.logger.warn("New browser tab could not be prepared", { error: safeErrorDiagnostic(error) });
     }
   }
 
@@ -3781,7 +3788,7 @@ export class BrowserService {
       state.challengeStatus = undefined;
       state.challengeAttempts = 0;
     } catch (error) {
-      this.logger.debug("Blocked navigation recovery could not restore a blank page", { pageId: state.id, error: String(error) });
+      this.logger.debug("Blocked navigation recovery could not restore a blank page", { pageId: state.id, error: safeErrorDiagnostic(error) });
     }
   }
 
@@ -4002,7 +4009,7 @@ export class BrowserService {
           ? error
           : new AppError("DOWNLOAD_CONFIGURATION_FAILED", "The browser download directory could not be configured. Retry after reconnecting the browser.", { retryable: true, cause: error });
         state.downloadConfigurationError = classified;
-        this.logger.warn("Browser download behavior could not be configured", { pageId: state.id, error: String(error) });
+        this.logger.warn("Browser download behavior could not be configured", { pageId: state.id, error: safeErrorDiagnostic(error) });
       }
     }
     this.assertStateLive(state);
@@ -4178,7 +4185,7 @@ export class BrowserService {
         state.network.push({ timestamp: new Date().toISOString(), type: "request", url: safeUrl(request.url()), method: request.method() });
         trimLog(state.network);
       } catch (error) {
-        this.logger.debug("Browser request log entry was unavailable after page disposal", { pageId: state.id, error: String(error) });
+        this.logger.debug("Browser request log entry was unavailable after page disposal", { pageId: state.id, error: safeErrorDiagnostic(error) });
       }
     };
     state.networkRequestListener = networkRequestListener;
@@ -4198,7 +4205,7 @@ export class BrowserService {
       } catch (error) {
         // A response can race page disposal; the internal status/log is
         // advisory and must not escape the Puppeteer event callback.
-        this.logger.debug("Browser response log entry was unavailable after page disposal", { pageId: state.id, error: String(error) });
+        this.logger.debug("Browser response log entry was unavailable after page disposal", { pageId: state.id, error: safeErrorDiagnostic(error) });
       }
     };
     state.networkResponseListener = networkResponseListener;
@@ -4211,7 +4218,7 @@ export class BrowserService {
         state.console.push({ timestamp: new Date().toISOString(), type: "console", level: message.type(), text: message.text().slice(0, 2_000) });
         trimLog(state.console);
       } catch (error) {
-        this.logger.debug("Browser console log entry was unavailable after page disposal", { pageId: state.id, error: String(error) });
+        this.logger.debug("Browser console log entry was unavailable after page disposal", { pageId: state.id, error: safeErrorDiagnostic(error) });
       }
     };
     state.consoleListener = consoleListener;
@@ -4226,7 +4233,7 @@ export class BrowserService {
         this.currentPageId = state.id;
         this.logger.info("Browser dialog opened", { pageId: state.id, type });
       } catch (error) {
-        this.logger.debug("Browser dialog event was unavailable after page disposal", { pageId: state.id, error: String(error) });
+        this.logger.debug("Browser dialog event was unavailable after page disposal", { pageId: state.id, error: safeErrorDiagnostic(error) });
       }
     };
     state.dialogListener = dialogListener;
@@ -4253,7 +4260,7 @@ export class BrowserService {
           state.challengeAttempts = 0;
         }
       } catch (error) {
-        this.logger.debug("Browser frame navigation event was unavailable after page disposal", { pageId: state.id, error: String(error) });
+        this.logger.debug("Browser frame navigation event was unavailable after page disposal", { pageId: state.id, error: safeErrorDiagnostic(error) });
       }
     };
     state.frameNavigatedListener = frameNavigatedListener;
@@ -5368,7 +5375,7 @@ export class BrowserService {
       // browser_dialog. Consume that eventual result before surfacing any
       // cancellation so it cannot become an unhandled rejection.
       void click.catch((error: unknown) => {
-        this.logger.debug("Browser click completed after dialog resolution", { pageId: state.id, error: String(error) });
+        this.logger.debug("Browser click completed after dialog resolution", { pageId: state.id, error: safeErrorDiagnostic(error) });
       });
       // The dialog event can win the race just before the click's monitoring
       // wait observes cancellation. Never report a successful click for a
@@ -6576,12 +6583,12 @@ async function closeConnectedBrowser(browser: Browser, owned: boolean, logger: L
   if (owned) {
     await Promise.resolve().then(() => browser.close()).catch((error: unknown) => {
       succeeded = false;
-      logger.warn("Late browser close failed", { error: String(error) });
+      logger.warn("Late browser close failed", { error: safeErrorDiagnostic(error) });
     });
   } else {
     await Promise.resolve().then(() => browser.disconnect()).catch((error: unknown) => {
       succeeded = false;
-      logger.warn("Late browser disconnect failed", { error: String(error) });
+      logger.warn("Late browser disconnect failed", { error: safeErrorDiagnostic(error) });
     });
   }
   return succeeded;

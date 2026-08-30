@@ -68,6 +68,38 @@ describe("browser service", () => {
     }
   });
 
+  it("bounds browser diagnostics without exposing endpoint paths or thrown secrets", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "smooth-operator-managed-diagnostic-"));
+    const config = testConfig({
+      browser: { ...testConfig().browser, mode: "managed", executablePath: "/custom/chrome", userDataDir: directory },
+    });
+    const privatePath = join(directory, "private-profile");
+    await writeFile(join(directory, "DevToolsActivePort"), "9333\n/devtools/browser/test\n");
+    const browser = { on: () => undefined, close: async () => undefined } as unknown as Browser;
+    const lines: string[] = [];
+    const probeEndpoint = vi.fn(async () => {
+      throw new Error(`probe failed https://example.test/callback?token=diagnostic-secret ${privatePath}`);
+    });
+    const service = new BrowserService(
+      config,
+      new SecurityPolicy(config),
+      new Logger("debug", {}, (line) => lines.push(line)),
+      { connect: vi.fn(async () => browser), launch: vi.fn(async () => browser), probeEndpoint },
+    );
+
+    try {
+      const internal = service as unknown as { connectBrowser(generation: number): Promise<Browser> };
+      await expect(internal.connectBrowser(0)).resolves.toBe(browser);
+      const output = lines.join("\n");
+      expect(output).not.toContain("diagnostic-secret");
+      expect(output).not.toContain(directory);
+      expect(output).toContain('"error":{"code":"INTERNAL_ERROR"');
+    } finally {
+      await service.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("preserves the configured headless preference and viewport when stealth is enabled", async () => {
     for (const headless of [false, true]) {
       const config = testConfig({
