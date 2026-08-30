@@ -2404,6 +2404,85 @@ describe("browser service", () => {
     await service.close();
   });
 
+  it("does not publish a browser connection before target auto-attach is acknowledged", async () => {
+    const config = testConfig({ browser: { ...testConfig().browser, mode: "connect", url: "http://127.0.0.1:9222" } });
+    const connection = new EventEmitter() as EventEmitter & {
+      isAutoAttached(targetId: string): boolean;
+      session(sessionId: string): unknown;
+      send(method: string, params?: unknown): Promise<unknown>;
+    };
+    const sessions = new Map<string, EventEmitter & { id(): string; send(method: string, params?: unknown): Promise<unknown> }>();
+    let acknowledge!: () => void;
+    const acknowledgement = new Promise<void>((resolve) => { acknowledge = resolve; });
+    connection.isAutoAttached = () => true;
+    connection.session = (sessionId) => sessions.get(sessionId);
+    connection.send = vi.fn(async (method) => method === "Target.setAutoAttach" ? acknowledgement : {});
+    const browser = new EventEmitter() as EventEmitter & { _connection: unknown; close: () => Promise<void> };
+    browser._connection = connection;
+    browser.close = vi.fn(async () => undefined);
+    const connect = vi.fn(async () => browser as unknown as Browser);
+    const service = new BrowserService(config, new SecurityPolicy(config), new Logger("error", {}, () => undefined), { connect });
+    const internal = service as unknown as { connectBrowser(generation: number): Promise<Browser> };
+    const connecting = internal.connectBrowser(0);
+
+    try {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(service.connectionStatus().connected).toBe(false);
+
+      const session = new EventEmitter() as EventEmitter & { id(): string; send(method: string, params?: unknown): Promise<unknown> };
+      session.id = () => "immediate-target-session";
+      const sessionSend = vi.fn(async () => ({}));
+      session.send = sessionSend;
+      sessions.set(session.id(), session);
+      connection.emit("sessionattached", session);
+      connection.emit("Target.attachedToTarget", { sessionId: session.id(), targetInfo: { targetId: "immediate-target", type: "page", url: "about:blank" } });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(sessionSend).toHaveBeenCalledWith("Fetch.enable", expect.anything());
+
+      acknowledge();
+      await expect(connecting).resolves.toBe(browser);
+      expect(connect).toHaveBeenCalledTimes(1);
+      expect(service.connectionStatus().connected).toBe(true);
+    } finally {
+      acknowledge();
+      await connecting.catch(() => undefined);
+      await service.close();
+    }
+  });
+
+  it("publishes a connection but marks target guarding unavailable when acknowledgement fails", async () => {
+    const config = testConfig({ browser: { ...testConfig().browser, mode: "connect", url: "http://127.0.0.1:9222" } });
+    const connection = new EventEmitter() as EventEmitter & {
+      isAutoAttached(targetId: string): boolean;
+      send(method: string, params?: unknown): Promise<unknown>;
+    };
+    connection.isAutoAttached = () => true;
+    connection.send = vi.fn(async (method) => {
+      if (method === "Target.setAutoAttach") {
+        throw new Error("Target auto-attach unavailable");
+      }
+      return {};
+    });
+    const browser = new EventEmitter() as EventEmitter & { _connection: unknown; close: () => Promise<void> };
+    browser._connection = connection;
+    browser.close = vi.fn(async () => undefined);
+    const connect = vi.fn(async () => browser as unknown as Browser);
+    const service = new BrowserService(config, new SecurityPolicy(config), new Logger("error", {}, () => undefined), { connect });
+    const serviceInternal = service as unknown as {
+      connectBrowser(generation: number): Promise<Browser>;
+      targetGuardUnavailable: boolean;
+    };
+
+    try {
+      await expect(serviceInternal.connectBrowser(0)).resolves.toBe(browser);
+      expect(connect).toHaveBeenCalledTimes(1);
+      expect(service.connectionStatus().connected).toBe(true);
+      expect(serviceInternal.targetGuardUnavailable).toBe(true);
+    } finally {
+      await service.close();
+    }
+  });
+
   it("closes an auto-attached target when Fetch guarding cannot be installed", async () => {
     const config = testConfig({ browser: { ...testConfig().browser, mode: "connect", url: "http://127.0.0.1:9222" } });
     const service = new BrowserService(config, new SecurityPolicy(config), new Logger("error", {}, () => undefined));

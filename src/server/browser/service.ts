@@ -390,6 +390,7 @@ export class BrowserService {
   private targetGuardConnectionListener: ((value: unknown) => void) | undefined;
   private targetGuardRawConnectionListener: ((value: unknown) => void) | undefined;
   private targetGuardDetachedListener: ((value: unknown) => void) | undefined;
+  private targetGuardReadinessPromise: Promise<void> | undefined;
   private targetGuardOriginalEmit: ((event: string, value: unknown) => boolean) | undefined;
   private targetGuardWrappedEmit: ((event: string, value: unknown) => boolean) | undefined;
   private operationTail = Promise.resolve();
@@ -3060,6 +3061,13 @@ export class BrowserService {
         await closeConnectedBrowser(lateBrowser, ownsBrowser, this.logger);
         throw new AppError("SERVER_CLOSING", "The browser runtime is shutting down.", { retryable: true });
       }
+      await this.installTargetGuard(browser);
+      if (this.shuttingDown || generation !== this.lifecycleGeneration || this.shutdownController.signal.aborted) {
+        const lateBrowser = browser;
+        browser = undefined;
+        await closeConnectedBrowser(lateBrowser, ownsBrowser, this.logger);
+        throw new AppError("SERVER_CLOSING", "The browser runtime is shutting down.", { retryable: true });
+      }
       this.browser = browser;
       this.ownsBrowser = ownsBrowser;
       const connectedBrowser = browser;
@@ -3074,7 +3082,6 @@ export class BrowserService {
         this.lifecycleGeneration += 1;
         this.retireAllStates();
       });
-      this.installTargetGuard(browser);
       browser.on("targetcreated", (target) => {
         void this.prepareTarget(target);
       });
@@ -3318,14 +3325,18 @@ export class BrowserService {
   }
 
   /** Install a Fetch guard at the CDP boundary to policy-check new targets while paused. */
-  private installTargetGuard(browser: Browser): void {
+  private async installTargetGuard(browser: Browser): Promise<void> {
     if (this.targetGuardConnection) {
+      if (this.targetGuardReadinessPromise) {
+        await this.targetGuardReadinessPromise;
+      }
       return;
     }
     const connection = (browser as unknown as { _connection?: unknown })._connection;
     if (!connection || typeof (connection as { on?: unknown }).on !== "function") {
       this.targetGuardUnavailable = true;
       this.logger.warn("Browser target guard is unavailable; popup actions will be blocked");
+      this.targetGuardReadinessPromise = Promise.resolve();
       return;
     }
     this.targetGuardUnavailable = false;
@@ -3333,6 +3344,7 @@ export class BrowserService {
     if (typeof targetConnection.isAutoAttached !== "function") {
       this.targetGuardUnavailable = true;
       this.logger.warn("Browser target guard is unavailable; attachment ownership cannot be determined");
+      this.targetGuardReadinessPromise = Promise.resolve();
       return;
     }
     // Puppeteer 25 emits `sessionattached` for both auto-attached targets and
@@ -3433,11 +3445,29 @@ export class BrowserService {
     this.targetGuardRawConnectionListener = rawListener;
     this.targetGuardDetachedListener = detachedListener;
     if (targetConnection.send) {
-      void targetConnection.send("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: true, flatten: true }).catch((error: unknown) => {
-        this.targetGuardUnavailable = true;
-        this.logger.warn("Browser target auto-attachment could not be enabled", { error: safeErrorDiagnostic(error) });
-      });
+      const readiness = Promise.resolve()
+        .then(() => targetConnection.send?.("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: true, flatten: true }))
+        .then(
+          () => {
+            if (this.targetGuardConnection === targetConnection) {
+              this.targetGuardUnavailable = false;
+            }
+          },
+          (error: unknown) => {
+            if (this.targetGuardConnection === targetConnection) {
+              this.targetGuardUnavailable = true;
+              this.logger.warn("Browser target auto-attachment could not be enabled", { error: safeErrorDiagnostic(error) });
+            }
+          },
+        )
+        .then(() => undefined);
+      this.targetGuardReadinessPromise = readiness;
+      await readiness;
+      return;
     }
+    this.targetGuardUnavailable = true;
+    this.targetGuardReadinessPromise = Promise.resolve();
+    this.logger.warn("Browser target guard is unavailable; auto-attachment cannot be enabled");
   }
 
   private detachTargetGuard(): void {
@@ -3469,6 +3499,7 @@ export class BrowserService {
     this.targetGuardConnectionListener = undefined;
     this.targetGuardRawConnectionListener = undefined;
     this.targetGuardDetachedListener = undefined;
+    this.targetGuardReadinessPromise = undefined;
     this.targetGuardOriginalEmit = undefined;
     this.targetGuardWrappedEmit = undefined;
     this.targetGuardUnavailable = false;
