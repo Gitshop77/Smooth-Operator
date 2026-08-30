@@ -640,6 +640,7 @@ function cookieAction(input: z.infer<typeof CookieRequestSchema>): BrowserAction
     url: input.url,
     cookieSecure: input.secure,
     cookieHttpOnly: input.httpOnly,
+    cookieSameSite: input.sameSite,
   };
 }
 

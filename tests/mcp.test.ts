@@ -517,6 +517,33 @@ describe("native MCP registry", () => {
     }
   });
 
+  it("maps cookie scope and SameSite fields without exposing cookie values", async () => {
+    const runtime = await ServerRuntime.create(testConfig());
+    const run = vi.spyOn(runtime, "run").mockResolvedValue({ set: "session" });
+    const server = createMcpServer(runtime);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "cookie-scope-test", version: "1.0.0" });
+    try {
+      await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+      const result = await client.callTool({
+        name: "browser_cookies",
+        arguments: { operation: "set", name: "session", value: "secret", url: "https://example.test/account", sameSite: "Strict" },
+      });
+      expect(result.isError).not.toBe(true);
+      expect(run).toHaveBeenCalledWith(expect.objectContaining({
+        action: "set_cookie",
+        cookieName: "session",
+        cookieValue: "secret",
+        url: "https://example.test/account",
+        cookieSameSite: "Strict",
+      }), expect.any(AbortSignal));
+    } finally {
+      await client.close().catch(() => undefined);
+      await server.close().catch(() => undefined);
+      await runtime.close();
+    }
+  });
+
   it("keeps oversized extraction records below the client JSON budget with explicit omission flags", async () => {
     const runtime = await ServerRuntime.create(testConfig());
     const run = vi.spyOn(runtime, "run").mockResolvedValue({

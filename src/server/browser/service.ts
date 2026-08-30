@@ -3109,7 +3109,10 @@ export class BrowserService {
       case "solve_challenge":
         return this.solveChallenge(state, action, signal);
       case "get_cookies": {
-        const cookies = await page.cookies();
+        const scopedUrl = action.url
+          ? await this.policy.assertNavigationAllowedAsync(action.url)
+          : undefined;
+        const cookies = scopedUrl ? await page.cookies(scopedUrl.toString()) : await page.cookies();
         return cookies.slice(0, 200).map((cookie) => ({
           name: wrapUntrustedText("cookie_name", redactSecretPlaceholders(cookie.name), 256),
           domain: wrapUntrustedText("cookie_domain", redactSecretPlaceholders(cookie.domain), 512),
@@ -3127,15 +3130,18 @@ export class BrowserService {
         if (action.cookieDomain) {
           await this.policy.assertNavigationAllowedAsync(`https://${action.cookieDomain.replace(/^\.+/, "")}`);
         }
-        await page.setCookie({ name: cookieName, value: action.cookieValue ?? action.value ?? "", url: url.toString(), domain: action.cookieDomain, path: action.cookiePath ?? "/", secure: action.cookieSecure, httpOnly: action.cookieHttpOnly });
+        await page.setCookie({ name: cookieName, value: action.cookieValue ?? action.value ?? "", url: url.toString(), domain: action.cookieDomain, path: action.cookiePath ?? "/", secure: action.cookieSecure, httpOnly: action.cookieHttpOnly, sameSite: action.cookieSameSite });
         return { set: wrapUntrustedText("cookie_name", redactSecretPlaceholders(cookieName), 256) };
       }
       case "delete_cookies": {
         const cookieName = requireField(action.cookieName, "cookieName");
+        const scopedUrl = action.url
+          ? await this.policy.assertNavigationAllowedAsync(action.url)
+          : undefined;
         if (action.cookieDomain) {
           await this.policy.assertNavigationAllowedAsync(`https://${action.cookieDomain.replace(/^\.+/, "")}`);
         }
-        await page.deleteCookie({ name: cookieName, domain: action.cookieDomain, path: action.cookiePath ?? "/" });
+        await page.deleteCookie({ name: cookieName, ...(scopedUrl ? { url: scopedUrl.toString() } : {}), domain: action.cookieDomain, path: action.cookiePath ?? "/" });
         return { deleted: wrapUntrustedText("cookie_name", redactSecretPlaceholders(cookieName), 256) };
       }
       case "get_storage": {

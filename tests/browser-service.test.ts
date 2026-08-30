@@ -2561,6 +2561,50 @@ describe("browser service", () => {
     await service.close();
   });
 
+  it("forwards policy-checked cookie URL scope and SameSite without returning values", async () => {
+    const baseConfig = testConfig();
+    const config = testConfig({
+      security: {
+        ...baseConfig.security,
+        allowedDomains: ["127.0.0.1"],
+        blockedDomains: ["blocked.test"],
+        allowPrivateNetwork: true,
+      },
+    });
+    const scopedUrl = "http://127.0.0.1:43123/account";
+    const cookies = vi.fn(async (...urls: string[]) => [{ name: "session", value: "secret-value", domain: "127.0.0.1", path: "/", secure: false, httpOnly: true, session: true, urls }]);
+    const setCookie = vi.fn(async (_cookie: unknown) => undefined);
+    const deleteCookie = vi.fn(async (_cookie: unknown) => undefined);
+    const service = new BrowserService(config, new SecurityPolicy(config), new Logger("error", {}, () => undefined));
+    const page = { url: () => "about:blank", cookies, setCookie, deleteCookie };
+    const state = { id: "page-1", page };
+    const internal = service as unknown as {
+      executeOnPage(action: BrowserAction, signal?: AbortSignal): Promise<unknown>;
+      pageState(pageId?: string, signal?: AbortSignal): Promise<unknown>;
+      assertCurrentPageAllowed(page: unknown): Promise<void>;
+      assertSnapshotForAction(state: unknown, action: BrowserAction): void;
+      frameFor(state: unknown, frameId?: string): Promise<unknown>;
+    };
+    internal.pageState = async () => state;
+    internal.assertCurrentPageAllowed = async () => undefined;
+    internal.assertSnapshotForAction = () => undefined;
+    internal.frameFor = async () => ({});
+
+    const scopedCookies = await internal.executeOnPage({ action: "get_cookies", url: scopedUrl } as BrowserAction) as Array<Record<string, unknown>>;
+    expect(cookies).toHaveBeenCalledWith(scopedUrl);
+    expect(scopedCookies[0]).not.toHaveProperty("value");
+    await internal.executeOnPage({ action: "delete_cookies", cookieName: "session", url: scopedUrl } as BrowserAction);
+    expect(deleteCookie).toHaveBeenCalledWith(expect.objectContaining({ name: "session", url: scopedUrl, path: "/" }));
+    await internal.executeOnPage({ action: "set_cookie", cookieName: "theme", cookieValue: "dark", url: scopedUrl, cookieSameSite: "Lax" } as BrowserAction);
+    expect(setCookie).toHaveBeenCalledWith(expect.objectContaining({ name: "theme", url: scopedUrl, sameSite: "Lax" }));
+
+    await expect(internal.executeOnPage({ action: "get_cookies", url: "http://blocked.test/account" } as BrowserAction)).rejects.toMatchObject({ code: "DOMAIN_BLOCKED" });
+    await expect(internal.executeOnPage({ action: "delete_cookies", cookieName: "session", url: "http://blocked.test/account" } as BrowserAction)).rejects.toMatchObject({ code: "DOMAIN_BLOCKED" });
+    expect(cookies).toHaveBeenCalledTimes(1);
+    expect(deleteCookie).toHaveBeenCalledTimes(1);
+    await service.close();
+  });
+
   it("reports full-page screenshot dimensions from the captured document", async () => {
     const service = new BrowserService(testConfig(), new SecurityPolicy(testConfig()), new Logger("error", {}, () => undefined));
     const internal = service as unknown as {

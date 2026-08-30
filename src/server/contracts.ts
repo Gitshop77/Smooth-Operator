@@ -194,6 +194,7 @@ const BrowserActionFieldsSchema = z.object({
   cookiePath: BoundedString(2_000).optional(),
   cookieSecure: z.boolean().optional(),
   cookieHttpOnly: z.boolean().optional(),
+  cookieSameSite: z.enum(["Strict", "Lax", "None"]).optional(),
   storageArea: z.enum(["local", "session"]).optional(),
   storageKey: BoundedString(1_000).optional(),
   storageValue: z.string().max(20_000).optional(),
@@ -287,6 +288,9 @@ export const BrowserActionSchema = BrowserActionFieldsSchema.extend({ action: Ac
   if (input.cookieValue !== undefined && input.value !== undefined && input.action === "set_cookie") {
     context.addIssue({ code: "custom", message: "Provide cookieValue or value, not both." });
   }
+  if (input.cookieSameSite !== undefined && input.action !== "set_cookie") {
+    context.addIssue({ code: "custom", message: "cookieSameSite is only valid for set_cookie." });
+  }
   if (input.storageValue !== undefined && input.value !== undefined && input.action === "set_storage") {
     context.addIssue({ code: "custom", message: "Provide storageValue or value, not both." });
   }
@@ -331,7 +335,7 @@ export const BrowserActionSchema = BrowserActionFieldsSchema.extend({ action: Ac
   if (input.action !== "inspect_element" && input.maxChildren !== undefined) {
     context.addIssue({ code: "custom", message: "maxChildren is only valid for inspect_element." });
   }
-  if (["navigate", "set_cookie"].includes(input.action) && input.url !== undefined && !isHttpUrl(input.url)) {
+  if (["navigate", "get_cookies", "set_cookie", "delete_cookies"].includes(input.action) && input.url !== undefined && !isHttpUrl(input.url)) {
     context.addIssue({ code: "custom", message: "Navigation and cookie URLs must be absolute HTTP(S) URLs." });
   }
   if (input.action === "click") {
@@ -500,6 +504,7 @@ function normalizeBrowserActionInput(value: unknown): { value: unknown; issues: 
         moveActionField(output, "cookiePath", "path", issues);
         moveActionField(output, "cookieSecure", "secure", issues);
         moveActionField(output, "cookieHttpOnly", "httpOnly", issues);
+        moveActionField(output, "cookieSameSite", "sameSite", issues);
       } else if (rawAction === "storage") {
         moveActionField(output, "storageArea", "area", issues);
         moveActionField(output, "storageKey", "key", issues);
@@ -808,6 +813,7 @@ export const CookieRequestSchema = z.object({
   url: HttpUrl(8_000).optional(),
   secure: z.boolean().optional(),
   httpOnly: z.boolean().optional(),
+  sameSite: z.enum(["Strict", "Lax", "None"]).optional(),
   ...PageInput,
 }).strict().superRefine((input, context) => {
   if ((input.operation === "set" || input.operation === "delete") && !input.name) {
@@ -815,6 +821,9 @@ export const CookieRequestSchema = z.object({
   }
   if (input.operation === "set" && input.value === undefined) {
     context.addIssue({ code: "custom", message: "Cookie set requires value." });
+  }
+  if (input.sameSite !== undefined && input.operation !== "set") {
+    context.addIssue({ code: "custom", message: "Cookie sameSite is only valid for set." });
   }
 });
 export const StorageRequestSchema = z.object({

@@ -158,6 +158,22 @@ describe("MCP contracts", () => {
     expect(BrowserActionSchema.safeParse({ action: "wait_for_url", url: "*" }).success).toBe(true);
   });
 
+  it("validates cookie scope and SameSite fields by operation", () => {
+    expect(CookieRequestSchema.safeParse({ operation: "get", url: "https://example.test/account" }).success).toBe(true);
+    expect(CookieRequestSchema.safeParse({ operation: "delete", name: "session", url: "https://example.test/account" }).success).toBe(true);
+    for (const sameSite of ["Strict", "Lax", "None"]) {
+      expect(CookieRequestSchema.safeParse({ operation: "set", name: "session", value: "safe", sameSite }).success).toBe(true);
+      expect(BrowserActionSchema.safeParse({ action: "set_cookie", cookieName: "session", cookieValue: "safe", cookieSameSite: sameSite }).success).toBe(true);
+    }
+    expect(CookieRequestSchema.safeParse({ operation: "set", name: "session", value: "safe", sameSite: "lax" }).success).toBe(false);
+    expect(CookieRequestSchema.safeParse({ operation: "get", sameSite: "Lax" }).success).toBe(false);
+    expect(CookieRequestSchema.safeParse({ operation: "delete", name: "session", sameSite: "Lax" }).success).toBe(false);
+    expect(BrowserActionSchema.safeParse({ action: "get_cookies", cookieSameSite: "Lax" }).success).toBe(false);
+    expect(BrowserActionSchema.safeParse({ action: "delete_cookies", cookieName: "session", cookieSameSite: "Lax" }).success).toBe(false);
+    expect(BrowserActionSchema.safeParse({ action: "get_cookies", url: "javascript:alert(1)" }).success).toBe(false);
+    expect(BrowserActionSchema.safeParse({ action: "delete_cookies", cookieName: "session", url: "file:///etc/passwd" }).success).toBe(false);
+  });
+
   it("bounds page text request sizes at the MCP boundary", () => {
     expect(SnapshotRequestSchema.safeParse({ maxChars: 8_000 }).success).toBe(true);
     expect(SnapshotRequestSchema.safeParse({ maxChars: 8_001 }).success).toBe(false);
@@ -242,7 +258,7 @@ describe("MCP contracts", () => {
     expect(aliases.success && aliases.data).toMatchObject({ action: "send_keys", key: "Enter", pageId: "tab-1" });
 
     const grouped = BatchRequestSchema.safeParse({ confirmDestructive: true, actions: [
-      { action: "cookie", operation: "set", name: "session", value: "safe", url: "https://example.com" },
+      { action: "cookie", operation: "set", name: "session", value: "safe", url: "https://example.com", sameSite: "Strict" },
       { action: "storage", operation: "get", area: "session", key: "theme" },
       { action: "dialog", operation: "get_text" },
       { action: "network_log", operation: "enable" },
@@ -252,7 +268,7 @@ describe("MCP contracts", () => {
     expect(grouped.success && grouped.data.actions.map((action) => action.action)).toEqual([
       "set_cookie", "get_storage", "alert_get_text", "enable_network_log", "get_console_log",
     ]);
-    expect(grouped.success && grouped.data.actions[0]).toMatchObject({ cookieName: "session", cookieValue: "safe" });
+    expect(grouped.success && grouped.data.actions[0]).toMatchObject({ cookieName: "session", cookieValue: "safe", cookieSameSite: "Strict" });
     expect(grouped.success && grouped.data.actions[1]).toMatchObject({ storageArea: "session", storageKey: "theme" });
   });
 
