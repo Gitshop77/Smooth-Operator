@@ -164,7 +164,7 @@ describe("HTTP transport", () => {
       expect(client.getProtocolEra()).toBe("modern");
       expect(client.getNegotiatedProtocolVersion()).toBe("2026-07-28");
       const tools = await client.listTools();
-      expect(tools.tools).toHaveLength(63);
+      expect(tools.tools).toHaveLength(64);
       const health = await client.callTool({ name: "server_health", arguments: {} });
       expect(health.isError).not.toBe(true);
       expect(JSON.stringify(health)).toContain('"status":"ok"');

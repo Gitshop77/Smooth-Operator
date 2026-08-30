@@ -2341,6 +2341,110 @@ describe("browser service", () => {
     await service.close();
   });
 
+  it("inspects bounded safe element metadata without executing selectors or exposing secrets", async () => {
+    const service = new BrowserService(testConfig(), new SecurityPolicy(testConfig()), new Logger("error", {}, () => undefined));
+    const makeElement = (tagName: string, attributes: Record<string, string>, text = "", children: Array<Record<string, unknown>> = []): Record<string, unknown> => {
+      const element: Record<string, unknown> = {
+        nodeType: 1,
+        tagName: tagName.toUpperCase(),
+        attributes: Object.entries(attributes).map(([name, value]) => ({ name, value })),
+        children,
+        childNodes: [],
+        getBoundingClientRect: () => ({ x: 12.4, y: 8.2, width: 320.6, height: 120.9 }),
+      };
+      const textNode = text ? [{ nodeType: 3, nodeValue: text }] : [];
+      element.childNodes = [...textNode, ...children];
+      return element;
+    };
+    const hiddenScript = makeElement("script", {}, "script-secret");
+    const password = makeElement("input", { type: "password", value: "password-secret", "data-secret": "hidden" });
+    const button = makeElement("button", { onclick: "window.exfiltrate()", "data-random": "omit-me", "data-color": "red", "aria-label": "Safe action" }, "Visible action");
+    const root = makeElement("section", {
+      id: "card",
+      class: "hero",
+      onclick: "window.exfiltrate()",
+      "data-secret": "root-secret",
+      "data-random": "omit-me",
+      "data-color": "blue",
+      "aria-label": "Card label",
+    }, "Visible card", [hiddenScript, password, button]);
+    const frameEval = vi.fn(async (_selector: string, callback: (element: unknown, options: unknown) => unknown, options: unknown) => callback(root, options));
+    const frame = { parentFrame: () => null, $eval: frameEval };
+    const page = { url: () => "about:blank" };
+    const state = { id: "page-1", page };
+    const internal = service as unknown as {
+      executeOnPage(action: BrowserAction, signal?: AbortSignal): Promise<unknown>;
+      pageState(pageId?: string, signal?: AbortSignal): Promise<unknown>;
+      assertCurrentPageAllowed(page: unknown): Promise<void>;
+      assertSnapshotForAction(state: unknown, action: BrowserAction): void;
+      frameFor(state: unknown, frameId?: string): Promise<unknown>;
+      selectorFor(state: unknown, target: string, frameId?: string): Promise<string>;
+    };
+    internal.pageState = async () => state;
+    internal.assertCurrentPageAllowed = async () => undefined;
+    internal.assertSnapshotForAction = () => undefined;
+    internal.frameFor = async () => frame;
+    internal.selectorFor = async (_state, target) => target;
+    vi.stubGlobal("getComputedStyle", (_element: unknown, pseudo = "") => ({
+      display: "block",
+      visibility: "visible",
+      position: "relative",
+      color: "rgb(1, 2, 3)",
+      backgroundColor: "rgb(4, 5, 6)",
+      width: "320px",
+      height: "120px",
+      zIndex: "2",
+      fontFamily: "system-ui",
+      fontSize: "16px",
+      fontWeight: "600",
+      lineHeight: "1.5",
+      opacity: "1",
+      transform: "none",
+      animationName: "fade-in",
+      animationDuration: "1s",
+      animationTimingFunction: "ease",
+      animationDelay: "0s",
+      animationIterationCount: "1",
+      animationDirection: "normal",
+      animationFillMode: "both",
+      animationPlayState: "running",
+      transitionProperty: "opacity",
+      transitionDuration: "100ms",
+      transitionTimingFunction: "ease",
+      transitionDelay: "0s",
+      content: pseudo === "::before" ? "decorative" : "none",
+    }));
+
+    try {
+      const maliciousSelector = "#card'); window.pwned = true; /*";
+      const result = await internal.executeOnPage({ action: "inspect_element", selector: maliciousSelector, maxDepth: 1, maxChildren: 1 } as BrowserAction) as Record<string, unknown>;
+      expect(frameEval).toHaveBeenCalledWith(maliciousSelector, expect.any(Function), expect.objectContaining({ maxDepth: 1, maxChildren: 1 }));
+      expect(result).toMatchObject({
+        tag: expect.stringContaining("section"),
+        rect: { x: 12, y: 8, width: 321, height: 121 },
+        computedStyles: expect.objectContaining({ display: expect.stringContaining("block") }),
+        pseudoElements: expect.objectContaining({ before: expect.objectContaining({ content: expect.stringContaining("decorative") }) }),
+        animations: expect.objectContaining({ animationDuration: expect.stringContaining("1s") }),
+      });
+      expect(result.children).toHaveLength(1);
+      expect(result.childrenTruncated).toBe(true);
+      expect((result.omittedChildren as number)).toBeGreaterThan(0);
+      const serialized = JSON.stringify(result);
+      expect(serialized).not.toContain("script-secret");
+      expect(serialized).not.toContain("password-secret");
+      expect(serialized).not.toContain("root-secret");
+      expect(serialized).not.toContain("omit-me");
+      expect(serialized).not.toContain("exfiltrate");
+      expect((result.attributes as Record<string, unknown>)).toHaveProperty("data-color");
+      expect((result.attributes as Record<string, unknown>)).not.toHaveProperty("data-secret");
+      expect((result.attributes as Record<string, unknown>)).not.toHaveProperty("onclick");
+      expect((result.attributes as Record<string, unknown>)).not.toHaveProperty("value");
+    } finally {
+      vi.unstubAllGlobals();
+      await service.close();
+    }
+  });
+
   it("extracts bounded non-secret form values without exposing passwords", async () => {
     const service = new BrowserService(testConfig(), new SecurityPolicy(testConfig()), new Logger("error", {}, () => undefined));
     const textarea = { tagName: "TEXTAREA", textContent: "", value: "clipboard text" };

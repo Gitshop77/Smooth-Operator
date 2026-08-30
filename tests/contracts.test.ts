@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { BatchRequestSchema, BrowserActionInputSchema, BrowserActionPlanSchema, BrowserActionSchema, ClickRequestSchema, CookieRequestSchema, EvaluateRequestSchema, ExtractRequestSchema, HtmlRequestSchema, InputRequestSchema, NavigateRequestSchema, NetworkSearchRequestSchema, ResearchRequestSchema, ResourceBlockingRequestSchema, ScreenshotRequestSchema, SnapshotRequestSchema, SolveChallengeRequestSchema, StorageRequestSchema, TargetRequestSchema } from "@/server/contracts";
+import { BatchRequestSchema, BrowserActionInputSchema, BrowserActionPlanSchema, BrowserActionSchema, ClickRequestSchema, CookieRequestSchema, EvaluateRequestSchema, ExtractRequestSchema, HtmlRequestSchema, InspectElementRequestSchema, InputRequestSchema, NavigateRequestSchema, NetworkSearchRequestSchema, ResearchRequestSchema, ResourceBlockingRequestSchema, ScreenshotRequestSchema, SnapshotRequestSchema, SolveChallengeRequestSchema, StorageRequestSchema, TargetRequestSchema } from "@/server/contracts";
 
 describe("MCP contracts", () => {
   it("accepts browser-use indexed and coordinate click forms", () => {
@@ -99,6 +99,22 @@ describe("MCP contracts", () => {
     expect(ResourceBlockingRequestSchema.safeParse({ operation: "clear", resourceTypes: ["image"] }).success).toBe(false);
     expect(BrowserActionSchema.safeParse({ action: "resource_blocking", operation: "set", resourceTypes: ["image"] }).success).toBe(true);
     expect(BrowserActionSchema.safeParse({ action: "resource_blocking", operation: "get", resourceTypes: ["image"] }).success).toBe(false);
+  });
+
+  it("validates bounded element inspection targets and options", () => {
+    expect(InspectElementRequestSchema.safeParse({ selector: "#card", maxDepth: 0, maxChildren: 100 }).success).toBe(true);
+    expect(InspectElementRequestSchema.safeParse({ ref: "ref:e5", pageId: "page-1" }).success).toBe(true);
+    expect(InspectElementRequestSchema.safeParse({ index: 0, frameId: "main" }).success).toBe(true);
+    expect(InspectElementRequestSchema.safeParse({}).success).toBe(false);
+    expect(InspectElementRequestSchema.safeParse({ selector: "#card", target: "#other" }).success).toBe(false);
+    expect(InspectElementRequestSchema.safeParse({ selector: "#card", maxDepth: -1 }).success).toBe(false);
+    expect(InspectElementRequestSchema.safeParse({ selector: "#card", maxDepth: 4 }).success).toBe(false);
+    expect(InspectElementRequestSchema.safeParse({ selector: "#card", maxChildren: 0 }).success).toBe(false);
+    expect(InspectElementRequestSchema.safeParse({ selector: "#card", maxChildren: 101 }).success).toBe(false);
+    expect(InspectElementRequestSchema.safeParse({ selector: "#card", unexpected: true }).success).toBe(false);
+    expect(BrowserActionSchema.safeParse({ action: "inspect_element", selector: "#card", maxDepth: 3, maxChildren: 100 }).success).toBe(true);
+    expect(BrowserActionSchema.safeParse({ action: "inspect_element" }).success).toBe(false);
+    expect(BrowserActionSchema.safeParse({ action: "find_elements", selector: "#card", maxDepth: 1 }).success).toBe(false);
   });
 
   it("accepts bounded network journal search filters", () => {

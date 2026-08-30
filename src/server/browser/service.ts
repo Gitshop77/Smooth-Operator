@@ -102,6 +102,28 @@ interface ScreenshotCapture {
   metadata: ScreenshotMetadata;
 }
 
+interface RawInspectedChild {
+  tag: string;
+  rect: { x: number; y: number; width: number; height: number };
+  text: string;
+  textTruncated: boolean;
+  attributes: Record<string, string>;
+  omittedAttributes: number;
+  children: RawInspectedChild[];
+  childrenTruncated: boolean;
+  omittedChildren: number;
+}
+
+interface RawInspectedElement extends RawInspectedChild {
+  computedStyles: Record<string, string>;
+  pseudoElements: {
+    before: { content: string; styles: Record<string, string> };
+    after: { content: string; styles: Record<string, string> };
+  };
+  animations: Record<string, string>;
+  truncated: boolean;
+}
+
 interface ClickDescriptor {
   tag: string;
   type: string;
@@ -287,6 +309,17 @@ const POPUP_POST_CLICK_SETTLE_TIMEOUT_MS = 300;
 const MAX_DOM_TRAVERSAL_NODES = 20_000;
 const MAX_TEXT_SCAN_CHARS = 500_000;
 const MAX_MARKUP_EVIDENCE_CHARS = 120_000;
+const MAX_INSPECT_NODES = 512;
+const MAX_INSPECT_STRING_CHARS = 500;
+const SAFE_ELEMENT_ATTRIBUTE_NAMES = [
+  "id", "class", "role", "type", "name", "placeholder", "title", "tabindex", "style",
+  "fill", "stroke", "x", "y", "x1", "x2", "y1", "y2", "r", "cx", "cy", "width", "height",
+  "points", "transform", "font-size",
+] as const;
+const SAFE_ELEMENT_DATA_ATTRIBUTE_NAMES = [
+  "data-color", "data-index", "data-sides", "data-result", "data-key", "data-type", "data-item",
+  "data-id", "data-start", "data-end", "data-duration", "data-output", "data-value", "data-position", "data-price",
+] as const;
 const CHALLENGE_AI_GUIDANCE = "Use normal browser click, input, scroll, or key tools on the visible challenge controls, then call solve_challenge again to verify that the challenge is cleared.";
 const CHALLENGE_DEFAULT_MAX_ATTEMPTS = 32;
 const CHALLENGE_MAX_ATTEMPTS = 100;
@@ -347,7 +380,7 @@ const DOM_MUTATING_ACTIONS = new Set<BrowserAction["action"]>([
 ]);
 const PARALLEL_READ_ACTIONS = new Set<BrowserAction["action"]>([
   "wait", "wait_for_element", "wait_for_text", "wait_for_url", "wait_for_network_idle",
-  "get_network_log", "get_console_log", "extract", "get_html", "dropdown_options", "page_next", "search_page", "find_elements", "list_frames", "accessibility_snapshot", "get_computed_style", "get_page_info", "get_cookies", "get_storage", "list_downloads",
+  "get_network_log", "get_console_log", "extract", "get_html", "dropdown_options", "page_next", "search_page", "find_elements", "inspect_element", "list_frames", "accessibility_snapshot", "get_computed_style", "get_page_info", "get_cookies", "get_storage", "list_downloads",
   "search_network_log",
 ]);
 
@@ -2486,10 +2519,270 @@ export class BrowserService {
         }, query, { maxNodes: MAX_DOM_TRAVERSAL_NODES, maxChars: MAX_TEXT_SCAN_CHARS });
         return { query, matches: matches.matches.map((match) => wrapUntrustedText("page_match", redactSecretPlaceholders(match), 500)), totalMatches: matches.totalMatches, matchesTruncated: matches.totalMatches > matches.matches.length || matches.scanTruncated };
       }
+      case "inspect_element": {
+        const selector = await this.selectorFor(state, targetForAction(action, "target"), action.frameId, frame);
+        const maxDepth = Number.isSafeInteger(action.maxDepth) ? Math.max(0, Math.min(3, action.maxDepth as number)) : 1;
+        const maxChildren = Number.isSafeInteger(action.maxChildren) ? Math.max(1, Math.min(100, action.maxChildren as number)) : 20;
+        const inspected = await frame.$eval(selector, (element, options: {
+          maxDepth: number;
+          maxChildren: number;
+          maxNodes: number;
+          maxStringChars: number;
+          safeAttributeNames: string[];
+          safeDataAttributeNames: string[];
+        }) => {
+          const excludedTags = new Set(["script", "style", "template", "noscript"]);
+          const safeAttributes = new Set(options.safeAttributeNames);
+          const safeDataAttributes = new Set(options.safeDataAttributeNames);
+          const styleNames = [
+            "display", "visibility", "position", "color", "backgroundColor", "width", "height", "zIndex",
+            "fontFamily", "fontSize", "fontWeight", "lineHeight", "opacity", "transform",
+          ];
+          const animationNames = [
+            "animationName", "animationDuration", "animationTimingFunction", "animationDelay",
+            "animationIterationCount", "animationDirection", "animationFillMode", "animationPlayState",
+            "transitionProperty", "transitionDuration", "transitionTimingFunction", "transitionDelay", "transform",
+          ];
+          let visitedNodes = 0;
+
+          const boundedString = (value: unknown, limit = options.maxStringChars): string => (
+            typeof value === "string" ? value.slice(0, limit) : ""
+          );
+          const boundedRect = (target: Element): { x: number; y: number; width: number; height: number } => {
+            const rect = target.getBoundingClientRect();
+            const bound = (value: number, minimum = -10_000_000): number => (
+              Number.isFinite(value) ? Math.max(minimum, Math.min(10_000_000, Math.round(value))) : 0
+            );
+            return { x: bound(rect.x), y: bound(rect.y), width: bound(rect.width, 0), height: bound(rect.height, 0) };
+          };
+          const collectAttributes = (target: Element): { attributes: Record<string, string>; omittedAttributes: number } => {
+            const attributes: Record<string, string> = {};
+            let omittedAttributes = 0;
+            const attributeCount = target.attributes.length;
+            const inspectedAttributes = Math.min(attributeCount, 40);
+            for (let index = 0; index < inspectedAttributes; index += 1) {
+              const attribute = target.attributes[index];
+              if (!attribute) continue;
+              const name = attribute.name.toLowerCase();
+              const allowed = safeAttributes.has(name) || safeDataAttributes.has(name) || /^aria-[a-z0-9_-]+$/i.test(name);
+              if (!allowed) {
+                omittedAttributes += 1;
+                continue;
+              }
+              const value = boundedString(attribute.value, 200);
+              attributes[name.slice(0, 100)] = value;
+              if (value.length < attribute.value.length) omittedAttributes += 1;
+            }
+            omittedAttributes += Math.max(0, attributeCount - inspectedAttributes);
+            return { attributes, omittedAttributes };
+          };
+          const readSafeText = (target: Element): { text: string; truncated: boolean } => {
+            const tag = target.tagName.toLowerCase();
+            if (["input", "textarea", "select", "option"].includes(tag)) {
+              return { text: "", truncated: false };
+            }
+            const stack: Node[] = [target];
+            let text = "";
+            let truncated = false;
+            let visited = 0;
+            while (stack.length > 0) {
+              const node = stack.pop();
+              if (!node) break;
+              visited += 1;
+              if (visited > options.maxNodes) {
+                truncated = true;
+                break;
+              }
+              if (node.nodeType === 3) {
+                const raw = node.nodeValue ?? "";
+                const remaining = options.maxStringChars - text.length;
+                if (remaining <= 0) {
+                  truncated = true;
+                  break;
+                }
+                text += raw.slice(0, remaining);
+                if (raw.length > remaining) truncated = true;
+                continue;
+              }
+              if (node.nodeType !== 1) continue;
+              const childElement = node as Element;
+              if (excludedTags.has(childElement.tagName.toLowerCase())) continue;
+              const children = childElement.childNodes;
+              for (let index = children.length - 1; index >= 0; index -= 1) {
+                const child = children[index];
+                if (child) stack.push(child);
+              }
+            }
+            return { text: text.replace(/\s+/g, " ").trim().slice(0, options.maxStringChars), truncated };
+          };
+          const readStyle = (target: Element, pseudo = ""): Record<string, string> => {
+            let style: CSSStyleDeclaration;
+            try {
+              style = getComputedStyle(target, pseudo);
+            } catch {
+              return {};
+            }
+            const output: Record<string, string> = {};
+            for (const name of styleNames) {
+              output[name] = boundedString(style[name as keyof CSSStyleDeclaration]);
+            }
+            return output;
+          };
+          const readPseudo = (target: Element, pseudo: "::before" | "::after") => {
+            let style: CSSStyleDeclaration;
+            try {
+              style = getComputedStyle(target, pseudo);
+            } catch {
+              return { content: "", styles: {} };
+            }
+            const styles: Record<string, string> = {};
+            for (const name of styleNames) {
+              styles[name] = boundedString(style[name as keyof CSSStyleDeclaration]);
+            }
+            return { content: boundedString(style.content), styles };
+          };
+          const readAnimations = (target: Element): Record<string, string> => {
+            let style: CSSStyleDeclaration;
+            try {
+              style = getComputedStyle(target);
+            } catch {
+              return {};
+            }
+            const output: Record<string, string> = {};
+            for (const name of animationNames) {
+              output[name] = boundedString(style[name as keyof CSSStyleDeclaration]);
+            }
+            return output;
+          };
+          const collectChildren = (parent: Element, depth: number): { children: Array<Record<string, unknown>>; childrenTruncated: boolean; omittedChildren: number } => {
+            const children: Array<Record<string, unknown>> = [];
+            let childrenTruncated = false;
+            let omittedChildren = 0;
+            const childElements = Array.from(parent.children);
+            if (depth >= options.maxDepth) {
+              return {
+                children,
+                childrenTruncated: childElements.length > 0,
+                omittedChildren: childElements.length,
+              };
+            }
+            for (let index = 0; index < childElements.length; index += 1) {
+              const child = childElements[index];
+              if (!child) continue;
+              if (excludedTags.has(child.tagName.toLowerCase())) {
+                omittedChildren += 1;
+                continue;
+              }
+              if (children.length >= options.maxChildren) {
+                childrenTruncated = true;
+                omittedChildren += childElements.length - index;
+                break;
+              }
+              if (visitedNodes >= options.maxNodes) {
+                childrenTruncated = true;
+                omittedChildren += childElements.length - index;
+                break;
+              }
+              visitedNodes += 1;
+              const childAttributes = collectAttributes(child);
+              const childText = readSafeText(child);
+              const nested = collectChildren(child, depth + 1);
+              children.push({
+                tag: child.tagName.toLowerCase(),
+                rect: boundedRect(child),
+                text: childText.text,
+                textTruncated: childText.truncated,
+                attributes: childAttributes.attributes,
+                omittedAttributes: childAttributes.omittedAttributes,
+                children: nested.children,
+                childrenTruncated: nested.childrenTruncated,
+                omittedChildren: nested.omittedChildren,
+              });
+              if (nested.childrenTruncated) childrenTruncated = true;
+              omittedChildren += nested.omittedChildren;
+            }
+            return { children, childrenTruncated, omittedChildren };
+          };
+
+          const rootAttributes = collectAttributes(element);
+          const rootText = readSafeText(element);
+          const childResult = collectChildren(element, 0);
+          return {
+            tag: element.tagName.toLowerCase(),
+            rect: boundedRect(element),
+            text: rootText.text,
+            textTruncated: rootText.truncated,
+            attributes: rootAttributes.attributes,
+            omittedAttributes: rootAttributes.omittedAttributes,
+            computedStyles: readStyle(element),
+            pseudoElements: {
+              before: readPseudo(element, "::before"),
+              after: readPseudo(element, "::after"),
+            },
+            animations: readAnimations(element),
+            children: childResult.children,
+            childrenTruncated: childResult.childrenTruncated,
+            omittedChildren: childResult.omittedChildren,
+            truncated: rootText.truncated || rootAttributes.omittedAttributes > 0 || childResult.childrenTruncated || childResult.omittedChildren > 0,
+          };
+        }, {
+          maxDepth,
+          maxChildren,
+          maxNodes: MAX_INSPECT_NODES,
+          maxStringChars: MAX_INSPECT_STRING_CHARS,
+          safeAttributeNames: [...SAFE_ELEMENT_ATTRIBUTE_NAMES],
+          safeDataAttributeNames: [...SAFE_ELEMENT_DATA_ATTRIBUTE_NAMES],
+        }) as unknown as RawInspectedElement;
+        const wrap = (value: string, kind: string, max = MAX_INSPECT_STRING_CHARS): string => wrapUntrustedText(kind, redactSecretPlaceholders(value), max);
+        const wrapAttributes = (attributes: Record<string, string>): Record<string, string> => Object.fromEntries(
+          // Attribute names are restricted to the fixed allowlist or the
+          // bounded aria-* grammar in the page callback. Keep those names as
+          // keys for ergonomic parity with find_elements; values are still
+          // untrusted and wrapped below.
+          Object.entries(attributes).map(([name, value]) => [name, wrap(value, "inspect_attribute", 200)]),
+        );
+        const wrapChild = (child: RawInspectedChild): Record<string, unknown> => ({
+          tag: wrap(child.tag, "inspect_child_tag", 100),
+          rect: child.rect,
+          text: wrap(child.text, "inspect_child_text"),
+          textTruncated: child.textTruncated,
+          attributes: wrapAttributes(child.attributes),
+          omittedAttributes: child.omittedAttributes,
+          children: child.children.map(wrapChild),
+          childrenTruncated: child.childrenTruncated,
+          omittedChildren: child.omittedChildren,
+        });
+        const wrapStyleMap = (styles: Record<string, string>): Record<string, string> => Object.fromEntries(
+          Object.entries(styles).map(([name, value]) => [name, wrap(value, "inspect_style")]),
+        );
+        const wrapPseudo = (pseudo: { content: string; styles: Record<string, string> }) => ({
+          content: wrap(pseudo.content, "inspect_pseudo_content"),
+          styles: wrapStyleMap(pseudo.styles),
+        });
+        return {
+          tag: wrap(inspected.tag, "inspect_tag", 100),
+          selector: wrap(selector, "inspect_selector"),
+          rect: inspected.rect,
+          text: wrap(inspected.text, "inspect_text"),
+          textTruncated: inspected.textTruncated,
+          attributes: wrapAttributes(inspected.attributes),
+          omittedAttributes: inspected.omittedAttributes,
+          computedStyles: wrapStyleMap(inspected.computedStyles),
+          pseudoElements: {
+            before: wrapPseudo(inspected.pseudoElements.before),
+            after: wrapPseudo(inspected.pseudoElements.after),
+          },
+          animations: wrapStyleMap(inspected.animations),
+          children: inspected.children.map(wrapChild),
+          childrenTruncated: inspected.childrenTruncated,
+          omittedChildren: inspected.omittedChildren,
+          truncated: inspected.truncated,
+        };
+      }
       case "find_elements": {
         const selector = targetForAction(action, "selector");
         const safeSelector = await this.selectorFor(state, selector, action.frameId, frame);
-        function collectFindElements(matches: Element[], fallbackSelector: string): Array<{ tag: string; selector: string; rect: { x: number; y: number; width: number; height: number }; text: string; attributes: Record<string, string>; omittedAttributes: number }> {
+        function collectFindElements(matches: Element[], fallbackSelector: string, safeAttributeNames: string[], safeDataAttributeNames: string[]): Array<{ tag: string; selector: string; rect: { x: number; y: number; width: number; height: number }; text: string; attributes: Record<string, string>; omittedAttributes: number }> {
           const boundedText = (root: Element): string => {
             const maybeChildNodes = (root as unknown as { childNodes?: unknown }).childNodes;
             if (!maybeChildNodes) {
@@ -2570,8 +2863,8 @@ export class BrowserService {
           // These attributes describe bounded, visible DOM geometry/state and
           // are useful for agents operating SVG/canvas-adjacent widgets. They
           // are still wrapped, truncated, and never treated as executable.
-          const safeAttributes = new Set(["id", "class", "role", "type", "name", "placeholder", "title", "tabindex", "style", "fill", "stroke", "x", "y", "x1", "x2", "y1", "y2", "r", "cx", "cy", "width", "height", "points", "transform", "font-size"]);
-          const safeDataAttributes = new Set(["data-color", "data-index", "data-sides", "data-result", "data-key", "data-type", "data-item", "data-id", "data-start", "data-end", "data-duration", "data-output", "data-value", "data-position", "data-price"]);
+          const safeAttributes = new Set(safeAttributeNames);
+          const safeDataAttributes = new Set(safeDataAttributeNames);
           const attributeCount = element.attributes.length;
           const inspectedAttributes = Math.min(attributeCount, 40);
           for (let index = 0; index < inspectedAttributes; index += 1) {
@@ -2597,7 +2890,7 @@ export class BrowserService {
           };
           });
         }
-        const elements = await frame.$$eval(safeSelector, collectFindElements, safeSelector);
+        const elements = await frame.$$eval(safeSelector, collectFindElements, safeSelector, [...SAFE_ELEMENT_ATTRIBUTE_NAMES], [...SAFE_ELEMENT_DATA_ATTRIBUTE_NAMES]);
         return elements.map((element) => ({
           tag: element.tag,
           selector: wrapUntrustedText("element_selector", redactSecretPlaceholders(element.selector), 500),

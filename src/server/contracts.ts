@@ -73,6 +73,7 @@ const BrowserActionNames = [
   "page_next",
   "search_page",
   "find_elements",
+  "inspect_element",
   "list_interactive",
   "list_frames",
   "accessibility_snapshot",
@@ -161,6 +162,8 @@ const BrowserActionFieldsSchema = z.object({
   includeSnapshot: z.boolean().optional(),
   maxChars: z.number().int().min(100).max(MCP_PAGE_TEXT_MAX_CHARS).optional(),
   maxNodes: z.number().int().min(1).max(2_000).optional(),
+  maxDepth: z.number().int().min(0).max(3).optional(),
+  maxChildren: z.number().int().min(1).max(100).optional(),
   interestingOnly: z.boolean().optional(),
   maxBytes: z.number().int().min(100_000).max(20_000_000).optional(),
   format: z.enum(["png", "jpeg"]).optional(),
@@ -309,6 +312,12 @@ export const BrowserActionSchema = BrowserActionFieldsSchema.extend({ action: Ac
       context.addIssue({ code: "custom", message: "resourceTypes is only valid for resource blocking." });
     }
   }
+  if (input.action !== "inspect_element" && input.maxDepth !== undefined) {
+    context.addIssue({ code: "custom", message: "maxDepth is only valid for inspect_element." });
+  }
+  if (input.action !== "inspect_element" && input.maxChildren !== undefined) {
+    context.addIssue({ code: "custom", message: "maxChildren is only valid for inspect_element." });
+  }
   if (["navigate", "set_cookie"].includes(input.action) && input.url !== undefined && !isHttpUrl(input.url)) {
     context.addIssue({ code: "custom", message: "Navigation and cookie URLs must be absolute HTTP(S) URLs." });
   }
@@ -367,6 +376,7 @@ export const BrowserActionSchema = BrowserActionFieldsSchema.extend({ action: Ac
     case "wait_for_element":
     case "dropdown_options":
     case "find_elements":
+    case "inspect_element":
     case "get_computed_style":
     case "hover":
     case "press_and_hold":
@@ -649,6 +659,21 @@ export const TargetRequestSchema = TargetFormSchema.superRefine((input, context)
   }
 });
 export const SelectorRequestSchema = z.object({ selector: BoundedString(2_000), ...PageInput }).strict();
+const InspectElementTargetFieldsSchema = z.object({
+  target: BoundedString(2_000).optional(),
+  ref: z.string().trim().min(1).max(200).regex(/^(?:ref:)?e[1-9]\d*$/, "ref must be an element reference such as e5.").optional(),
+  selector: BoundedString(2_000).optional(),
+  index: z.number().int().min(0).max(1_000).optional(),
+  maxDepth: z.number().int().min(0).max(3).optional(),
+  maxChildren: z.number().int().min(1).max(100).optional(),
+  ...PageInput,
+}).strict();
+export const InspectElementRequestSchema = InspectElementTargetFieldsSchema.superRefine((input, context) => {
+  const targetCount = [input.target, input.ref, input.selector, input.index].filter((value) => value !== undefined).length;
+  if (targetCount !== 1) {
+    context.addIssue({ code: "custom", message: "Provide exactly one of target, ref, selector, or index." });
+  }
+});
 export const WaitRequestSchema = z.object({ milliseconds: z.number().int().min(0).max(120_000).default(500), ...PageInput }).strict();
 export const WaitForTextRequestSchema = z.object({ text: BoundedString(20_000), timeoutMs: z.number().int().min(100).max(120_000).optional(), ...PageInput }).strict();
 export const WaitForUrlRequestSchema = z.object({ url: BoundedString(8_000), timeoutMs: z.number().int().min(100).max(120_000).optional(), ...PageInput }).strict();

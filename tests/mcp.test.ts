@@ -28,6 +28,7 @@ const EXPECTED_READ_ONLY_TOOLS = new Set([
   "browser_page_next",
   "browser_search_page",
   "browser_find_elements",
+  "browser_inspect_element",
   "browser_interactive",
   "browser_frames",
   "browser_accessibility_snapshot",
@@ -66,7 +67,7 @@ describe("native MCP registry", () => {
     const resourceTemplates = await client.listResourceTemplates();
     const prompts = await client.listPrompts();
 
-    expect(tools.tools).toHaveLength(63);
+    expect(tools.tools).toHaveLength(64);
     expect(resources.resources).toHaveLength(6);
     expect(resourceTemplates.resourceTemplates).toHaveLength(1);
     expect(prompts.prompts).toHaveLength(4);
@@ -242,7 +243,7 @@ describe("native MCP registry", () => {
       ["browser_upload", { selector: "input[type=file]", filePath: "/tmp/smooth-operator-test/file.txt" }],
       ["browser_screenshot", {}], ["browser_pdf", { outputPath: "/tmp/smooth-operator-test/page.pdf" }], ["browser_downloads", {}],
       ["browser_dropdown_options", { selector: "select" }], ["browser_page_next", {}], ["browser_search_page", { query: "x" }],
-      ["browser_find_elements", { selector: "button" }], ["browser_interactive", {}], ["browser_computed_style", { selector: "body" }],
+      ["browser_find_elements", { selector: "button" }], ["browser_inspect_element", { selector: "button", maxDepth: 1, maxChildren: 10 }], ["browser_interactive", {}], ["browser_computed_style", { selector: "body" }],
       ["browser_frames", {}], ["browser_accessibility_snapshot", {}],
       ["browser_page_info", {}], ["browser_hover", { target: "#x" }], ["browser_move", { coordinateX: 1, coordinateY: 1 }], ["browser_press_and_hold", { target: "#x" }],
       ["browser_press_and_hold", { target: "#x", durationMs: 10 }],
