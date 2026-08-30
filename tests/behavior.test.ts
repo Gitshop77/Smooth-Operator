@@ -74,6 +74,12 @@ describe("randomRange", () => {
   it("returns the midpoint when rand() is 0.5", () => {
     expect(randomRange(10, 20, () => 0.5)).toBe(15);
   });
+
+  it("bounds invalid random samples to a deterministic delay", () => {
+    expect(randomRange(10, 20, () => Number.NaN)).toBe(10);
+    expect(randomRange(10, 20, () => -1)).toBe(10);
+    expect(randomRange(10, 20, () => 2)).toBe(20);
+  });
 });
 
 describe("thinkTime", () => {
@@ -187,5 +193,21 @@ describe("humanType", () => {
     expect(kb.down).toHaveBeenCalledWith("Space");
     expect(kb.up).toHaveBeenCalledWith("Space");
     expect(kb.calls.map((c) => c.action)).toEqual(["type", "down", "up", "type"]);
+  });
+
+  it("stops before the next key when cancellation arrives", async () => {
+    const controller = new AbortController();
+    const kb = fakeKeyboard();
+    kb.type.mockImplementationOnce(() => controller.abort());
+    const page = { keyboard: kb } as unknown as Page;
+
+    await expect(humanType(page, "hi", {
+      minDelayMs: 10,
+      maxDelayMs: 10,
+      thinkPauseChance: 0,
+      rng: () => 0.5,
+      signal: controller.signal,
+    })).rejects.toThrow(/aborted/i);
+    expect(kb.type).toHaveBeenCalledTimes(1);
   });
 });

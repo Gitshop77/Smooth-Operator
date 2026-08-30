@@ -4966,7 +4966,9 @@ export class BrowserService {
       // fail the click itself, so keep it defensive and swallowed.
       await humanMouseMove(state.page, 0, 0, centerX, centerY, 80);
     } catch {
-      // Ignore: fall through to the normal click primitive.
+      throwIfAborted(signal);
+      // Ignore non-cancellation move failures and fall through to the normal
+      // click primitive.
     }
   }
 
@@ -5552,7 +5554,7 @@ export class BrowserService {
       if (!nativeControlValueSet) {
         throwIfAborted(signal);
         if (this.stealthSettings().behaviorEnabled) {
-          await humanType(state.page, text);
+          await humanType(state.page, text, { signal });
         } else {
           await state.page.keyboard.type(text);
         }

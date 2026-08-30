@@ -48,9 +48,11 @@ export interface TypeOptions {
   thinkPauseMaxMs?: number;
   /** Random source; defaults to `Math.random`. */
   rng?: () => number;
+  /** Abort the typing loop before another key or delay is emitted. */
+  signal?: AbortSignal;
 }
 
-const DEFAULT_TYPE: Required<Omit<TypeOptions, "rng">> & { rng: () => number } = {
+const DEFAULT_TYPE: Required<Omit<TypeOptions, "rng" | "signal">> & { rng: () => number } = {
   // Keep interactions recognizably human without imposing multi-second
   // waits on every short field. Callers can still inject deterministic
   // timings and an RNG in tests.
@@ -69,7 +71,9 @@ const DEFAULT_SCROLL: Required<ScrollOptions> = {
 
 /** Uniform sample in `[min, max)` from an injected random source. */
 export function randomRange(min: number, max: number, rand: () => number = Math.random): number {
-  return min + rand() * (max - min);
+  const sample = rand();
+  const boundedSample = Number.isFinite(sample) ? Math.min(1, Math.max(0, sample)) : 0;
+  return min + boundedSample * (max - min);
 }
 
 /** Resolve after a randomized delay within `[minMs, maxMs]`. */
@@ -79,9 +83,27 @@ export function thinkTime(minMs = 20, maxMs = 120, rand: () => number = Math.ran
   });
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, Math.max(0, ms));
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) {
+    return Promise.reject(new Error("Operation aborted"));
+  }
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => finish(resolve), Math.max(0, ms));
+    const onAbort = (): void => finish(() => reject(new Error("Operation aborted")));
+    const finish = (callback: () => void): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      callback();
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) {
+      onAbort();
+    }
   });
 }
 
@@ -120,15 +142,18 @@ export async function humanType(page: Page, text: string, options: TypeOptions =
   const keyboard = page.keyboard;
 
   for (const char of text) {
+    if (cfg.signal?.aborted) {
+      throw new Error("Operation aborted");
+    }
     if (char === " ") {
       await keyboard.down("Space");
       await keyboard.up("Space");
     } else {
       await keyboard.type(char);
     }
-    await sleep(randomRange(cfg.minDelayMs, cfg.maxDelayMs, cfg.rng));
+    await sleep(randomRange(cfg.minDelayMs, cfg.maxDelayMs, cfg.rng), cfg.signal);
     if (cfg.rng() < cfg.thinkPauseChance) {
-      await sleep(randomRange(cfg.thinkPauseMinMs, cfg.thinkPauseMaxMs, cfg.rng));
+      await sleep(randomRange(cfg.thinkPauseMinMs, cfg.thinkPauseMaxMs, cfg.rng), cfg.signal);
     }
   }
 }

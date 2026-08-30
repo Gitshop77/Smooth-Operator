@@ -228,7 +228,7 @@ function truncateUtf8(value: string, maxBytes: number): string {
   while (low < high) {
     const midpoint = Math.ceil((low + high) / 2);
     const candidate = decoder.decode(bytes.slice(0, midpoint));
-    if (UTF8_ENCODER.encode(candidate).byteLength <= maxBytes) {
+    if (UTF8_ENCODER.encode(candidate).byteLength <= boundedMaxBytes) {
       low = midpoint;
     } else {
       high = midpoint - 1;
