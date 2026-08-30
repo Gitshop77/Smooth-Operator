@@ -7307,11 +7307,7 @@ async function probeDevToolsEndpoint(browserURL: string, timeoutMs: number): Pro
 
 async function readBoundedDevToolsResponse(response: Response, maxBytes: number): Promise<string> {
   if (!response.body) {
-    const text = await response.text();
-    if (Buffer.byteLength(text, "utf8") > maxBytes) {
-      throw new Error("DevTools endpoint response exceeded the safety limit.");
-    }
-    return text;
+    throw new Error("DevTools endpoint returned an empty response body.");
   }
 
   const reader = response.body.getReader();
