@@ -593,6 +593,44 @@ describe("native MCP registry", () => {
     }
   });
 
+  it("keeps network pagination metadata consistent with the MCP entry limit", async () => {
+    const runtime = await ServerRuntime.create(testConfig());
+    vi.spyOn(runtime, "run").mockResolvedValue({
+      entries: Array.from({ length: 50 }, (_, index) => ({ requestId: `request-${index}`, url: `https://example.test/${index}` })),
+      offset: 0,
+      limit: 50,
+      total: 50,
+      returnedCount: 50,
+      omittedCount: 0,
+      hasMore: false,
+      retainedCount: 50,
+      capacity: 500,
+      evictedCount: 0,
+      capacityReached: false,
+    });
+    const server = createMcpServer(runtime);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "network-page-bound-test", version: "1.0.0" });
+    try {
+      await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+      const result = await client.callTool({ name: "browser_search_network_log", arguments: { limit: 50 } });
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        returnedCount: 20,
+        omittedCount: 30,
+        omittedEntries: 30,
+        entriesTruncated: true,
+        hasMore: true,
+        mcpOutputTruncated: true,
+      });
+      expect((result.structuredContent as { entries: unknown[] }).entries).toHaveLength(20);
+    } finally {
+      await client.close().catch(() => undefined);
+      await server.close().catch(() => undefined);
+      await runtime.close();
+    }
+  });
+
   it("preserves small batch results and bounds only the oversized tail", async () => {
     const runtime = await ServerRuntime.create(testConfig());
     const runBatch = vi.spyOn(runtime, "runBatch").mockResolvedValue({ results: Array.from({ length: 50 }, (_, index) => ({ index, ok: true })) });

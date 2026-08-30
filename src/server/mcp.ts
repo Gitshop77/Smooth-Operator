@@ -986,6 +986,15 @@ function boundMcpOutput(value: unknown, options: McpOutputOptions = {}): unknown
         if (typeof output.warning !== "string") {
           output.warning = "Some search results were omitted by the MCP output limit; use a narrower request or a paginated tool.";
         }
+      } else if (key === "entries") {
+        output.hasMore = true;
+        if (typeof output.returnedCount === "number" && Number.isFinite(output.returnedCount)) {
+          output.returnedCount = Math.min(Math.max(0, Math.trunc(output.returnedCount)), limit);
+        }
+        const previousOmittedCount = typeof output.omittedCount === "number" && Number.isSafeInteger(output.omittedCount)
+          ? Math.max(0, output.omittedCount as number)
+          : 0;
+        output.omittedCount = previousOmittedCount + omitted;
       }
       markOutputTruncated();
     }
