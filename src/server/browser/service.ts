@@ -332,6 +332,8 @@ const NAVIGATION_CLICK_SETTLE_TIMEOUT_MS = 50;
 const NAVIGATION_CLICK_EVENT_TIMEOUT_MS = 250;
 const NAVIGATION_CLICK_READY_TIMEOUT_MS = 250;
 const SHUTDOWN_CONNECTION_SETTLE_TIMEOUT_MS = 1_000;
+const MIN_IDLE_SWEEP_INTERVAL_MS = 250;
+const MAX_IDLE_SWEEP_INTERVAL_MS = 60_000;
 const MAX_DEVTOOLS_PROBE_RESPONSE_BYTES = 64 * 1024;
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
 const MAX_UPLOAD_TOTAL_BYTES = 100 * 1024 * 1024;
@@ -438,12 +440,122 @@ export class BrowserService {
   private readonly benchmarkCounters: BenchmarkCounters | undefined = process.env.SMOOTH_OPERATOR_BENCHMARK_COUNTERS === "true"
     ? { browserOperations: 0, pageLookups: 0, pageEnumerations: 0, pageEvaluations: 0, cdpCommands: 0 }
     : undefined;
+  private idleSweepTimer: ReturnType<typeof setInterval> | undefined;
+  private idleSweepPromise: Promise<void> | undefined;
+  private idleSweepStopped = false;
   constructor(
     private readonly config: ServerConfig,
     private readonly policy: SecurityPolicy,
     private readonly logger: Logger,
     private readonly dependencies: BrowserServiceDependencies = {},
-  ) {}
+  ) {
+    this.startIdleSweep();
+  }
+
+  private startIdleSweep(): void {
+    const idleTimeoutMs = this.config.browser.idleTimeoutMs;
+    if (this.config.browser.mode === "disabled" || idleTimeoutMs <= 0) {
+      return;
+    }
+    const intervalMs = Math.min(
+      MAX_IDLE_SWEEP_INTERVAL_MS,
+      Math.max(MIN_IDLE_SWEEP_INTERVAL_MS, Math.floor(idleTimeoutMs / 2)),
+    );
+    const timer = setInterval(() => this.scheduleIdleSweep(), intervalMs);
+    timer.unref?.();
+    this.idleSweepTimer = timer;
+  }
+
+  private stopIdleSweep(): void {
+    this.idleSweepStopped = true;
+    if (this.idleSweepTimer) {
+      clearInterval(this.idleSweepTimer);
+      this.idleSweepTimer = undefined;
+    }
+  }
+
+  private scheduleIdleSweep(): void {
+    if (this.idleSweepStopped || this.idleSweepPromise || !this.browser || this.browser.connected === false) {
+      return;
+    }
+    // Do not add a maintenance operation behind real work. The exclusive
+    // lane rechecks these conditions atomically below for races after this
+    // fast path, while this check keeps an idle timer from building queue
+    // pressure during a busy workflow.
+    if (this.queuedOperations > 0 || this.activeOperationControllers.size > 0) {
+      return;
+    }
+    if (this.connectionPromise || this.connectionSettlementPromise || this.browserClosePromise
+      || this.interruptedBrowserShutdown || this.recoveryPromise || this.failedBrowserShutdown
+      || this.browserShutdownFailure) {
+      return;
+    }
+    const observedActivityAt = this.lastActivityAt;
+    const intervalMs = this.idleSweepIntervalMs();
+    const sweep = this.withOperationLock(
+      undefined,
+      (signal) => this.sweepIdleBrowser(observedActivityAt, signal),
+      intervalMs,
+      intervalMs,
+      "exclusive",
+      false,
+    );
+    this.idleSweepPromise = sweep;
+    void sweep.then(
+      () => {
+        if (this.idleSweepPromise === sweep) {
+          this.idleSweepPromise = undefined;
+        }
+      },
+      (error: unknown) => {
+        if (this.idleSweepPromise === sweep) {
+          this.idleSweepPromise = undefined;
+        }
+        this.logger.debug("Idle browser sweep did not complete", { error: safeErrorDiagnostic(error) });
+      },
+    );
+  }
+
+  private idleSweepIntervalMs(): number {
+    const idleTimeoutMs = this.config.browser.idleTimeoutMs;
+    return Math.min(
+      MAX_IDLE_SWEEP_INTERVAL_MS,
+      Math.max(MIN_IDLE_SWEEP_INTERVAL_MS, Math.floor(idleTimeoutMs / 2)),
+    );
+  }
+
+  private async sweepIdleBrowser(observedActivityAt: number, signal?: AbortSignal): Promise<void> {
+    throwIfAborted(signal);
+    if (this.idleSweepStopped || this.shuttingDown || this.config.browser.idleTimeoutMs <= 0) {
+      return;
+    }
+    const browser = this.browser;
+    if (!browser || browser.connected === false) {
+      return;
+    }
+    // The sweep itself is the only operation in the lane at this point. Any
+    // additional queued/active operation means real work arrived while the
+    // sweep was waiting and must win over idle cleanup.
+    if (this.queuedOperations !== 1 || this.activeOperationControllers.size !== 1) {
+      return;
+    }
+    if (this.connectionPromise || this.connectionSettlementPromise || this.browserClosePromise
+      || this.interruptedBrowserShutdown || this.recoveryPromise || this.failedBrowserShutdown
+      || this.browserShutdownFailure) {
+      return;
+    }
+    if ([...this.states.values()].some((state) => !state.disposed && state.dialogs.length > 0)) {
+      return;
+    }
+    if (this.lastActivityAt !== observedActivityAt
+      || Date.now() - this.lastActivityAt < this.config.browser.idleTimeoutMs) {
+      return;
+    }
+    // closeBrowser() deliberately does not touch lastActivityAt. It retains
+    // the managed profile lease and disconnects instead of closing external
+    // browser processes according to ownsBrowser.
+    await this.closeBrowser();
+  }
 
   async close(): Promise<void> {
     if (this.closePromise) {
@@ -467,6 +579,7 @@ export class BrowserService {
     if (this.shuttingDown) {
       return { closed: false, owned: false, succeeded: true };
     }
+    this.stopIdleSweep();
     this.shuttingDown = true;
     this.lifecycleGeneration += 1;
     this.shutdownController.abort();
@@ -482,11 +595,12 @@ export class BrowserService {
     const interruptedSucceeded = interruptedShutdown
       ? (await settleWithTimeout(interruptedShutdown, SHUTDOWN_CONNECTION_SETTLE_TIMEOUT_MS).catch(() => undefined)) === true
       : true;
+    await settleWithTimeout(this.idleSweepPromise, SHUTDOWN_CONNECTION_SETTLE_TIMEOUT_MS).catch(() => undefined);
     const browserResult = await this.closeBrowser();
     return { ...browserResult, succeeded: browserResult.succeeded && connectionSettled && lateConnectionSettled && interruptedSucceeded };
   }
 
-  connectionStatus(): { connected: boolean; owned: boolean; trackedPages: number; queuedOperations: number; currentPageId: string | null; recoveryRequired: boolean; benchmarkCounters?: BenchmarkCounters } {
+  connectionStatus(): { connected: boolean; owned: boolean; trackedPages: number; queuedOperations: number; currentPageId: string | null; recoveryRequired: boolean; idleTimeoutMs: number; benchmarkCounters?: BenchmarkCounters } {
     return {
       connected: Boolean(this.browser),
       owned: this.ownsBrowser,
@@ -494,13 +608,14 @@ export class BrowserService {
       queuedOperations: this.queuedOperations,
       currentPageId: this.currentPageId ?? null,
       recoveryRequired: this.recoveryRequired,
+      idleTimeoutMs: this.config.browser.idleTimeoutMs,
       ...(this.benchmarkCounters ? { benchmarkCounters: { ...this.benchmarkCounters } } : {}),
     };
   }
 
-  sessionSummary(): { session_id: string; active: boolean; owned: boolean; trackedPages: number; queuedOperations: number; currentPageId: string | null; recoveryRequired: boolean; lastActivityAt: string } {
+  sessionSummary(): { session_id: string; active: boolean; owned: boolean; trackedPages: number; queuedOperations: number; currentPageId: string | null; recoveryRequired: boolean; idleTimeoutMs: number; lastActivityAt: string } {
     const status = this.connectionStatus();
-    return { session_id: this.sessionId, active: status.connected, owned: status.owned, trackedPages: status.trackedPages, queuedOperations: status.queuedOperations, currentPageId: status.currentPageId, recoveryRequired: this.recoveryRequired, lastActivityAt: new Date(this.lastActivityAt).toISOString() };
+    return { session_id: this.sessionId, active: status.connected, owned: status.owned, trackedPages: status.trackedPages, queuedOperations: status.queuedOperations, currentPageId: status.currentPageId, recoveryRequired: this.recoveryRequired, idleTimeoutMs: this.config.browser.idleTimeoutMs, lastActivityAt: new Date(this.lastActivityAt).toISOString() };
   }
 
   async doctor(): Promise<Record<string, unknown>> {
@@ -6854,7 +6969,7 @@ export class BrowserService {
     return recovery;
   }
 
-  private async withOperationLock<T>(signal: AbortSignal | undefined, operation: (operationSignal: AbortSignal) => Promise<T>, queueTimeoutMs = this.config.browser.actionTimeoutMs, operationTimeoutMs?: number, mode: "exclusive" | "read" = "exclusive"): Promise<T> {
+  private async withOperationLock<T>(signal: AbortSignal | undefined, operation: (operationSignal: AbortSignal) => Promise<T>, queueTimeoutMs = this.config.browser.actionTimeoutMs, operationTimeoutMs?: number, mode: "exclusive" | "read" = "exclusive", touchActivity = true): Promise<T> {
     if (this.queuedOperations >= MAX_QUEUED_OPERATIONS) {
       throw new AppError("BROWSER_QUEUE_FULL", "The browser action queue is full; wait for an active operation to finish and retry.", { retryable: true, details: { hint: "Wait for the active browser operation to finish, then retry." } });
     }
@@ -6942,7 +7057,9 @@ export class BrowserService {
           }
         }
       }, operationBudgetMs);
-      this.lastActivityAt = Date.now();
+      if (touchActivity) {
+        this.lastActivityAt = Date.now();
+      }
       operationPromise = Promise.resolve().then(() => operation(operationSignal));
       void operationPromise.catch(() => undefined);
       if (abortRequested) {

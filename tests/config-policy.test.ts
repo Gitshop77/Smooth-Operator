@@ -64,6 +64,30 @@ describe("configuration", () => {
     expect(config.browser.viewport).toEqual({ width: 1_280, height: 720 });
   });
 
+  it("defaults idle browser cleanup off and accepts bounded environment values", () => {
+    expect(loadTestConfig([], {}).browser.idleTimeoutMs).toBe(0);
+    expect(loadTestConfig([], { SMOOTH_OPERATOR_BROWSER_IDLE_TIMEOUT_MS: "86400000" }).browser.idleTimeoutMs).toBe(86_400_000);
+    for (const value of ["-1", "86400001"]) {
+      expect(() => loadTestConfig([], { SMOOTH_OPERATOR_BROWSER_IDLE_TIMEOUT_MS: value })).toThrowError(/Configuration failed validation/);
+    }
+  });
+
+  it("loads the JSON browser idle timeout and rejects unsafe bounds", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "smooth-operator-config-idle-"));
+    const configPath = join(directory, "config.json");
+    try {
+      await writeFile(configPath, JSON.stringify({ browser: { idleTimeoutMs: 12_345 } }));
+      await chmod(configPath, 0o600);
+      expect(loadTestConfig(["--config", configPath], {}).browser.idleTimeoutMs).toBe(12_345);
+
+      await writeFile(configPath, JSON.stringify({ browser: { idleTimeoutMs: 86_400_001 } }));
+      await chmod(configPath, 0o600);
+      expect(() => loadTestConfig(["--config", configPath], {})).toThrowError(/schema validation/);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("defaults to full local capabilities while honoring explicit false settings", () => {
     const defaults = loadTestConfig([], {});
     const explicit = loadTestConfig([], {

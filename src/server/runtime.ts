@@ -237,10 +237,11 @@ export class ServerRuntime {
         configured: managedBrowser || (!browserDisabled
           && (usesExecutable ? Boolean(this.config.browser.executablePath) : Boolean(this.config.browser.wsEndpoint || this.config.browser.url))),
         connection: browserDisabled ? "disabled" : managedBrowser ? "managed" : usesExecutable ? "executable" : this.config.browser.wsEndpoint ? "websocket" : "devtools-http",
-        runtime: browserDisabled ? { connected: false, owned: false, trackedPages: 0, queuedOperations: 0, currentPageId: null, recoveryRequired: false } : this.browser.connectionStatus(),
+        runtime: browserDisabled ? { connected: false, owned: false, trackedPages: 0, queuedOperations: 0, currentPageId: null, recoveryRequired: false, idleTimeoutMs: this.config.browser.idleTimeoutMs } : this.browser.connectionStatus(),
         actionTimeoutMs: this.config.browser.actionTimeoutMs,
         connectTimeoutMs: this.config.browser.connectTimeoutMs,
         cdpTimeoutMs: this.config.browser.cdpTimeoutMs,
+        idleTimeoutMs: this.config.browser.idleTimeoutMs,
         maxScreenshotBytes: this.config.browser.maxScreenshotBytes,
         maxHtmlChars: this.config.browser.maxHtmlChars,
       },

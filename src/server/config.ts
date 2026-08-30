@@ -14,6 +14,7 @@ import { canonicalizeAllowedFileRoots } from "./policy";
 
 const TransportSchema = z.enum(["stdio", "http"]);
 const BrowserModeSchema = z.enum(["disabled", "connect", "launch", "managed"]);
+const BrowserIdleTimeoutSchema = z.number().int().min(0).max(86_400_000);
 const ConfigPathSchema = z.string().trim().min(1).max(4_096);
 const DomainPatternSchema = z.string().trim().min(1).max(253).refine(isValidDomainPattern, "Domain patterns must be exact hostnames or *.-prefixed suffixes.");
 const HostPatternSchema = z.string().trim().min(1).max(255).refine(isValidHostPattern, "Host allowlists must contain hostnames or bracketed IPv6 addresses without ports.");
@@ -53,6 +54,7 @@ const RawConfigSchema = z
         cdpTimeoutMs: z.number().int().min(100).max(120_000).optional(),
         maxScreenshotBytes: z.number().int().min(100_000).max(20_000_000).optional(),
         maxHtmlChars: z.number().int().min(1_000).max(500_000).optional(),
+        idleTimeoutMs: BrowserIdleTimeoutSchema.optional(),
       })
       .strict()
       .optional(),
@@ -110,6 +112,7 @@ export interface ServerConfig {
     cdpTimeoutMs: number;
     maxScreenshotBytes: number;
     maxHtmlChars: number;
+    idleTimeoutMs: number;
   };
   security: {
     allowedDomains: string[];
@@ -489,6 +492,9 @@ function validateConfig(config: ServerConfig): ServerConfig {
   if (config.browser.maxHtmlChars < 1_000 || config.browser.maxHtmlChars > 500_000) {
     throw new AppError("CONFIG_INVALID", "Maximum HTML characters must be between 1000 and 500000.");
   }
+  if (!Number.isSafeInteger(config.browser.idleTimeoutMs) || config.browser.idleTimeoutMs < 0 || config.browser.idleTimeoutMs > 86_400_000) {
+    throw new AppError("CONFIG_INVALID", "Browser idle timeout must be between 0ms and 86400000ms.");
+  }
   validateBrowserEndpoint(config.browser.url, ["http:", "https:"], "Browser DevTools URL");
   validateBrowserEndpoint(config.browser.wsEndpoint, ["ws:", "wss:"], "Browser WebSocket endpoint");
   if (config.stealth && config.stealth.profile !== "balanced" && config.stealth.profile !== "max") {
@@ -586,6 +592,7 @@ export function loadServerConfig(args: string[] = [], environment: NodeJS.Proces
       cdpTimeoutMs: parseInteger(environment.SMOOTH_OPERATOR_BROWSER_CDP_TIMEOUT_MS, nestedBrowser.cdpTimeoutMs ?? 30_000),
       maxScreenshotBytes: parseInteger(environment.SMOOTH_OPERATOR_MAX_SCREENSHOT_BYTES, nestedBrowser.maxScreenshotBytes ?? 8_000_000),
       maxHtmlChars: parseInteger(environment.SMOOTH_OPERATOR_MAX_HTML_CHARS, nestedBrowser.maxHtmlChars ?? 200_000),
+      idleTimeoutMs: parseInteger(environment.SMOOTH_OPERATOR_BROWSER_IDLE_TIMEOUT_MS, nestedBrowser.idleTimeoutMs ?? 0),
     },
     security: {
       allowedDomains: normalizeDomainList(parseList(environment.SMOOTH_OPERATOR_ALLOWED_DOMAINS, nestedSecurity.allowedDomains ?? [])),

@@ -16,6 +16,101 @@ import type { Browser, Page } from "puppeteer-core";
 import { testConfig } from "./helpers";
 
 describe("browser service", () => {
+  it("keeps idle cleanup disabled by default and exposes the timeout", async () => {
+    const service = new BrowserService(testConfig(), new SecurityPolicy(testConfig()), new Logger("error", {}, () => undefined));
+    const internal = service as unknown as { idleSweepTimer?: unknown };
+    expect(internal.idleSweepTimer).toBeUndefined();
+    expect(service.connectionStatus().idleTimeoutMs).toBe(0);
+    expect(service.sessionSummary().idleTimeoutMs).toBe(0);
+    await service.close();
+  });
+
+  it("reaps an idle connected browser without refreshing activity or retaining a ref timer", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-30T00:00:00.000Z"));
+    const config = testConfig({ browser: { ...testConfig().browser, mode: "connect", idleTimeoutMs: 1_000 } });
+    const service = new BrowserService(config, new SecurityPolicy(config), new Logger("error", {}, () => undefined));
+    const disconnect = vi.fn(async () => undefined);
+    const browser = { connected: true, disconnect, on: vi.fn() } as unknown as Browser;
+    const internal = service as unknown as { browser?: Browser; ownsBrowser: boolean; lastActivityAt: number; idleSweepTimer?: { hasRef?: () => boolean } };
+    internal.browser = browser;
+    internal.ownsBrowser = false;
+    internal.lastActivityAt = Date.now() - 2_000;
+    const activityBeforeSweep = internal.lastActivityAt;
+
+    try {
+      expect(internal.idleSweepTimer?.hasRef?.()).toBe(false);
+      await vi.advanceTimersByTimeAsync(500);
+      expect(disconnect).toHaveBeenCalledTimes(1);
+      expect(internal.browser).toBeUndefined();
+      expect(internal.lastActivityAt).toBe(activityBeforeSweep);
+    } finally {
+      await service.close();
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not reap while real work or a dialog is active or queued", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-30T00:00:00.000Z"));
+    const config = testConfig({ browser: { ...testConfig().browser, mode: "connect", idleTimeoutMs: 1_000 } });
+    const service = new BrowserService(config, new SecurityPolicy(config), new Logger("error", {}, () => undefined));
+    const disconnect = vi.fn(async () => undefined);
+    const browser = { connected: true, disconnect, on: vi.fn() } as unknown as Browser;
+    const activeController = new AbortController();
+    const internal = service as unknown as {
+      browser?: Browser;
+      lastActivityAt: number;
+      activeOperationControllers: Set<AbortController>;
+      queuedOperations: number;
+      states: Map<string, { disposed: boolean; dialogs: unknown[] }>;
+    };
+    internal.browser = browser;
+    internal.lastActivityAt = Date.now() - 2_000;
+    internal.activeOperationControllers.add(activeController);
+    try {
+      await vi.advanceTimersByTimeAsync(500);
+      expect(disconnect).not.toHaveBeenCalled();
+      internal.activeOperationControllers.delete(activeController);
+      internal.queuedOperations = 1;
+      await vi.advanceTimersByTimeAsync(500);
+      expect(disconnect).not.toHaveBeenCalled();
+      internal.queuedOperations = 0;
+      internal.states.set("page-1", { disposed: false, dialogs: [{}] });
+      await vi.advanceTimersByTimeAsync(500);
+      expect(disconnect).not.toHaveBeenCalled();
+    } finally {
+      internal.states.clear();
+      await service.close();
+      vi.useRealTimers();
+    }
+  });
+
+  it("reconnects on the next request after idle cleanup", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-30T00:00:00.000Z"));
+    const config = testConfig({ browser: { ...testConfig().browser, mode: "connect", idleTimeoutMs: 1_000 } });
+    const first = { connected: true, disconnect: vi.fn(async () => undefined), on: vi.fn() } as unknown as Browser;
+    const second = { connected: true, disconnect: vi.fn(async () => undefined), on: vi.fn() } as unknown as Browser;
+    const connect = vi.fn(async () => second);
+    const configured = new BrowserService(config, new SecurityPolicy(config), new Logger("error", {}, () => undefined), { connect });
+    const configuredInternal = configured as unknown as { browser?: Browser; ownsBrowser: boolean; lastActivityAt: number; ensureBrowser(): Promise<Browser> };
+    configuredInternal.browser = first;
+    configuredInternal.ownsBrowser = false;
+    configuredInternal.lastActivityAt = Date.now() - 2_000;
+
+    try {
+      await vi.advanceTimersByTimeAsync(500);
+      expect(first.disconnect).toHaveBeenCalledTimes(1);
+      expect(configuredInternal.browser).toBeUndefined();
+      await expect(configuredInternal.ensureBrowser()).resolves.toBe(second);
+      expect(connect).toHaveBeenCalledTimes(1);
+    } finally {
+      await configured.close();
+      vi.useRealTimers();
+    }
+  });
+
   it("reattaches a managed browser through a live private DevTools endpoint", async () => {
     const directory = await mkdtemp(join(tmpdir(), "smooth-operator-managed-live-"));
     const config = testConfig({

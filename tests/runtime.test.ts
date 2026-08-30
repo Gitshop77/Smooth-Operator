@@ -2,13 +2,48 @@ import { access, chmod, mkdir, mkdtemp, readdir, rm, stat, symlink, unlink, writ
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
+import type { Browser } from "puppeteer-core";
 import { ServerRuntime } from "@/server/runtime";
 
 import { testConfig } from "./helpers";
 
 describe("runtime lifecycle", () => {
+  it("exposes idle cleanup in capabilities and retains the profile lease after an idle close", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-30T00:00:00.000Z"));
+    const directory = await mkdtemp(join(tmpdir(), "smooth-operator-runtime-idle-"));
+    const profile = join(directory, "browser");
+    const base = testConfig();
+    const config = testConfig({
+      dataDir: directory,
+      browser: { ...base.browser, mode: "launch", executablePath: "/usr/bin/chromium", userDataDir: profile, idleTimeoutMs: 1_000 },
+    });
+    const runtime = await ServerRuntime.create(config);
+    const disconnect = vi.fn(async () => undefined);
+    const browser = { connected: true, disconnect, on: vi.fn() } as unknown as Browser;
+    const internal = runtime.browser as unknown as { browser?: Browser; ownsBrowser: boolean; lastActivityAt: number; idleSweepTimer?: unknown };
+    internal.browser = browser;
+    internal.ownsBrowser = false;
+    internal.lastActivityAt = Date.now() - 2_000;
+    const lockPath = join(profile, ".smooth-operator-profile.lock");
+
+    try {
+      expect(runtime.publicCapabilities()).toMatchObject({ browser: { idleTimeoutMs: 1_000, runtime: { idleTimeoutMs: 1_000 } } });
+      await expect(access(lockPath)).resolves.toBeUndefined();
+      await vi.advanceTimersByTimeAsync(500);
+      expect(disconnect).toHaveBeenCalledTimes(1);
+      await expect(access(lockPath)).resolves.toBeUndefined();
+    } finally {
+      await runtime.close();
+      expect(internal.idleSweepTimer).toBeUndefined();
+      vi.useRealTimers();
+      await expect(access(lockPath)).rejects.toMatchObject({ code: "ENOENT" });
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("reports native feature defaults and effective challenge guarantees", async () => {
     const runtime = await ServerRuntime.create(testConfig());
     try {

@@ -27,6 +27,7 @@ export function testConfig(overrides: Partial<ServerConfig> = {}): ServerConfig 
       cdpTimeoutMs: 30_000,
       maxScreenshotBytes: 8_000_000,
       maxHtmlChars: 200_000,
+      idleTimeoutMs: 0,
     },
     security: {
       allowedDomains: [],
