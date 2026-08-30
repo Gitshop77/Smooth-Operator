@@ -1,6 +1,6 @@
 import { createServer, type Server } from "node:http";
 import type { ChildProcess } from "node:child_process";
-import { access, mkdtemp, rm } from "node:fs/promises";
+import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { once } from "node:events";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -84,12 +84,15 @@ describe("live browser contract", () => {
   let baseUrl = "";
   let dataDir = "";
   let service: BrowserService;
+  let uploadPaths: [string, string];
+  const fixtureRequests: string[] = [];
 
   beforeAll(async () => {
     if (!executablePath) {
       throw new Error("No executable Chrome/Chromium installation was found. Install Chrome or set SMOOTH_OPERATOR_TEST_BROWSER_EXECUTABLE.");
     }
     fixture = createServer((request, response) => {
+      fixtureRequests.push(request.url ?? "");
       if (request.url === "/frame") {
         response.end("<!doctype html><button id=frame-button>Frame action</button>");
         return;
@@ -117,12 +120,33 @@ describe("live browser contract", () => {
         response.end("<!doctype html><title>Checking your browser</title><div class=cf-turnstile>challenge</div>");
         return;
       }
+      if (request.url === "/resources") {
+        response.end(`<!doctype html><title>Resources</title><p id=status>ready</p><link rel=stylesheet href=/allowed.css><img src=/blocked.png><script src=/blocked.js></script>`);
+        return;
+      }
+      if (request.url === "/allowed.css") {
+        response.writeHead(200, { "content-type": "text/css" });
+        response.end("body { color: rgb(1, 2, 3); }");
+        return;
+      }
+      if (request.url === "/blocked.js") {
+        response.writeHead(200, { "content-type": "text/javascript" });
+        response.end("document.querySelector('#status').textContent='script-ran'");
+        return;
+      }
+      if (request.url === "/blocked.png") {
+        response.writeHead(200, { "content-type": "image/png" });
+        response.end(Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9ZlS8AAAAASUVORK5CYII=", "base64"));
+        return;
+      }
       response.end(`<!doctype html>
         <title>Fixture</title>
         <h1>Fixture</h1>
         <button id=action-button onclick="document.querySelector('#status').textContent='clicked'">Action</button>
         <button id=alert-button onclick="alert('hello from fixture')">Alert</button>
         <input id=input value="" />
+        <input id=file-input type=file multiple onchange="document.querySelector('#file-status').textContent=String(this.files.length)" />
+        <p id=file-status>0</p>
         <input id=date-input type=date onchange="document.querySelector('#date-status').textContent=this.value" />
         <p id=date-status></p>
         <p id=status>ready</p>
@@ -140,6 +164,8 @@ describe("live browser contract", () => {
     }
     baseUrl = `http://127.0.0.1:${address.port}`;
     dataDir = await mkdtemp(join(tmpdir(), "smooth-operator-live-"));
+    uploadPaths = [join(dataDir, "first.txt"), join(dataDir, "second.txt")];
+    await Promise.all([writeFile(uploadPaths[0], "first", "utf8"), writeFile(uploadPaths[1], "second", "utf8")]);
     const base = testConfig();
     const config = testConfig({
       dataDir,
@@ -211,6 +237,39 @@ describe("live browser contract", () => {
     expect(foundColorElements[0]?.attributes).toHaveProperty("fill");
     await service.execute({ action: "click", target: "1" });
     expect(await service.execute({ action: "extract", selector: "#status" })).toMatchObject({ text: expect.stringContaining("svg-clicked") });
+    await service.execute({ action: "navigate", url: baseUrl });
+    const inspected = await service.execute({ action: "inspect_element", selector: "#action-button", maxDepth: 1, maxChildren: 10 }) as Record<string, unknown>;
+    expect(inspected).toMatchObject({ tag: expect.stringContaining("button"), computedStyles: expect.any(Object), pseudoElements: expect.any(Object), children: expect.any(Array) });
+    expect(JSON.stringify(inspected)).not.toContain("onclick");
+    expect(JSON.stringify(inspected)).not.toContain("querySelector('#status')");
+
+    await service.execute({ action: "upload_file", selector: "#file-input", filePaths: uploadPaths });
+    expect(await service.execute({ action: "extract", selector: "#file-status" })).toMatchObject({ text: expect.stringContaining("2") });
+
+    await service.execute({ action: "set_cookie", cookieName: "fixture-cookie", cookieValue: "private-value", cookieSameSite: "Lax", url: baseUrl });
+    const scopedCookies = await service.execute({ action: "get_cookies", url: baseUrl }) as Array<Record<string, unknown>>;
+    expect(scopedCookies.some((cookie) => String(cookie.name).includes("fixture-cookie"))).toBe(true);
+    expect(scopedCookies.every((cookie) => !("value" in cookie))).toBe(true);
+    await service.execute({ action: "delete_cookies", cookieName: "fixture-cookie", url: baseUrl });
+    const clearedCookies = await service.execute({ action: "get_cookies", url: baseUrl }) as Array<Record<string, unknown>>;
+    expect(clearedCookies.some((cookie) => String(cookie.name).includes("fixture-cookie"))).toBe(false);
+
+    await service.execute({ action: "enable_network_log" });
+    await service.execute({ action: "clear_network_log" });
+    await service.execute({ action: "resource_blocking", operation: "set", resourceTypes: ["image", "script"] });
+    const requestStart = fixtureRequests.length;
+    await service.execute({ action: "navigate", url: `${baseUrl}/resources` });
+    expect(await service.execute({ action: "extract", selector: "#status" })).toMatchObject({ text: expect.stringContaining("ready") });
+    const resourceRequests = fixtureRequests.slice(requestStart);
+    expect(resourceRequests).toContain("/resources");
+    expect(resourceRequests).toContain("/allowed.css");
+    expect(resourceRequests).not.toContain("/blocked.js");
+    expect(resourceRequests).not.toContain("/blocked.png");
+    const networkSearch = await service.execute({ action: "search_network_log", url: "/resources", limit: 20 }) as { entries?: unknown[]; total?: number };
+    expect(networkSearch.total).toBeGreaterThan(0);
+    expect(networkSearch.entries).toEqual(expect.arrayContaining([expect.objectContaining({ method: "GET", status: 200 })]));
+    await service.execute({ action: "resource_blocking", operation: "clear" });
+
     await service.execute({ action: "navigate", url: baseUrl });
     const jpeg = await service.execute({ action: "screenshot", format: "jpeg", quality: 60, maxBytes: 2_000_000 });
     expect(jpeg).toMatchObject({ mimeType: "image/jpeg", screenshotBase64: expect.any(String) });
