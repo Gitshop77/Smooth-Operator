@@ -24,7 +24,7 @@ git clone https://github.com/Gitshop77/Smooth-Operator.git && cd Smooth-Operator
 
 The npm registry name is `smooth-operator-mcp` (plain `smooth-operator` is an unrelated library).
 
-Wizard (default): exactly 3 prompts — browser profile ownership, browser display, and the Chromium executable. Choices are normalized and validated before persistence. Personal-Chrome mode launches `chrome --remote-debugging-port=9222 --user-data-dir=~/.smooth-operator/personal-chrome`, probes `http://127.0.0.1:9222/json/version` immediately and then every 300ms with bounded response reads (33 attempts within a default 10-second deadline), and derives `browserUrl`; the URL is not a prompt. `--yes` uses defaults: managed, headed, page eval on, native-identity compatibility, and deterministic input. Persists to `~/.smooth-operator/config.json` (0600, owner-only, bounded, symlink-safe, and backed up). Bare `smooth-operator install` prompts for the harness on a TTY (piped/CI prints usage); managed mode owns one private persistent profile, while connected mode launches and attaches to a dedicated debugging profile rather than an operator's daily browser.
+Wizard (default): exactly 3 prompts — browser profile ownership, browser display, and the Chromium executable. Choices are normalized and validated before persistence. Personal-Chrome mode launches `chrome --remote-debugging-port=9222 --user-data-dir=~/.smooth-operator/personal-chrome`, probes `http://127.0.0.1:9222/json/version` immediately and then every 300ms with bounded response reads (64 KiB maximum; 33 attempts within a default 10-second deadline), and derives `browserUrl`; the URL is not a prompt. `--yes` uses defaults: managed, headed, page eval on, native-identity compatibility, and deterministic input. Persists to `~/.smooth-operator/config.json` (0600, owner-only, bounded, symlink-safe, and backed up). Bare `smooth-operator install` prompts for the harness on a TTY (piped/CI prints usage); managed mode owns one private persistent profile, while connected mode launches and attaches to a dedicated debugging profile rather than an operator's daily browser.
 
 ## Browser
 
@@ -55,11 +55,11 @@ Default `127.0.0.1:3344`. Remote needs `SMOOTH_OPERATOR_ALLOW_REMOTE_HTTP=true` 
 
 ## MCP
 
-- **Observation:** `browser_snapshot`, `browser_tabs`, `browser_list_tabs`, `browser_list_sessions`, `browser_get_state`, `browser_page_info`, `browser_interactive`, `browser_frames`, `browser_accessibility_snapshot`, `browser_extract`, `browser_extract_content`, `browser_find_text`, `browser_search_page`, `browser_find_elements`, `browser_dropdown_options`, `browser_computed_style`, `browser_page_next`, `browser_get_html`, `browser_challenge`, `browser_doctor`, `server_health`
+- **64 public tools. Observation:** `browser_snapshot`, `browser_tabs`, `browser_list_tabs`, `browser_list_sessions`, `browser_get_state`, `browser_page_info`, `browser_interactive`, `browser_frames`, `browser_accessibility_snapshot`, `browser_extract`, `browser_extract_content`, `browser_find_text`, `browser_search_page`, `browser_find_elements`, `browser_inspect_element`, `browser_dropdown_options`, `browser_computed_style`, `browser_page_next`, `browser_get_html`, `browser_search_network_log`, `browser_challenge`, `browser_doctor`, `server_health`
 - **Navigation/interaction:** `browser_navigate`, `browser_back`, `browser_go_back`, `browser_forward`, `browser_reload`, `browser_switch_tab`, `browser_close_tab`, `browser_click`, `browser_input`, `browser_select`, `browser_scroll`, `browser_scroll_to_bottom`, `browser_key`, `browser_wait`, `browser_wait_for_element`, `browser_wait_for_text`, `browser_wait_for_url`, `browser_wait_for_network_idle`, `browser_hover`, `browser_move`, `browser_press_and_hold`, `browser_type`, `browser_close`, `browser_close_all`
-- **Local defaults:** all browser tools/features are available by default, including `browser_evaluate`; `browser_exec` accepts validated JSON actions only, and `browser_wait_for_human` remains an optional handoff. Remote HTTP, private-network access, and file roots retain explicit policy gates.
+- **Local defaults:** all browser tools/features are available by default, including `browser_evaluate`, `browser_resource_blocking`, and safe element inspection; `browser_exec` accepts validated JSON actions only, and `browser_wait_for_human` remains an optional handoff. Remote HTTP, private-network access, and file roots retain explicit policy gates.
 
-All browser operations use bounded, cancellable queue/action deadlines. After an uncooperative timeout, the old browser lifecycle is retired before the queue advances. Snapshot refs are page/frame/revision-bound and must be refreshed after navigation or DOM-changing actions. Text, HTML, accessibility, links, and search outputs are bounded before serialization; truncated responses expose flags and omission counts. `web_search` accepts up to 10 results, uses a bounded aggregate text budget, normalizes queries, retries transient retrieval failures, and reports anti-bot blocks without bypassing them.
+All browser operations use bounded, cancellable queue/action deadlines. After an uncooperative timeout, the old browser lifecycle is retired before the queue advances. Snapshot refs are page/frame/revision-bound and must be refreshed after navigation or DOM-changing actions. Text, HTML, accessibility, links, and search outputs are bounded before serialization; truncated responses expose flags and omission counts. `web_search` accepts up to 10 results, uses a bounded aggregate text budget, normalizes queries, retries transient retrieval failures, and reports anti-bot blocks without bypassing them. Network journal search is bounded, metadata-only, and redacts secret query values.
 
 Resources: `smooth-operator://server/capabilities`, `.../browser/tabs`, `.../browser/page/current`, `.../browser/page/{pageId}`, `.../browser/downloads`, `.../browser/logs/network`, `.../browser/logs/console`
 
@@ -85,6 +85,7 @@ Env or `--config` JSON (`chmod 600`, no symlinks).
 | SMOOTH_OPERATOR_BROWSER_TIMEOUT_MS | 15000 | action timeout |
 | SMOOTH_OPERATOR_BROWSER_CONNECT_TIMEOUT_MS | 30000 | connect timeout |
 | SMOOTH_OPERATOR_BROWSER_CDP_TIMEOUT_MS | 30000 | CDP timeout |
+| SMOOTH_OPERATOR_BROWSER_IDLE_TIMEOUT_MS | 0 | idle cleanup; 0 disabled, maximum 24 hours |
 | SMOOTH_OPERATOR_MAX_SCREENSHOT_BYTES | 8000000 | screenshot cap |
 | SMOOTH_OPERATOR_MAX_HTML_CHARS | 200000 | HTML cap |
 | SMOOTH_OPERATOR_ALLOWED_DOMAINS | unset | allowlist |
@@ -128,6 +129,7 @@ No model service.
 | npm run test:browser:live | live Chrome |
 | npm run test:coverage | coverage |
 | npm run dead-code | knip |
+| npm run benchmark:network | deterministic bounded network-journal benchmark |
 | npm run build | dist/smooth-operator.mjs |
 
 ## Rules
@@ -145,7 +147,10 @@ No model service.
 
 - HTTP(S) only, no creds, domain/DNS preflight, redirects fail closed; untrusted URL credentials are redacted in output.
 - Private/link-local/multicast blocked; re-checked at DevTools.
-- Uploads/PDFs inside allowed directory roots, symlink-checked; existing regular files are not roots; downloads are bounded and report configuration failures.
+- Uploads/PDFs inside allowed directory roots, symlink-checked; existing regular files are not roots; uploads allow 20 files maximum, 50 MiB per file, and 100 MiB aggregate, and clean every staging path on all outcomes. More than one upload requires an input with `multiple`; downloads are bounded and report configuration failures.
+- Resource blocking is page-scoped to image, stylesheet, font, media, and script subresources; document/navigation cannot be selected, matching requests abort once without navigation errors, and non-blocked requests still run full URL policy.
+- Managed and launch connections require a regular executable, a bounded 64 KiB `/json/version` probe before JSON parsing, and target auto-attach readiness acknowledgement.
+- There is no generic arbitrary CDP or host-code execution surface; page evaluation is the explicit page-JavaScript capability.
 - Config files and backups are bounded, owner-only, regular, and symlink-safe.
 - Bounded, normalized, redacted, untrusted wrappers; result omission is explicit rather than silent.
 - Constant-time bearer check, JSON stderr, no secrets.

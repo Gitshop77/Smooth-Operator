@@ -196,6 +196,12 @@ navigation policy guard is installed; targets whose attachment ownership
 cannot be determined are blocked or closed. These controls reduce races but do
 not make a host browser or network firewall trustworthy by themselves.
 
+Managed and launch startup waits for a regular executable and browser launch
+readiness before returning a connection. The loopback `/json/version` probe
+reads at most 64 KiB, including streamed-byte enforcement before JSON parsing.
+Target auto-attach readiness is acknowledged before a browser connection is
+returned; unsupported connections retain the safe unavailable behavior.
+
 Managed and launch modes create owner-only data, files, downloads, and browser
 profile directories below `SMOOTH_OPERATOR_DATA_DIR` (unless an explicit profile
 path is supplied), reject unsafe symlink components, and hold a profile lease
@@ -307,6 +313,7 @@ variables include:
 | `SMOOTH_OPERATOR_BROWSER_TIMEOUT_MS` | `15000` | Per-action deadline |
 | `SMOOTH_OPERATOR_BROWSER_CONNECT_TIMEOUT_MS` | `30000` | Browser connection deadline |
 | `SMOOTH_OPERATOR_BROWSER_CDP_TIMEOUT_MS` | `30000` | DevTools command deadline |
+| `SMOOTH_OPERATOR_BROWSER_IDLE_TIMEOUT_MS` | `0` | Idle browser cleanup in milliseconds; `0` disables it, maximum 24 hours |
 | `SMOOTH_OPERATOR_MAX_SCREENSHOT_BYTES` | `8000000` | Screenshot byte cap |
 | `SMOOTH_OPERATOR_MAX_HTML_CHARS` | `200000` | HTML output cap |
 | `SMOOTH_OPERATOR_ALLOWED_DOMAINS` | unset | Comma-separated allowlist |
@@ -359,9 +366,16 @@ are always applied, with explicit opt-ins where documented:
   the same policy checks; `about:blank` is allowed, data/blob URLs are limited
   to non-frame subresources, and file, browser-internal, extension, and
   unknown schemes are rejected.
+- Resource blocking is page-scoped and limited to image, stylesheet, font,
+  media, and script subresources. Document and navigation requests cannot be
+  selected; matching requests are aborted once without a navigation error, and
+  non-blocked requests still receive the full URL policy check.
 - Upload and PDF destinations must stay within configured directory roots after
   realpath and symlink checks; an existing regular file cannot be configured as
-  a root. Download paths and generated files are bounded.
+  a root. Upload staging accepts at most 20 files, caps each file at 50 MiB and
+  the aggregate at 100 MiB, requires `multiple` on the target input for more
+  than one file, and removes staged files on success and every failure path.
+  Download paths and generated files are bounded.
 - Page JavaScript is available in the native profile by default and can be
   disabled with `SMOOTH_OPERATOR_ALLOW_EVAL=false`; when enabled, page code can
   observe and mutate page state with the browser's privileges.
@@ -381,7 +395,7 @@ for confirming destructive calls.
 
 ### Tools
 
-The registry includes these groups of tools. Every input is schema-validated;
+The registry exposes 64 public tools in these groups. Every input is schema-validated;
 individual descriptions and limits are returned by `tools/list`.
 
 **Observation and extraction:** `browser_snapshot`, `browser_tabs`,
@@ -390,7 +404,8 @@ individual descriptions and limits are returned by `tools/list`.
 `browser_accessibility_snapshot`, `browser_extract`, `browser_extract_content`,
 `browser_find_text`, `browser_search_page`, `browser_find_elements`,
 `browser_dropdown_options`, `browser_computed_style`, `browser_page_next`,
-`browser_get_html`, `browser_challenge`, `browser_doctor`, and `server_health`.
+`browser_get_html`, `browser_search_network_log`, `browser_inspect_element`,
+`browser_challenge`, `browser_doctor`, and `server_health`.
 
 **Navigation and interaction:** `browser_navigate`, `browser_back`,
 `browser_go_back`, `browser_forward`, `browser_reload`, `browser_switch_tab`,
@@ -402,7 +417,8 @@ individual descriptions and limits are returned by `tools/list`.
 
 **Available local capabilities:** `browser_screenshot`, `browser_pdf`,
 `browser_upload`, `browser_downloads`, `browser_network_log`,
-`browser_console_log`, `browser_dialog`, `browser_cookies`, `browser_storage`,
+`browser_search_network_log`, `browser_resource_blocking`, `browser_console_log`,
+`browser_dialog`, `browser_cookies`, `browser_storage`,
 `browser_batch`, `browser_exec`, `browser_wait_for_human`,
 `browser_solve_challenge`, and all other browser tools are available by default.
 `browser_close_session` remains a local lifecycle control and does not change
@@ -414,7 +430,8 @@ disabled explicitly with `SMOOTH_OPERATOR_ALLOW_EVAL=false`.
 accepts only a JSON array of validated browser actions; it is not a shell,
 Python, or arbitrary code runner. Its explicit `evaluate` action still follows
 the page-evaluation policy. Destructive batch actions require explicit
-confirmation. `browser_wait_for_human` pauses for an operator to complete a
+confirmation. There is no generic arbitrary CDP command or host-code execution
+tool. `browser_wait_for_human` pauses for an operator to complete a
 visible sign-in or challenge. `browser_solve_challenge` is an internal
 connected-AI observe/act/verify loop: it returns bounded evidence and is
 successful only when a fresh final classification explicitly reports the
@@ -460,6 +477,38 @@ parsing, redirects are rejected, cancellation and timeout are propagated, and
 credentials/query secret placeholders are removed from result URLs. Transient
 retrieval failures use at most three bounded attempts; anti-bot responses are
 reported without attempting a bypass.
+
+### Network, inspection, resource, and file controls
+
+`browser_network_log` records bounded request/response metadata for the current
+page. `browser_search_network_log` filters and paginates that metadata by
+request ID, URL, method, status, and resource type. Headers, cookies, request
+bodies, and response bodies are not returned; search terms and URLs are treated
+as untrusted data and secret query values are redacted.
+
+`browser_resource_blocking` is page-scoped with strict `get`, `set`, and
+`clear` operations. Its only selectable types are `image`, `stylesheet`,
+`font`, `media`, and `script`; `set` requires a non-empty de-duplicated list.
+Only matching subresources are aborted once. Document and navigation requests
+cannot be selected, data/blob subresources remain covered by the normal rules,
+and non-blocked requests still run the full URL policy.
+
+`browser_inspect_element` returns a bounded safe view of a selected element:
+allowlisted attributes, selected computed styles, pseudo-element summaries,
+animation metadata, and shallow child structure. Script text, event-handler
+source, form values, and arbitrary data attributes are omitted.
+
+`browser_upload` accepts the existing single `filePath` or a `filePaths` array
+of up to 20 paths, but not both. Every source must pass the allowed-root,
+no-follow, and file-identity checks. Each file is at most 50 MiB and the
+aggregate is at most 100 MiB; multiple paths require a target input with the
+`multiple` attribute. Sources are staged sequentially and every staging path is
+removed on success, validation failure, target failure, cancellation, or upload
+rejection.
+
+`browser_cookies` scopes reads, writes, and deletes to a validated page URL.
+Writes accept only the `Strict`, `Lax`, or `None` SameSite values, and cookie
+values are omitted from read results.
 
 ### Resources
 

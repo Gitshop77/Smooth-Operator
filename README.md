@@ -39,6 +39,15 @@ Verify: `smooth-operator --help` and `server_health` / `browser_doctor` appear a
 - Inspect pages with snapshots, accessibility trees, HTML, styles, text search, and bounded extraction
 - Work across tabs, frames, popups, shadow DOM, dialogs, cookies, storage, downloads, screenshots, and PDFs
 - Search the web through bounded DuckDuckGo retrieval
+- Search a bounded metadata-only network journal by request ID, URL, method, status, and resource type
+- Block page-scoped image, stylesheet, font, media, and script subresources; document and navigation requests are never selectable
+- Inspect a selected element's safe attributes, styles, animations, and shallow children without returning scripts, event source, form values, or arbitrary data attributes
+- Upload one file or up to 20 files from allowed roots; each file is capped at 50 MiB and the aggregate at 100 MiB
+- Read, set, and delete URL-scoped cookies with validated SameSite settings; cookie values are omitted from reads
+
+The MCP registry exposes 64 public tools. The surface includes bounded network
+search, safe element inspection, page-scoped resource blocking, and file and
+cookie controls alongside the navigation, extraction, and lifecycle tools.
 
 Ask: *“Scrape pricing into a table”*, *“Fill this form with ~/resume.pdf”*, or *“Download the monthly report as a PDF.”*
 
@@ -56,6 +65,12 @@ For the fastest supported operation, keep behavioral timing off with
 cancellable. All local browser tools and page features are available by default;
 remote HTTP, private-network access, and file roots remain explicitly gated.
 Faster calls do not bypass challenges or grant permission to automate a site.
+
+Managed and launch modes wait for browser launch readiness and a target-guard
+acknowledgement before returning a usable connection. The loopback DevTools
+`/json/version` probe is bounded to 64 KiB before JSON parsing, and executable
+discovery requires a regular executable. There is no arbitrary CDP or host-code
+tool; page evaluation remains an explicit page capability.
 
 ## Why
 
