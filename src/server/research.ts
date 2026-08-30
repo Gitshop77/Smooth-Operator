@@ -17,6 +17,8 @@ const MAX_RESULT_SNIPPET_CHARS = 4_000;
 const MAX_ATTEMPTS = 3;
 const RETRY_BASE_DELAY_MS = 250;
 const RETRY_MAX_DELAY_MS = 2_000;
+const MAX_CONCURRENT_RESEARCH = 4;
+const MAX_RESEARCH_QUEUE = 16;
 const ZERO_WIDTH_PATTERN = /[\u200B-\u200D\u2060\uFEFF]/g;
 const CONTROL_CHARACTER_PATTERN = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/g;
 const ANTI_BOT_PATTERN = /(?:captcha|challenge|unusual\s+traffic|automated\s+(?:queries|requests)|access\s+denied|temporarily\s+blocked|too\s+many\s+requests)/i;
@@ -56,7 +58,84 @@ interface ResultCandidate {
   snippetTruncated: boolean;
 }
 
+interface ResearchWaiter {
+  resolve: (release: () => void) => void;
+  reject: (error: unknown) => void;
+  signal?: AbortSignal;
+  onAbort?: () => void;
+}
+
+class ResearchAdmission {
+  private active = 0;
+  private readonly queue: ResearchWaiter[] = [];
+
+  acquire(signal?: AbortSignal): Promise<() => void> {
+    if (signal?.aborted) {
+      return Promise.reject(new AppError("CANCELLED", "The research request was cancelled."));
+    }
+    if (this.active < MAX_CONCURRENT_RESEARCH) {
+      this.active += 1;
+      return Promise.resolve(this.createRelease());
+    }
+    if (this.queue.length >= MAX_RESEARCH_QUEUE) {
+      return Promise.reject(new AppError("RESEARCH_BUSY", "The research service is busy; retry later.", {
+        retryable: true,
+        status: 503,
+        details: { classification: "overloaded" },
+      }));
+    }
+    return new Promise<() => void>((resolve, reject) => {
+      const waiter: ResearchWaiter = { resolve, reject, signal };
+      const onAbort = (): void => {
+        const index = this.queue.indexOf(waiter);
+        if (index < 0) {
+          return;
+        }
+        this.queue.splice(index, 1);
+        signal?.removeEventListener("abort", onAbort);
+        reject(new AppError("CANCELLED", "The research request was cancelled."));
+      };
+      waiter.onAbort = onAbort;
+      signal?.addEventListener("abort", onAbort, { once: true });
+      this.queue.push(waiter);
+      if (signal?.aborted) {
+        onAbort();
+      }
+    });
+  }
+
+  private createRelease(): () => void {
+    let released = false;
+    return (): void => {
+      if (released) {
+        return;
+      }
+      released = true;
+      this.active -= 1;
+      this.drain();
+    };
+  }
+
+  private drain(): void {
+    while (this.active < MAX_CONCURRENT_RESEARCH && this.queue.length > 0) {
+      const waiter = this.queue.shift();
+      if (!waiter) {
+        return;
+      }
+      waiter.signal?.removeEventListener("abort", waiter.onAbort as () => void);
+      if (waiter.signal?.aborted) {
+        waiter.reject(new AppError("CANCELLED", "The research request was cancelled."));
+        continue;
+      }
+      this.active += 1;
+      waiter.resolve(this.createRelease());
+    }
+  }
+}
+
 export class ResearchService {
+  private readonly admission = new ResearchAdmission();
+
   constructor(
     private readonly policy: SecurityPolicy,
     private readonly logger: Logger,
@@ -93,6 +172,7 @@ export class ResearchService {
     if (signal?.aborted) {
       throw new AppError("CANCELLED", "The research request was cancelled.");
     }
+    const release = await this.admission.acquire(signal);
     const controller = new AbortController();
     let timedOut = false;
     const timeout = setTimeout(() => {
@@ -102,6 +182,10 @@ export class ResearchService {
     const abort = (): void => controller.abort();
     signal?.addEventListener("abort", abort, { once: true });
     try {
+      if (signal?.aborted) {
+        controller.abort();
+        throw new AppError("CANCELLED", "The research request was cancelled.");
+      }
       // Policy admission can perform DNS work before fetch starts. Race it
       // against the same deadline as the outbound request so a resolver that
       // never settles cannot hold the research call indefinitely.
@@ -181,6 +265,7 @@ export class ResearchService {
     } finally {
       clearTimeout(timeout);
       signal?.removeEventListener("abort", abort);
+      release();
     }
   }
 }

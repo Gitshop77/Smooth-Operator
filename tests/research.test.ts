@@ -342,4 +342,92 @@ describe("research service", () => {
     expect(result.results[0]?.title).not.toContain("<script>");
     vi.unstubAllGlobals();
   });
+
+  it("limits concurrent policy and fetch work while allowing queued success", async () => {
+    let active = 0;
+    let peak = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      active += 1;
+      peak = Math.max(peak, active);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      active -= 1;
+      return new Response("", { status: 200 });
+    }));
+    const service = new ResearchService(researchPolicy(), new Logger("error", {}, () => undefined));
+
+    const results = await Promise.all(Array.from({ length: 8 }, (_, index) => service.research(`concurrent-${index}`, { maxResults: 1 })));
+
+    expect(results).toHaveLength(8);
+    expect(peak).toBeGreaterThan(1);
+    expect(peak).toBeLessThanOrEqual(4);
+    vi.unstubAllGlobals();
+  });
+
+  it("rejects beyond the bounded admission queue without starting policy or fetch work", async () => {
+    const policy = researchPolicy();
+    const policyCheck = vi.spyOn(policy, "assertNavigationAllowedAsync");
+    const fetchMock = vi.fn(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      return new Response("", { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const service = new ResearchService(policy, new Logger("error", {}, () => undefined));
+    const activeCalls = Array.from({ length: 4 }, (_, index) => service.research(`active-${index}`, { maxResults: 1 }));
+    const queuedCalls = Array.from({ length: 16 }, (_, index) => service.research(`queued-${index}`, { maxResults: 1 }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    const policyCallsBeforeOverflow = policyCheck.mock.calls.length;
+    const fetchCallsBeforeOverflow = fetchMock.mock.calls.length;
+
+    const overflow = service.research("overflow", { maxResults: 1 });
+
+    await expect(overflow).rejects.toMatchObject({
+      code: "RESEARCH_BUSY",
+      retryable: true,
+      status: 503,
+    });
+    expect(policyCheck).toHaveBeenCalledTimes(policyCallsBeforeOverflow);
+    expect(fetchMock).toHaveBeenCalledTimes(fetchCallsBeforeOverflow);
+    await expect(Promise.all([...activeCalls, ...queuedCalls])).resolves.toHaveLength(20);
+    vi.unstubAllGlobals();
+  });
+
+  it("cancels a queued request without starting policy or fetch work", async () => {
+    const policy = researchPolicy();
+    const policyCheck = vi.spyOn(policy, "assertNavigationAllowedAsync");
+    const fetchMock = vi.fn(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      return new Response("", { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const service = new ResearchService(policy, new Logger("error", {}, () => undefined));
+    const activeCalls = Array.from({ length: 4 }, (_, index) => service.research(`active-cancel-${index}`, { maxResults: 1 }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    const controller = new AbortController();
+    const queued = service.research("queued-cancel", { maxResults: 1 }, controller.signal);
+    controller.abort();
+
+    await expect(queued).rejects.toMatchObject({ code: "CANCELLED" });
+    expect(policyCheck).toHaveBeenCalledTimes(4);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    await expect(Promise.all(activeCalls)).resolves.toHaveLength(4);
+    vi.unstubAllGlobals();
+  });
+
+  it("recovers a permit after a policy rejection", async () => {
+    const policy = researchPolicy();
+    const policyCheck = vi.spyOn(policy, "assertNavigationAllowedAsync")
+      .mockRejectedValueOnce(new Error("synthetic policy failure"))
+      .mockImplementation(async (rawUrl) => policy.assertNavigationAllowed(rawUrl));
+    const fetchMock = vi.fn(async () => new Response("", { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const service = new ResearchService(policy, new Logger("error", {}, () => undefined));
+
+    await expect(service.research("rejected", { maxResults: 1 })).rejects.toMatchObject({ code: "RESEARCH_FAILED" });
+    await expect(service.research("recovered", { maxResults: 1 })).resolves.toMatchObject({ query: "recovered" });
+    expect(policyCheck).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    vi.unstubAllGlobals();
+  });
 });
