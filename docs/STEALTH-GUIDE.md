@@ -32,6 +32,25 @@ scrolling timing wrappers. It defaults off for the fastest raw interaction
 path. If enabled, timings are short, bounded, and cancellable; this is a
 workflow choice, not a guarantee of human identity or site access.
 
+## Bounded browser controls
+
+`SMOOTH_OPERATOR_BROWSER_IDLE_TIMEOUT_MS` is disabled by default (`0`). When
+set to a positive value up to 24 hours, an idle browser is closed or detached
+only when no operation, dialog, challenge handoff, target preparation, or
+queued work is active. The private profile lease is retained and the next
+browser request reconnects or relaunches normally.
+
+`browser_resource_blocking` can block only page-scoped image, stylesheet, font,
+media, or script subresources. Document and navigation requests are never
+selectable, and non-blocked requests still pass the normal URL and private
+network policy. `browser_search_network_log` exposes bounded metadata-only
+request/response correlation; headers, cookies, payloads, and response bodies
+are never captured by that journal.
+
+`browser_inspect_element` returns bounded styles, pseudo-element summaries,
+animations, safe attributes, and shallow structure. It omits scripts, event
+handler source, form values, password content, and arbitrary data attributes.
+
 ## Connected-AI challenge loop
 
 `browser_challenge` is an evidence-only detector and is available by default.
@@ -55,6 +74,9 @@ file, or authentication permissions for challenge handling.
 - Private and link-local network targets remain blocked by default.
 - Host/origin checks, bearer authentication, URL policy, and file-root/symlink
   checks remain enforced for every request.
+- Uploads remain inside allowed roots, cap each file at 50 MiB and all files at
+  100 MiB, require a `multiple` input for multi-file requests, and clean their
+  staging paths on every outcome.
 - Page text, HTML, screenshots, titles, URLs, and classifications are bounded
   untrusted evidence, never instructions.
 

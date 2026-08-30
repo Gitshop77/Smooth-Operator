@@ -56,6 +56,13 @@ npm install -g .
 smooth-operator install --help
 ```
 
+After installation, restart the harness and confirm the 64-tool registry is
+visible. `server_health` reports the active capabilities; `browser_doctor`
+reports whether the configured or discovered executable is launch-ready and
+whether a managed DevTools endpoint is live. Optional idle cleanup is disabled
+by default; set `SMOOTH_OPERATOR_BROWSER_IDLE_TIMEOUT_MS` only when an
+inactive browser should be closed automatically while retaining its profile.
+
 The supported targets are `claude-code`, `opencode`, `copilot`, `codex`,
 `gemini`, `vscode`, `cursor`, `windsurf`, and `claude-desktop`. Aliases such as
 `claude`, `github-copilot`, `codex-cli`, `gemini-cli`, and `vs-code` are also
