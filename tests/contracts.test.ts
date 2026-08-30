@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { BatchRequestSchema, BrowserActionInputSchema, BrowserActionPlanSchema, BrowserActionSchema, ClickRequestSchema, CookieRequestSchema, EvaluateRequestSchema, ExtractRequestSchema, HtmlRequestSchema, InputRequestSchema, NavigateRequestSchema, NetworkSearchRequestSchema, ResearchRequestSchema, ScreenshotRequestSchema, SnapshotRequestSchema, SolveChallengeRequestSchema, StorageRequestSchema, TargetRequestSchema } from "@/server/contracts";
+import { BatchRequestSchema, BrowserActionInputSchema, BrowserActionPlanSchema, BrowserActionSchema, ClickRequestSchema, CookieRequestSchema, EvaluateRequestSchema, ExtractRequestSchema, HtmlRequestSchema, InputRequestSchema, NavigateRequestSchema, NetworkSearchRequestSchema, ResearchRequestSchema, ResourceBlockingRequestSchema, ScreenshotRequestSchema, SnapshotRequestSchema, SolveChallengeRequestSchema, StorageRequestSchema, TargetRequestSchema } from "@/server/contracts";
 
 describe("MCP contracts", () => {
   it("accepts browser-use indexed and coordinate click forms", () => {
@@ -85,6 +85,20 @@ describe("MCP contracts", () => {
     expect(StorageRequestSchema.safeParse({ operation: "clear", all: true }).success).toBe(true);
     expect(StorageRequestSchema.safeParse({ operation: "clear" }).success).toBe(false);
     expect(StorageRequestSchema.safeParse({ operation: "clear", key: "a", all: true }).success).toBe(false);
+  });
+
+  it("validates page-scoped resource blocking operations", () => {
+    expect(ResourceBlockingRequestSchema.safeParse({ operation: "get", pageId: "page-1" }).success).toBe(true);
+    expect(ResourceBlockingRequestSchema.safeParse({ operation: "clear" }).success).toBe(true);
+    expect(ResourceBlockingRequestSchema.safeParse({ operation: "set", resourceTypes: ["image", "stylesheet", "font", "media", "script"] }).success).toBe(true);
+    expect(ResourceBlockingRequestSchema.safeParse({ operation: "set" }).success).toBe(false);
+    expect(ResourceBlockingRequestSchema.safeParse({ operation: "set", resourceTypes: [] }).success).toBe(false);
+    expect(ResourceBlockingRequestSchema.safeParse({ operation: "set", resourceTypes: ["image", "image"] }).success).toBe(false);
+    expect(ResourceBlockingRequestSchema.safeParse({ operation: "set", resourceTypes: ["document"] }).success).toBe(false);
+    expect(ResourceBlockingRequestSchema.safeParse({ operation: "get", resourceTypes: ["image"] }).success).toBe(false);
+    expect(ResourceBlockingRequestSchema.safeParse({ operation: "clear", resourceTypes: ["image"] }).success).toBe(false);
+    expect(BrowserActionSchema.safeParse({ action: "resource_blocking", operation: "set", resourceTypes: ["image"] }).success).toBe(true);
+    expect(BrowserActionSchema.safeParse({ action: "resource_blocking", operation: "get", resourceTypes: ["image"] }).success).toBe(false);
   });
 
   it("accepts bounded network journal search filters", () => {

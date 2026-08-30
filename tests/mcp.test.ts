@@ -66,7 +66,7 @@ describe("native MCP registry", () => {
     const resourceTemplates = await client.listResourceTemplates();
     const prompts = await client.listPrompts();
 
-    expect(tools.tools).toHaveLength(62);
+    expect(tools.tools).toHaveLength(63);
     expect(resources.resources).toHaveLength(6);
     expect(resourceTemplates.resourceTemplates).toHaveLength(1);
     expect(prompts.prompts).toHaveLength(4);
@@ -166,6 +166,9 @@ describe("native MCP registry", () => {
     }
     expect(toolByName.get("browser_pdf")?.annotations?.destructiveHint).toBe(true);
     expect(toolByName.get("browser_pdf")?.annotations?.openWorldHint).toBe(true);
+    expect(toolByName.get("browser_resource_blocking")?.annotations?.readOnlyHint).toBe(false);
+    expect(toolByName.get("browser_resource_blocking")?.annotations?.destructiveHint).toBe(false);
+    expect(toolByName.get("browser_resource_blocking")?.annotations?.openWorldHint).toBe(true);
 
     const health = await client.callTool({ name: "server_health", arguments: {} });
     expect(health.isError).not.toBe(true);
@@ -234,6 +237,7 @@ describe("native MCP registry", () => {
       ["browser_wait", { milliseconds: 0 }], ["browser_wait_for_element", { selector: "#x" }],
       ["browser_wait_for_text", { text: "x" }], ["browser_wait_for_url", { url: "*" }], ["browser_wait_for_network_idle", {}],
       ["browser_network_log", { operation: "read" }], ["browser_search_network_log", { query: "fixture", limit: 10 }], ["browser_console_log", { operation: "read" }],
+      ["browser_resource_blocking", { operation: "get" }],
       ["browser_find_text", { query: "x" }], ["browser_extract", {}], ["browser_extract_content", { query: "body", extract_links: true }],
       ["browser_upload", { selector: "input[type=file]", filePath: "/tmp/smooth-operator-test/file.txt" }],
       ["browser_screenshot", {}], ["browser_pdf", { outputPath: "/tmp/smooth-operator-test/page.pdf" }], ["browser_downloads", {}],

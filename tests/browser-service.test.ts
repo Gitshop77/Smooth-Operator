@@ -1494,6 +1494,89 @@ describe("browser service", () => {
     await service.close();
   });
 
+  it("blocks configured resource subrequests exactly once without bypassing policy for others", async () => {
+    const config = testConfig({ browser: { ...testConfig().browser, mode: "connect", url: "http://127.0.0.1:9222" } });
+    const policy = { assertNavigationAllowedAsync: vi.fn(async (url: string) => new URL(url)) } as unknown as SecurityPolicy;
+    const service = new BrowserService(config, policy, new Logger("error", {}, () => undefined));
+    const frame = {};
+    const page = new EventEmitter() as EventEmitter & { mainFrame(): object; isClosed(): boolean };
+    page.mainFrame = () => frame;
+    page.isClosed = () => false;
+    const internal = service as unknown as {
+      stateFor(page: unknown): { blockedResourceTypes: Set<string>; navigationError?: unknown; activeNavigationGeneration?: number };
+      handleRequest(state: unknown, request: unknown): Promise<void>;
+    };
+    const state = internal.stateFor(page);
+    state.blockedResourceTypes.add("image");
+    state.activeNavigationGeneration = 7;
+    const requestFor = (url: string, resourceType: string, navigation = false) => {
+      const abort = vi.fn(async () => undefined);
+      const continueRequest = vi.fn(async () => undefined);
+      const request = {
+        isInterceptResolutionHandled: () => false,
+        isNavigationRequest: () => navigation,
+        frame: () => navigation ? frame : null,
+        resourceType: () => resourceType,
+        url: () => url,
+        continue: continueRequest,
+        abort,
+      };
+      return { request, abort, continueRequest };
+    };
+
+    try {
+      const blockedUrls = ["https://allowed.example/pixel.png", "data:image/png;base64,fixture", "blob:https://allowed.example/fixture"];
+      for (const url of blockedUrls) {
+        const blocked = requestFor(url, "Image");
+        await internal.handleRequest(state, blocked.request);
+        expect(blocked.abort).toHaveBeenCalledTimes(1);
+        expect(blocked.continueRequest).not.toHaveBeenCalled();
+      }
+      const allowed = requestFor("https://allowed.example/app.js", "Script");
+      await internal.handleRequest(state, allowed.request);
+      expect(allowed.continueRequest).toHaveBeenCalledTimes(1);
+      const navigation = requestFor("https://allowed.example/next", "Document", true);
+      await internal.handleRequest(state, navigation.request);
+      expect(navigation.continueRequest).toHaveBeenCalledTimes(1);
+      expect(navigation.abort).not.toHaveBeenCalled();
+      expect(policy.assertNavigationAllowedAsync).toHaveBeenCalledTimes(2);
+      expect(state.navigationError).toBeUndefined();
+    } finally {
+      await service.close();
+    }
+  });
+
+  it("gets, sets, and clears page-scoped resource blocking types", async () => {
+    const service = new BrowserService(testConfig(), new SecurityPolicy(testConfig()), new Logger("error", {}, () => undefined));
+    const frame = {};
+    const page = new EventEmitter() as EventEmitter & { mainFrame(): object; isClosed(): boolean; url(): string };
+    page.mainFrame = () => frame;
+    page.isClosed = () => false;
+    page.url = () => "about:blank";
+    const internal = service as unknown as {
+      stateFor(page: unknown): { id: string };
+      executeOnPage(action: BrowserAction, signal?: AbortSignal): Promise<unknown>;
+      pageState(pageId?: string, signal?: AbortSignal): Promise<unknown>;
+      assertCurrentPageAllowed(page: unknown, state?: unknown): Promise<void>;
+      assertSnapshotForAction(state: unknown, action: BrowserAction): void;
+      frameFor(state: unknown, frameId?: string): Promise<unknown>;
+    };
+    const state = internal.stateFor(page);
+    internal.pageState = async () => state;
+    internal.assertCurrentPageAllowed = async () => undefined;
+    internal.assertSnapshotForAction = () => undefined;
+    internal.frameFor = async () => frame;
+
+    try {
+      await expect(internal.executeOnPage({ action: "resource_blocking", operation: "get" } as BrowserAction)).resolves.toMatchObject({ pageId: state.id, operation: "get", resourceTypes: [] });
+      await expect(internal.executeOnPage({ action: "resource_blocking", operation: "set", resourceTypes: ["script", "image"] } as BrowserAction)).resolves.toMatchObject({ pageId: state.id, operation: "set", resourceTypes: ["image", "script"] });
+      await expect(internal.executeOnPage({ action: "resource_blocking", operation: "get" } as BrowserAction)).resolves.toMatchObject({ resourceTypes: ["image", "script"] });
+      await expect(internal.executeOnPage({ action: "resource_blocking", operation: "clear" } as BrowserAction)).resolves.toMatchObject({ pageId: state.id, operation: "clear", resourceTypes: [] });
+    } finally {
+      await service.close();
+    }
+  });
+
   it("treats data/blob consistently across the page-interception and new-target guard layers", async () => {
     const config = testConfig({ browser: { ...testConfig().browser, mode: "connect", url: "http://127.0.0.1:9222" } });
     const policy = { assertNavigationAllowedAsync: async (url: string) => new URL(url) } as unknown as SecurityPolicy;

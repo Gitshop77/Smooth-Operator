@@ -11,6 +11,9 @@ export const RESEARCH_QUERY_MAX_CHARS = 4_000;
 export const RESEARCH_MIN_CHARS = 500;
 export const RESEARCH_MAX_CHARS = 4_000;
 export const RESEARCH_MAX_RESULTS = 10;
+export const RESOURCE_BLOCKING_TYPES = ["image", "stylesheet", "font", "media", "script"] as const;
+const ResourceBlockingTypeSchema = z.enum(RESOURCE_BLOCKING_TYPES);
+const ResourceBlockingOperationSchema = z.enum(["get", "set", "clear"]);
 const isHttpUrl = (value: string): boolean => {
   try {
     const url = new URL(value);
@@ -51,6 +54,7 @@ const BrowserActionNames = [
   "disable_network_log",
   "get_network_log",
   "search_network_log",
+  "resource_blocking",
   "clear_network_log",
   "getclear_network_log", // canonical action spelling of the read_and_clear operation
   "enable_console_log",
@@ -150,6 +154,8 @@ const BrowserActionFieldsSchema = z.object({
   method: BoundedString(32).optional(),
   status: z.number().int().min(0).max(999).optional(),
   resourceType: BoundedString(64).optional(),
+  operation: ResourceBlockingOperationSchema.optional(),
+  resourceTypes: z.array(ResourceBlockingTypeSchema).min(1).max(RESOURCE_BLOCKING_TYPES.length).optional(),
   limit: z.number().int().min(1).max(200).optional(),
   includeLinks: z.boolean().optional(),
   includeSnapshot: z.boolean().optional(),
@@ -282,6 +288,26 @@ export const BrowserActionSchema = BrowserActionFieldsSchema.extend({ action: Ac
   }
   if (input.outputPath !== undefined && input.filePath !== undefined && input.action === "save_as_pdf") {
     context.addIssue({ code: "custom", message: "Provide outputPath or filePath, not both." });
+  }
+  if (input.action === "resource_blocking") {
+    if (input.operation === undefined) {
+      context.addIssue({ code: "custom", message: "Resource blocking requires operation." });
+    } else if (input.operation === "set") {
+      if (input.resourceTypes === undefined) {
+        context.addIssue({ code: "custom", message: "Resource blocking set requires resourceTypes." });
+      } else if (new Set(input.resourceTypes).size !== input.resourceTypes.length) {
+        context.addIssue({ code: "custom", message: "Resource blocking resourceTypes must be de-duplicated." });
+      }
+    } else if (input.resourceTypes !== undefined) {
+      context.addIssue({ code: "custom", message: `Resource blocking ${input.operation} does not accept resourceTypes.` });
+    }
+  } else {
+    if (input.operation !== undefined) {
+      context.addIssue({ code: "custom", message: "operation is only valid for resource blocking." });
+    }
+    if (input.resourceTypes !== undefined) {
+      context.addIssue({ code: "custom", message: "resourceTypes is only valid for resource blocking." });
+    }
   }
   if (["navigate", "set_cookie"].includes(input.action) && input.url !== undefined && !isHttpUrl(input.url)) {
     context.addIssue({ code: "custom", message: "Navigation and cookie URLs must be absolute HTTP(S) URLs." });
@@ -703,6 +729,21 @@ export const NetworkSearchRequestSchema = z.object({
   limit: z.number().int().min(1).max(200).optional(),
   pageId: BoundedString(200).optional(),
 }).strict();
+export const ResourceBlockingRequestSchema = z.object({
+  operation: ResourceBlockingOperationSchema,
+  resourceTypes: z.array(ResourceBlockingTypeSchema).min(1).max(RESOURCE_BLOCKING_TYPES.length).optional(),
+  ...PageInput,
+}).strict().superRefine((input, context) => {
+  if (input.operation === "set") {
+    if (input.resourceTypes === undefined) {
+      context.addIssue({ code: "custom", message: "Resource blocking set requires resourceTypes." });
+    } else if (new Set(input.resourceTypes).size !== input.resourceTypes.length) {
+      context.addIssue({ code: "custom", message: "Resource blocking resourceTypes must be de-duplicated." });
+    }
+  } else if (input.resourceTypes !== undefined) {
+    context.addIssue({ code: "custom", message: `Resource blocking ${input.operation} does not accept resourceTypes.` });
+  }
+});
 export const DialogRequestSchema = z.object({ operation: z.enum(["get_text", "accept", "dismiss", "send_keys"]), text: z.string().max(20_000).optional(), ...PageInput }).strict().superRefine((input, context) => {
   if (input.operation === "send_keys" && input.text === undefined) {
     context.addIssue({ code: "custom", message: "Dialog send_keys requires text." });

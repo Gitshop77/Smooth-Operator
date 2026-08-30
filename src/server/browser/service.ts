@@ -18,7 +18,7 @@ function loadPuppeteer(): Promise<PuppeteerModule> {
 
 import type { ServerConfig } from "../config";
 import { AppError, asAppError, requireField, safeErrorDiagnostic } from "../errors";
-import { BrowserActionPlanSchema, isDestructiveBatchAction, type BrowserAction } from "../contracts";
+import { BrowserActionPlanSchema, isDestructiveBatchAction, RESOURCE_BLOCKING_TYPES, type BrowserAction } from "../contracts";
 import { Logger, redactValue } from "../logger";
 import { SecurityPolicy } from "../policy";
 import { redactSecretPlaceholders, wrapUntrustedText } from "../security";
@@ -191,6 +191,7 @@ interface PageState {
   activeNavigationGeneration?: number;
   mainFrameStatus?: number;
   policyVerifiedUrls: Set<string>;
+  blockedResourceTypes: Set<string>;
   /** Most recent challenge observation, used only to label a later clear. */
   challengeStatus?: "present" | "absent" | "unknown";
   /** Number of connected-AI challenge verification cycles on this document. */
@@ -1647,6 +1648,20 @@ export class BrowserService {
             url: wrapUntrustedText("network_log_url", redactSecretPlaceholders(entry.url), 4_096),
           })),
         };
+      }
+      case "resource_blocking": {
+        const operation = requireField(action.operation, "operation");
+        if (operation === "set") {
+          const resourceTypes = action.resourceTypes ?? [];
+          if (resourceTypes.length === 0 || new Set(resourceTypes).size !== resourceTypes.length || resourceTypes.some((resourceType) => !RESOURCE_BLOCKING_TYPES.includes(resourceType as typeof RESOURCE_BLOCKING_TYPES[number]))) {
+            throw new AppError("INVALID_ACTION", "Resource blocking set requires a non-empty de-duplicated list of supported resourceTypes.");
+          }
+          state.blockedResourceTypes = new Set(resourceTypes);
+        } else if (operation === "clear") {
+          state.blockedResourceTypes.clear();
+        }
+        const resourceTypes = RESOURCE_BLOCKING_TYPES.filter((resourceType) => state.blockedResourceTypes.has(resourceType));
+        return { pageId: state.id, operation, resourceTypes };
       }
       case "clear_network_log":
         state.network = [];
@@ -4176,6 +4191,20 @@ export class BrowserService {
         state.policyVerifiedUrls?.clear();
       }
       requestUrl = request.url();
+      const resourceType = typeof request.resourceType === "function" ? request.resourceType()?.toLowerCase() : undefined;
+      if (!navigationRequest && resourceType && state.blockedResourceTypes.has(resourceType)) {
+        let handled = true;
+        try {
+          handled = request.isInterceptResolutionHandled();
+        } catch {
+          // A disposed request cannot be resolved anymore; avoid issuing a
+          // second CDP command from the resource-blocking path.
+        }
+        if (!handled) {
+          await request.abort("blockedbyclient").catch(() => undefined);
+        }
+        return;
+      }
       if (/^about:blank(?:#.*)?$/i.test(requestUrl)) {
         await request.continue();
         return;
@@ -4274,7 +4303,7 @@ export class BrowserService {
       }
       this.ids.delete(page);
     }
-    const state: PageState = { id: randomUUID(), page, lifecycleGeneration: this.lifecycleGeneration, disposed: false, refs: new Map(), domRevision: 0, networkEnabled: false, consoleEnabled: false, network: [], console: [], dialogs: [], listenersInstalled: false, timeoutsConfigured: false, viewportConfigured: false, downloadConfigured: false, navigationGuardInstalled: false, stealthInjected: false, navigationGeneration: 0, policyVerifiedUrls: new Set() };
+    const state: PageState = { id: randomUUID(), page, lifecycleGeneration: this.lifecycleGeneration, disposed: false, refs: new Map(), domRevision: 0, networkEnabled: false, consoleEnabled: false, network: [], console: [], dialogs: [], listenersInstalled: false, timeoutsConfigured: false, viewportConfigured: false, downloadConfigured: false, navigationGuardInstalled: false, stealthInjected: false, navigationGeneration: 0, policyVerifiedUrls: new Set(), blockedResourceTypes: new Set() };
     this.ids.set(page, state.id);
     this.states.set(state.id, state);
     this.installListeners(state);

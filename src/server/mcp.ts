@@ -20,6 +20,7 @@ import {
   PdfRequestSchema,
   ResearchRequestSchema,
   RESEARCH_MAX_RESULTS,
+  ResourceBlockingRequestSchema,
   ScreenshotRequestSchema,
   ScrollRequestSchema,
   ScrollToBottomRequestSchema,
@@ -420,6 +421,11 @@ function registerBrowserTools(server: McpServer, runtime: ServerRuntime): void {
     "browser_search_network_log",
     { title: "Search browser network log", description: "Search the bounded redacted network journal by text, request ID, URL, method, status, or resource type. Results are deterministic and expose explicit capacity and omission metadata.", inputSchema: NetworkSearchRequestSchema, annotations: BROWSER_READ_ONLY },
     async (input, ctx) => callTool(() => runtime.run({ action: "search_network_log", ...input }, ctx.mcpReq.signal), runtime),
+  );
+  server.registerTool(
+    "browser_resource_blocking",
+    { title: "Configure resource blocking", description: "Get, set, or clear page-scoped blocking for image, stylesheet, font, media, and script subresources. Navigation and document requests are never blocked by this tool.", inputSchema: ResourceBlockingRequestSchema, annotations: BROWSER_MUTATING },
+    async (input, ctx) => callTool(() => runtime.run({ action: "resource_blocking", operation: input.operation, resourceTypes: input.resourceTypes, pageId: input.pageId }, ctx.mcpReq.signal), runtime),
   );
   server.registerTool(
     "browser_console_log",
