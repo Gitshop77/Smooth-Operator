@@ -444,6 +444,7 @@ export class BrowserService {
   private idleSweepTimer: ReturnType<typeof setInterval> | undefined;
   private idleSweepPromise: Promise<void> | undefined;
   private idleSweepStopped = false;
+  private readonly pendingTargetPreparations = new Set<Promise<void>>();
   constructor(
     private readonly config: ServerConfig,
     private readonly policy: SecurityPolicy,
@@ -488,7 +489,7 @@ export class BrowserService {
     }
     if (this.connectionPromise || this.connectionSettlementPromise || this.browserClosePromise
       || this.interruptedBrowserShutdown || this.recoveryPromise || this.failedBrowserShutdown
-      || this.browserShutdownFailure) {
+      || this.browserShutdownFailure || this.pendingTargetPreparations.size > 0) {
       return;
     }
     const observedActivityAt = this.lastActivityAt;
@@ -542,10 +543,32 @@ export class BrowserService {
     }
     if (this.connectionPromise || this.connectionSettlementPromise || this.browserClosePromise
       || this.interruptedBrowserShutdown || this.recoveryPromise || this.failedBrowserShutdown
-      || this.browserShutdownFailure) {
+      || this.browserShutdownFailure || this.pendingTargetPreparations.size > 0) {
       return;
     }
     if ([...this.states.values()].some((state) => !state.disposed && state.dialogs.length > 0)) {
+      return;
+    }
+    if (typeof browser.pages === "function") {
+      const pagesResult = await this.enumerateIdlePages(browser);
+      if (!pagesResult) {
+        return;
+      }
+      const livePages = pagesResult.filter((page) => !isPageClosed(page));
+      for (const page of livePages) {
+        const state = [...this.states.values()].find((candidate) => candidate.page === page);
+        if (!state || state.disposed || state.lifecycleGeneration !== this.lifecycleGeneration || state.configurationPromise || !state.navigationGuardInstalled) {
+          return;
+        }
+        if (state.dialogs.length > 0) {
+          return;
+        }
+      }
+    }
+    // Page enumeration is asynchronous, so re-check lane ownership before
+    // committing to close. A real request or target preparation may have
+    // arrived while the sweep was waiting on Chromium.
+    if (this.queuedOperations !== 1 || this.activeOperationControllers.size !== 1 || this.pendingTargetPreparations.size > 0) {
       return;
     }
     if (this.lastActivityAt !== observedActivityAt
@@ -556,6 +579,21 @@ export class BrowserService {
     // the managed profile lease and disconnects instead of closing external
     // browser processes according to ownsBrowser.
     await this.closeBrowser();
+  }
+
+  private async enumerateIdlePages(browser: Browser): Promise<Page[] | undefined> {
+    const pagesPromise = Promise.resolve().then(() => browser.pages());
+    const result = await settleWithTimeout(
+      pagesPromise.then(
+        (pages) => ({ pages }),
+        (error: unknown) => ({ error }),
+      ),
+      Math.min(this.idleSweepIntervalMs(), SHUTDOWN_CONNECTION_SETTLE_TIMEOUT_MS),
+    );
+    if (!result || "error" in result || !Array.isArray(result.pages)) {
+      return undefined;
+    }
+    return result.pages;
   }
 
   async close(): Promise<void> {
@@ -736,18 +774,7 @@ export class BrowserService {
       this.recoveryRequired = !succeeded;
       return { closed: false, owned: false, succeeded };
     }
-    let succeeded = true;
-    if (owned) {
-      await Promise.resolve().then(() => browser.close()).catch((error: unknown) => {
-        succeeded = false;
-        this.logger.warn("Browser close failed", { error: safeErrorDiagnostic(error) });
-      });
-    } else {
-      await Promise.resolve().then(() => browser.disconnect()).catch((error: unknown) => {
-        succeeded = false;
-        this.logger.warn("Browser disconnect failed", { error: safeErrorDiagnostic(error) });
-      });
-    }
+    const succeeded = await closeConnectedBrowser(browser, owned, this.logger);
     if (!succeeded) {
       this.browserShutdownFailure = true;
       this.failedBrowserShutdown = { browser, owned };
@@ -3586,7 +3613,7 @@ export class BrowserService {
         this.retireAllStates();
       });
       browser.on("targetcreated", (target) => {
-        void this.prepareTarget(target);
+        void this.trackTargetPreparation(target);
       });
       return browser;
     } catch (error) {
@@ -4292,6 +4319,13 @@ export class BrowserService {
     } catch (error) {
       this.logger.warn("New browser tab could not be prepared", { error: safeErrorDiagnostic(error) });
     }
+  }
+
+  private trackTargetPreparation(target: { type(): string; page(): Promise<Page | null> }): Promise<void> {
+    const preparation = this.prepareTarget(target);
+    this.pendingTargetPreparations.add(preparation);
+    void preparation.finally(() => this.pendingTargetPreparations.delete(preparation)).catch(() => undefined);
+    return preparation;
   }
 
   private isUnguardedTargetPage(page: Page): boolean {
@@ -7234,17 +7268,20 @@ function isBrowserConnectTimeout(error: unknown): boolean {
 }
 
 async function closeConnectedBrowser(browser: Browser, owned: boolean, logger: Logger): Promise<boolean> {
-  let succeeded = true;
-  if (owned) {
-    await Promise.resolve().then(() => browser.close()).catch((error: unknown) => {
-      succeeded = false;
-      logger.warn("Late browser close failed", { error: safeErrorDiagnostic(error) });
-    });
-  } else {
-    await Promise.resolve().then(() => browser.disconnect()).catch((error: unknown) => {
-      succeeded = false;
-      logger.warn("Late browser disconnect failed", { error: safeErrorDiagnostic(error) });
-    });
+  const closing = Promise.resolve().then(() => owned ? browser.close() : browser.disconnect());
+  const succeeded = await settleWithTimeout(
+    closing.then(
+      () => true,
+      (error: unknown) => {
+        logger.warn(owned ? "Browser close failed" : "Browser disconnect failed", { error: safeErrorDiagnostic(error) });
+        return false;
+      },
+    ),
+    SHUTDOWN_CONNECTION_SETTLE_TIMEOUT_MS,
+  );
+  if (succeeded === undefined) {
+    logger.warn(owned ? "Browser close timed out" : "Browser disconnect timed out");
+    return false;
   }
   return succeeded;
 }

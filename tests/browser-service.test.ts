@@ -31,7 +31,7 @@ describe("browser service", () => {
     const config = testConfig({ browser: { ...testConfig().browser, mode: "connect", idleTimeoutMs: 1_000 } });
     const service = new BrowserService(config, new SecurityPolicy(config), new Logger("error", {}, () => undefined));
     const disconnect = vi.fn(async () => undefined);
-    const browser = { connected: true, disconnect, on: vi.fn() } as unknown as Browser;
+    const browser = { connected: true, disconnect, pages: vi.fn(async () => []), on: vi.fn() } as unknown as Browser;
     const internal = service as unknown as { browser?: Browser; ownsBrowser: boolean; lastActivityAt: number; idleSweepTimer?: { hasRef?: () => boolean } };
     internal.browser = browser;
     internal.ownsBrowser = false;
@@ -56,7 +56,7 @@ describe("browser service", () => {
     const config = testConfig({ browser: { ...testConfig().browser, mode: "connect", idleTimeoutMs: 1_000 } });
     const service = new BrowserService(config, new SecurityPolicy(config), new Logger("error", {}, () => undefined));
     const disconnect = vi.fn(async () => undefined);
-    const browser = { connected: true, disconnect, on: vi.fn() } as unknown as Browser;
+    const browser = { connected: true, disconnect, pages: vi.fn(async () => []), on: vi.fn() } as unknown as Browser;
     const activeController = new AbortController();
     const internal = service as unknown as {
       browser?: Browser;
@@ -90,8 +90,8 @@ describe("browser service", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-30T00:00:00.000Z"));
     const config = testConfig({ browser: { ...testConfig().browser, mode: "connect", idleTimeoutMs: 1_000 } });
-    const first = { connected: true, disconnect: vi.fn(async () => undefined), on: vi.fn() } as unknown as Browser;
-    const second = { connected: true, disconnect: vi.fn(async () => undefined), on: vi.fn() } as unknown as Browser;
+    const first = { connected: true, disconnect: vi.fn(async () => undefined), pages: vi.fn(async () => []), on: vi.fn() } as unknown as Browser;
+    const second = { connected: true, disconnect: vi.fn(async () => undefined), pages: vi.fn(async () => []), on: vi.fn() } as unknown as Browser;
     const connect = vi.fn(async () => second);
     const configured = new BrowserService(config, new SecurityPolicy(config), new Logger("error", {}, () => undefined), { connect });
     const configuredInternal = configured as unknown as { browser?: Browser; ownsBrowser: boolean; lastActivityAt: number; ensureBrowser(): Promise<Browser> };
@@ -107,6 +107,88 @@ describe("browser service", () => {
       expect(connect).toHaveBeenCalledTimes(1);
     } finally {
       await configured.close();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([false, true] as const)("bounds an idle browser that never settles during shutdown", async (ownsBrowser) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-30T00:00:00.000Z"));
+    const config = testConfig({ browser: { ...testConfig().browser, mode: ownsBrowser ? "launch" : "connect", executablePath: ownsBrowser ? "/usr/bin/chromium" : undefined, idleTimeoutMs: 1_000 } });
+    const neverSettles = vi.fn(() => new Promise<void>(() => undefined));
+    const browser = {
+      connected: true,
+      close: neverSettles,
+      disconnect: neverSettles,
+      pages: vi.fn(async () => []),
+      on: vi.fn(),
+    } as unknown as Browser;
+    const service = new BrowserService(config, new SecurityPolicy(config), new Logger("error", {}, () => undefined));
+    const internal = service as unknown as { browser?: Browser; ownsBrowser: boolean; lastActivityAt: number };
+    internal.browser = browser;
+    internal.ownsBrowser = ownsBrowser;
+    internal.lastActivityAt = Date.now() - 2_000;
+
+    try {
+      await vi.advanceTimersByTimeAsync(500);
+      const shutdown = service.shutdownOutcome();
+      await vi.advanceTimersByTimeAsync(2_500);
+      await expect(shutdown).resolves.toMatchObject({ closed: true, owned: ownsBrowser, succeeded: false });
+      expect(service.connectionStatus()).toMatchObject({ connected: false, recoveryRequired: true });
+      expect(neverSettles).toHaveBeenCalled();
+    } finally {
+      await service.close();
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not reap while target preparation is pending", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-30T00:00:00.000Z"));
+    const config = testConfig({ browser: { ...testConfig().browser, mode: "connect", idleTimeoutMs: 1_000 } });
+    const disconnect = vi.fn(async () => undefined);
+    const browser = { connected: true, disconnect, pages: vi.fn(async () => []), on: vi.fn() } as unknown as Browser;
+    const service = new BrowserService(config, new SecurityPolicy(config), new Logger("error", {}, () => undefined));
+    const internal = service as unknown as { browser?: Browser; ownsBrowser: boolean; lastActivityAt: number; trackTargetPreparation(target: unknown): Promise<void> };
+    internal.browser = browser;
+    internal.ownsBrowser = false;
+    internal.lastActivityAt = Date.now() - 2_000;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const preparation = internal.trackTargetPreparation({ type: () => "page", page: async () => { await gate; return null; } });
+
+    try {
+      await vi.advanceTimersByTimeAsync(500);
+      expect(disconnect).not.toHaveBeenCalled();
+      release();
+      await preparation;
+    } finally {
+      release();
+      await preparation.catch(() => undefined);
+      await service.close();
+      vi.useRealTimers();
+    }
+  });
+
+  it("skips idle cleanup when a live browser page is not tracked", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-30T00:00:00.000Z"));
+    const config = testConfig({ browser: { ...testConfig().browser, mode: "connect", idleTimeoutMs: 1_000 } });
+    const disconnect = vi.fn(async () => undefined);
+    const page = { isClosed: () => false } as unknown as Page;
+    const browser = { connected: true, disconnect, pages: vi.fn(async () => [page]), on: vi.fn() } as unknown as Browser;
+    const service = new BrowserService(config, new SecurityPolicy(config), new Logger("error", {}, () => undefined));
+    const internal = service as unknown as { browser?: Browser; ownsBrowser: boolean; lastActivityAt: number };
+    internal.browser = browser;
+    internal.ownsBrowser = false;
+    internal.lastActivityAt = Date.now() - 2_000;
+
+    try {
+      await vi.advanceTimersByTimeAsync(500);
+      expect(disconnect).not.toHaveBeenCalled();
+      expect(browser.pages).toHaveBeenCalledTimes(1);
+    } finally {
+      await service.close();
       vi.useRealTimers();
     }
   });
