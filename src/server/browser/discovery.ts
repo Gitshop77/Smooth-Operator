@@ -13,7 +13,8 @@ export interface ChromeExecutable {
 }
 
 interface FileSystem {
-  existsSync(path: string): boolean;
+  statSync(path: string): Pick<nodeFs.Stats, "isFile" | "mode">;
+  accessSync(path: string, mode?: number): void;
 }
 
 interface ChromeExecutableCandidate extends ChromeExecutable {}
@@ -25,13 +26,55 @@ interface ChromeExecutableCandidate extends ChromeExecutable {}
 export function findChromeExecutable(fs: FileSystem = nodeFs): ChromeExecutable | null {
   // Candidate generation is cheap, but duplicate PATH entries and platform
   // aliases are common. Deduping before touching the filesystem keeps startup
-  // discovery deterministic and avoids redundant existsSync calls.
-  return dedupeCandidates(chromeExecutableCandidates()).find((candidate) => fs.existsSync(candidate.path)) ?? null;
+  // discovery deterministic and avoids redundant readiness checks.
+  return dedupeCandidates(chromeExecutableCandidates()).find((candidate) => isExecutableReady(candidate.path, fs)) ?? null;
 }
 
 /** All installed Chromium-based browsers found on this machine. */
 export function findChromiumExecutables(fs: FileSystem = nodeFs): ChromeExecutable[] {
-  return dedupeCandidates(chromeExecutableCandidates()).filter((candidate) => fs.existsSync(candidate.path));
+  return dedupeCandidates(chromeExecutableCandidates()).filter((candidate) => isExecutableReady(candidate.path, fs));
+}
+
+/**
+ * Return whether a candidate is a usable browser executable.
+ *
+ * This helper deliberately returns only a boolean so callers such as
+ * browser_doctor can report readiness without echoing paths or filesystem
+ * errors. The filesystem and platform arguments are injectable for deterministic
+ * tests; production callers use the native filesystem and current platform.
+ */
+export function isExecutableReady(
+  path: string,
+  fs: FileSystem = nodeFs,
+  platformName: NodeJS.Platform = process.platform,
+): boolean {
+  if (typeof path !== "string" || path.length === 0) {
+    return false;
+  }
+
+  try {
+    const stats = fs.statSync(path);
+    if (!stats.isFile()) {
+      return false;
+    }
+
+    // Windows does not expose POSIX execute bits. A regular file is the
+    // strongest portable readiness check available there; CreateProcess will
+    // provide the final format/permission validation at launch time.
+    if (platformName === "win32") {
+      return true;
+    }
+
+    // Check both mode bits and effective access. The mode check prevents a
+    // privileged process from accepting a file that is not marked executable.
+    if ((stats.mode & 0o111) === 0) {
+      return false;
+    }
+    fs.accessSync(path, nodeFs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function chromeExecutableSearchPaths(): string[] {

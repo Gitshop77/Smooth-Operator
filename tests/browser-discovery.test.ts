@@ -1,10 +1,38 @@
 import { describe, expect, it } from "vitest";
 
-import { chromeExecutableSearchPaths, findChromeExecutable } from "@/server/browser/discovery";
+import { constants } from "node:fs";
 
-function fileSystemWith(...paths: string[]): { existsSync(path: string): boolean } {
-  const available = new Set(paths);
-  return { existsSync: (path) => available.has(path) };
+import { chromeExecutableSearchPaths, findChromeExecutable, findChromiumExecutables, isExecutableReady } from "@/server/browser/discovery";
+
+type FakeEntry = { kind: "file" | "directory"; mode?: number; accessible?: boolean };
+
+function fileSystemWith(...paths: string[]): {
+  statSync(path: string): { isFile(): boolean; mode: number };
+  accessSync(path: string, mode?: number): void;
+} {
+  const entries = new Map(paths.map((path) => [path, { kind: "file" as const, mode: 0o755, accessible: true }]));
+  return fileSystemWithEntries(entries);
+}
+
+function fileSystemWithEntries(entries: Map<string, FakeEntry>): {
+  statSync(path: string): { isFile(): boolean; mode: number };
+  accessSync(path: string, mode?: number): void;
+} {
+  return {
+    statSync: (path) => {
+      const entry = entries.get(path);
+      if (!entry) {
+        throw new Error("missing");
+      }
+      return { isFile: () => entry.kind === "file", mode: entry.mode ?? 0 };
+    },
+    accessSync: (path, mode) => {
+      const entry = entries.get(path);
+      if (!entry || entry.accessible === false || mode !== constants.X_OK) {
+        throw new Error("not accessible");
+      }
+    },
+  };
 }
 
 function searchPath(pattern: RegExp): string {
@@ -38,6 +66,50 @@ describe("Chrome executable discovery", () => {
 
   it("returns null when none of the supported candidates exists", () => {
     expect(findChromeExecutable(fileSystemWith())).toBeNull();
+  });
+
+  it("accepts only regular POSIX files with execute permission and access", () => {
+    const executable = searchPath(/Google Chrome\.app[\\/]Contents[\\/]MacOS[\\/]Google Chrome$/);
+    const directory = searchPath(/Google Chrome Beta\.app[\\/]Contents[\\/]MacOS[\\/]Google Chrome Beta$/);
+    const nonExecutable = searchPath(/Google Chrome Dev\.app[\\/]Contents[\\/]MacOS[\\/]Google Chrome Dev$/);
+    const inaccessible = searchPath(/Google Chrome Canary\.app[\\/]Contents[\\/]MacOS[\\/]Google Chrome Canary$/);
+    const entries = new Map<string, FakeEntry>([
+      [executable, { kind: "file", mode: 0o755, accessible: true }],
+      [directory, { kind: "directory", mode: 0o755, accessible: true }],
+      [nonExecutable, { kind: "file", mode: 0o644, accessible: true }],
+      [inaccessible, { kind: "file", mode: 0o755, accessible: false }],
+    ]);
+    const fs = fileSystemWithEntries(entries);
+
+    expect(isExecutableReady(executable, fs, "darwin")).toBe(true);
+    expect(isExecutableReady(directory, fs, "darwin")).toBe(false);
+    expect(isExecutableReady(nonExecutable, fs, "darwin")).toBe(false);
+    expect(isExecutableReady(inaccessible, fs, "darwin")).toBe(false);
+    expect(findChromeExecutable(fs)).toEqual({ path: executable, channel: "stable", label: "Google Chrome" });
+  });
+
+  it("uses regular-file semantics on Windows without requiring POSIX access", () => {
+    const executable = searchPath(/[\\/]Google[\\/]Chrome[\\/]Application[\\/]chrome\.exe$/);
+    const directory = searchPath(/[\\/]Google[\\/]Chrome Beta[\\/]Application[\\/]chrome\.exe$/);
+    const entries = new Map<string, FakeEntry>([
+      [executable, { kind: "file", mode: 0o644, accessible: false }],
+      [directory, { kind: "directory", mode: 0o755, accessible: true }],
+    ]);
+    const fs = fileSystemWithEntries(entries);
+
+    expect(isExecutableReady(executable, fs, "win32")).toBe(true);
+    expect(isExecutableReady(directory, fs, "win32")).toBe(false);
+  });
+
+  it("filters non-regular and non-executable candidates from the Chromium inventory", () => {
+    const brave = searchPath(/Brave Browser\.app[\\/]Contents[\\/]MacOS[\\/]Brave Browser$/);
+    const edge = searchPath(/Microsoft Edge\.app[\\/]Contents[\\/]MacOS[\\/]Microsoft Edge$/);
+    const entries = new Map<string, FakeEntry>([
+      [brave, { kind: "directory", mode: 0o755, accessible: true }],
+      [edge, { kind: "file", mode: 0o644, accessible: true }],
+    ]);
+
+    expect(findChromiumExecutables(fileSystemWithEntries(entries))).toEqual([]);
   });
 });
 
