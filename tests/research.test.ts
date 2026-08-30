@@ -430,4 +430,40 @@ describe("research service", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     vi.unstubAllGlobals();
   });
+
+  it("times out while queued and recovers a permit after the deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchMock = vi.fn((_url: string, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new Error("synthetic fetch abort")), { once: true });
+      }));
+      vi.stubGlobal("fetch", fetchMock);
+      const service = new ResearchService(researchPolicy(), new Logger("error", {}, () => undefined));
+      const activeCalls = Array.from({ length: 4 }, (_, index) => service.research(`deadline-active-${index}`, { maxResults: 1 }));
+      const activeOutcomes = Promise.allSettled(activeCalls);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fetchMock).toHaveBeenCalledTimes(4);
+
+      let queuedSettled = false;
+      let queuedError: unknown;
+      const queued = service.research("deadline-queued", { maxResults: 1 })
+        .catch((error: unknown) => {
+          queuedSettled = true;
+          queuedError = error;
+        });
+      await vi.advanceTimersByTimeAsync(30_000);
+      await Promise.resolve();
+
+      expect(queuedSettled).toBe(true);
+      expect(queuedError).toMatchObject({ code: "RESEARCH_TIMEOUT" });
+      await queued;
+      await expect(activeOutcomes).resolves.toHaveLength(4);
+
+      vi.mocked(fetchMock).mockResolvedValueOnce(new Response("", { status: 200 }));
+      await expect(service.research("deadline-recovered", { maxResults: 1 })).resolves.toMatchObject({ query: "deadline-recovered" });
+    } finally {
+      vi.unstubAllGlobals();
+      vi.useRealTimers();
+    }
+  });
 });

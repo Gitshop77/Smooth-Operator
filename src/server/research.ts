@@ -63,15 +63,16 @@ interface ResearchWaiter {
   reject: (error: unknown) => void;
   signal?: AbortSignal;
   onAbort?: () => void;
+  abortError: () => AppError;
 }
 
 class ResearchAdmission {
   private active = 0;
   private readonly queue: ResearchWaiter[] = [];
 
-  acquire(signal?: AbortSignal): Promise<() => void> {
+  acquire(signal?: AbortSignal, abortError: () => AppError = cancelledResearchError): Promise<() => void> {
     if (signal?.aborted) {
-      return Promise.reject(new AppError("CANCELLED", "The research request was cancelled."));
+      return Promise.reject(abortError());
     }
     if (this.active < MAX_CONCURRENT_RESEARCH) {
       this.active += 1;
@@ -85,7 +86,7 @@ class ResearchAdmission {
       }));
     }
     return new Promise<() => void>((resolve, reject) => {
-      const waiter: ResearchWaiter = { resolve, reject, signal };
+      const waiter: ResearchWaiter = { resolve, reject, signal, abortError };
       const onAbort = (): void => {
         const index = this.queue.indexOf(waiter);
         if (index < 0) {
@@ -93,7 +94,7 @@ class ResearchAdmission {
         }
         this.queue.splice(index, 1);
         signal?.removeEventListener("abort", onAbort);
-        reject(new AppError("CANCELLED", "The research request was cancelled."));
+        reject(abortError());
       };
       waiter.onAbort = onAbort;
       signal?.addEventListener("abort", onAbort, { once: true });
@@ -124,7 +125,7 @@ class ResearchAdmission {
       }
       waiter.signal?.removeEventListener("abort", waiter.onAbort as () => void);
       if (waiter.signal?.aborted) {
-        waiter.reject(new AppError("CANCELLED", "The research request was cancelled."));
+        waiter.reject(waiter.abortError());
         continue;
       }
       this.active += 1;
@@ -172,7 +173,6 @@ export class ResearchService {
     if (signal?.aborted) {
       throw new AppError("CANCELLED", "The research request was cancelled.");
     }
-    const release = await this.admission.acquire(signal);
     const controller = new AbortController();
     let timedOut = false;
     const timeout = setTimeout(() => {
@@ -181,10 +181,18 @@ export class ResearchService {
     }, REQUEST_TIMEOUT_MS);
     const abort = (): void => controller.abort();
     signal?.addEventListener("abort", abort, { once: true });
+    let release: (() => void) | undefined;
     try {
-      if (signal?.aborted) {
+      const abortError = (): AppError => signal?.aborted
+        ? new AppError("CANCELLED", "The research request was cancelled.")
+        : new AppError("RESEARCH_TIMEOUT", `The research request exceeded its ${REQUEST_TIMEOUT_MS / 1_000}-second timeout.`, {
+          retryable: true,
+          details: { classification: "timeout", timeoutMs: REQUEST_TIMEOUT_MS },
+        });
+      release = await this.admission.acquire(controller.signal, abortError);
+      if (controller.signal.aborted) {
         controller.abort();
-        throw new AppError("CANCELLED", "The research request was cancelled.");
+        throw abortError();
       }
       // Policy admission can perform DNS work before fetch starts. Race it
       // against the same deadline as the outbound request so a resolver that
@@ -265,9 +273,13 @@ export class ResearchService {
     } finally {
       clearTimeout(timeout);
       signal?.removeEventListener("abort", abort);
-      release();
+      release?.();
     }
   }
+}
+
+function cancelledResearchError(): AppError {
+  return new AppError("CANCELLED", "The research request was cancelled.");
 }
 
 async function fetchWithRetry(url: URL, signal: AbortSignal): Promise<{ response: Response; attempts: number }> {
