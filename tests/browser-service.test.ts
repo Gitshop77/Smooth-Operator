@@ -2716,6 +2716,45 @@ describe("browser service", () => {
     }
   });
 
+  it.each(["script", "style", "template", "noscript"] as const)("reports omitted content for an excluded %s root", async (tagName) => {
+    const service = new BrowserService(testConfig(), new SecurityPolicy(testConfig()), new Logger("error", {}, () => undefined));
+    const root = {
+      nodeType: 1,
+      tagName: tagName.toUpperCase(),
+      attributes: [],
+      childNodes: [{ nodeType: 3, nodeValue: "root-secret-content" }],
+      children: [],
+      getBoundingClientRect: () => ({ x: 0, y: 0, width: 10, height: 10 }),
+    } as unknown as Record<string, unknown>;
+    const frame = {
+      parentFrame: () => null,
+      $eval: async (_selector: string, callback: (element: unknown, options: unknown) => unknown, options: unknown) => callback(root, options),
+    };
+    const page = { url: () => "about:blank" };
+    const state = { id: "page-1", page };
+    const internal = service as unknown as {
+      executeOnPage(action: BrowserAction, signal?: AbortSignal): Promise<unknown>;
+      pageState(pageId?: string, signal?: AbortSignal): Promise<unknown>;
+      assertCurrentPageAllowed(page: unknown): Promise<void>;
+      assertSnapshotForAction(state: unknown, action: BrowserAction): void;
+      frameFor(state: unknown, frameId?: string): Promise<unknown>;
+      selectorFor(state: unknown, target: string, frameId?: string, frame?: unknown): Promise<string>;
+    };
+    internal.pageState = async () => state;
+    internal.assertCurrentPageAllowed = async () => undefined;
+    internal.assertSnapshotForAction = () => undefined;
+    internal.frameFor = async () => frame;
+    internal.selectorFor = async (_state, target) => target;
+
+    try {
+      const result = await internal.executeOnPage({ action: "inspect_element", selector: tagName, maxDepth: 0 } as BrowserAction) as Record<string, unknown>;
+      expect(result).toMatchObject({ contentOmitted: true, omittedContent: 1, truncated: true, textTruncated: false, text: expect.stringContaining("<untrusted_inspect_text>") });
+      expect(JSON.stringify(result)).not.toContain("root-secret-content");
+    } finally {
+      await service.close();
+    }
+  });
+
   it("extracts bounded non-secret form values without exposing passwords", async () => {
     const service = new BrowserService(testConfig(), new SecurityPolicy(testConfig()), new Logger("error", {}, () => undefined));
     const textarea = { tagName: "TEXTAREA", textContent: "", value: "clipboard text" };

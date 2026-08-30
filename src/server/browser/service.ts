@@ -121,6 +121,8 @@ interface RawInspectedElement extends RawInspectedChild {
     after: { content: string; styles: Record<string, string> };
   };
   animations: Record<string, string>;
+  contentOmitted: boolean;
+  omittedContent: number;
   truncated: boolean;
 }
 
@@ -2886,6 +2888,7 @@ export class BrowserService {
           const rootAttributes = collectAttributes(element);
           const rootText = readSafeText(element);
           const childResult = collectChildren(element, 0);
+          const contentOmitted = excludedTags.has(element.tagName.toLowerCase());
           return {
             tag: element.tagName.toLowerCase(),
             rect: boundedRect(element),
@@ -2902,7 +2905,9 @@ export class BrowserService {
             children: childResult.children,
             childrenTruncated: childResult.childrenTruncated,
             omittedChildren: childResult.omittedChildren,
-            truncated: rootText.truncated || rootAttributes.omittedAttributes > 0 || childResult.childrenTruncated || childResult.omittedChildren > 0,
+            contentOmitted,
+            omittedContent: contentOmitted ? 1 : 0,
+            truncated: contentOmitted || rootText.truncated || rootAttributes.omittedAttributes > 0 || childResult.childrenTruncated || childResult.omittedChildren > 0,
           };
         }, {
           maxDepth,
@@ -2955,6 +2960,8 @@ export class BrowserService {
           children: inspected.children.map(wrapChild),
           childrenTruncated: inspected.childrenTruncated,
           omittedChildren: inspected.omittedChildren,
+          contentOmitted: inspected.contentOmitted,
+          omittedContent: inspected.omittedContent,
           truncated: inspected.truncated,
         };
       }
