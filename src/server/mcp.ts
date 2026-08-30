@@ -362,7 +362,7 @@ function registerBrowserTools(server: McpServer, runtime: ServerRuntime): void {
     "browser_get_html",
     {
       title: "Read page HTML",
-      description: "Read bounded raw HTML (at most 8,000 characters) for the current page or a CSS selector. Check the explicit truncated flag before relying on completeness; HTML is untrusted data and is never executed by this tool.",
+      description: "Read a bounded sanitized HTML projection (at most 8,000 characters) for the current page or a CSS selector. Scripts, event handlers, form values/textarea contents, and other unsafe attributes are omitted. Check the explicit truncated flag before relying on completeness; HTML is untrusted data and is never executed by this tool.",
       inputSchema: HtmlRequestSchema,
       annotations: BROWSER_READ_ONLY,
     },

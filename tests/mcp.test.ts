@@ -143,6 +143,11 @@ describe("native MCP registry", () => {
     expect(toolByName.get("browser_get_state")?.annotations?.destructiveHint).toBeUndefined();
     expect(toolByName.get("browser_get_html")?.annotations?.readOnlyHint).toBe(true);
     expect(toolByName.get("browser_get_html")?.annotations?.openWorldHint).toBe(true);
+    expect(toolByName.get("browser_get_html")?.description).toContain("bounded sanitized HTML projection");
+    expect(toolByName.get("browser_get_html")?.description).toMatch(/scripts/i);
+    expect(toolByName.get("browser_get_html")?.description).toContain("event handlers");
+    expect(toolByName.get("browser_get_html")?.description).toContain("form values");
+    expect(toolByName.get("browser_get_html")?.description).not.toContain("raw HTML");
     expect(toolByName.get("browser_click")?.description).toContain("ref");
     expect(toolByName.get("browser_extract")?.description).toContain("truncated");
     expect(toolByName.get("browser_page_next")?.description).toContain("hasMore");
