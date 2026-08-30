@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { access, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { access, appendFile, mkdir, mkdtemp, readdir, rm, symlink, truncate, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -2988,6 +2988,65 @@ describe("browser service", () => {
       expect(disposed).toBe(1);
       await service.close();
     } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects an upload source above the 50 MiB limit before staging", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "smooth-operator-upload-size-test-"));
+    const uploadPath = join(dataDir, "oversized.bin");
+    await writeFile(uploadPath, "");
+    await truncate(uploadPath, 50 * 1024 * 1024 + 1);
+    const base = testConfig();
+    const config = testConfig({ dataDir, security: { ...base.security, allowedFileRoots: [dataDir] } });
+    const service = new BrowserService(config, new SecurityPolicy(config), new Logger("error", {}, () => undefined));
+    const internal = service as unknown as { stageUploadFile(path: string): Promise<unknown> };
+
+    try {
+      await expect(internal.stageUploadFile(uploadPath)).rejects.toMatchObject({
+        code: "FILE_TOO_LARGE",
+        message: "The upload source exceeds the 50 MiB size limit.",
+      });
+      await expect(access(join(dataDir, "upload-staging"))).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await service.close();
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("removes staged bytes when an upload source grows beyond the 50 MiB limit", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "smooth-operator-upload-growth-test-"));
+    const uploadPath = join(dataDir, "growing.bin");
+    const stagingDirectory = join(dataDir, "upload-staging");
+    await writeFile(uploadPath, "");
+    await truncate(uploadPath, 50 * 1024 * 1024);
+    const base = testConfig();
+    const config = testConfig({ dataDir, security: { ...base.security, allowedFileRoots: [dataDir] } });
+    const service = new BrowserService(config, new SecurityPolicy(config), new Logger("error", {}, () => undefined));
+    const internal = service as unknown as { stageUploadFile(path: string): Promise<unknown> };
+    const growAfterStagingStarts = (async () => {
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        try {
+          await access(stagingDirectory);
+          await appendFile(uploadPath, Buffer.alloc(2 * 1024 * 1024));
+          return;
+        } catch {
+          await new Promise<void>((resolve) => setImmediate(resolve));
+        }
+      }
+      throw new Error("Upload staging did not start before the test deadline.");
+    })();
+
+    try {
+      await expect(internal.stageUploadFile(uploadPath)).rejects.toMatchObject({
+        code: "FILE_TOO_LARGE",
+        message: "The upload source exceeds the 50 MiB size limit.",
+      });
+      await growAfterStagingStarts;
+      await expect(readdir(stagingDirectory)).resolves.toEqual([]);
+    } finally {
+      await growAfterStagingStarts.catch(() => undefined);
+      await service.close();
       await rm(dataDir, { recursive: true, force: true });
     }
   });

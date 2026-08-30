@@ -298,6 +298,7 @@ const NAVIGATION_CLICK_EVENT_TIMEOUT_MS = 250;
 const NAVIGATION_CLICK_READY_TIMEOUT_MS = 250;
 const SHUTDOWN_CONNECTION_SETTLE_TIMEOUT_MS = 1_000;
 const MAX_DEVTOOLS_PROBE_RESPONSE_BYTES = 64 * 1024;
+const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
 const COMMON_KEY_ALIASES: Readonly<Record<string, KeyInput>> = {
   ALT: "Alt",
   ARROWDOWN: "ArrowDown",
@@ -6253,6 +6254,9 @@ export class BrowserService {
     if (before.isSymbolicLink()) {
       throw new AppError("FILE_PATH_BLOCKED", "The upload source must not be a symbolic link.");
     }
+    if (before.size > MAX_UPLOAD_BYTES) {
+      throw new AppError("FILE_TOO_LARGE", "The upload source exceeds the 50 MiB size limit.");
+    }
     const noFollow = typeof fsConstants.O_NOFOLLOW === "number" ? fsConstants.O_NOFOLLOW : 0;
     let sourceHandle: FileHandle | undefined;
     let stagingPath: string | undefined;
@@ -6261,6 +6265,9 @@ export class BrowserService {
       const opened = await sourceHandle.stat();
       if (!opened.isFile()) {
         throw new AppError("FILE_PATH_BLOCKED", "The upload source must be a regular file.");
+      }
+      if (opened.size > MAX_UPLOAD_BYTES) {
+        throw new AppError("FILE_TOO_LARGE", "The upload source exceeds the 50 MiB size limit.");
       }
       const after = await lstat(candidate);
       if (after.isSymbolicLink() || !sameFileIdentity(opened, after)) {
@@ -6271,6 +6278,7 @@ export class BrowserService {
       await mkdir(stagingDirectory, { recursive: true, mode: 0o700 });
       stagingPath = join(stagingDirectory, `.upload-${randomUUID()}`);
       const stagingHandle = await open(stagingPath, "wx", 0o600);
+      let copiedBytes = 0;
       try {
         // Copy from the already-open source handle rather than reopening the
         // path through a convenience copy helper. This keeps the bytes tied
@@ -6279,6 +6287,10 @@ export class BrowserService {
         for await (const chunk of sourceHandle.createReadStream({ autoClose: false })) {
           throwIfAborted(signal);
           const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
+          copiedBytes += buffer.byteLength;
+          if (copiedBytes > MAX_UPLOAD_BYTES) {
+            throw new AppError("FILE_TOO_LARGE", "The upload source exceeds the 50 MiB size limit.");
+          }
           let offset = 0;
           while (offset < buffer.byteLength) {
             const written = await stagingHandle.write(buffer, offset, buffer.byteLength - offset, null);
@@ -6293,7 +6305,7 @@ export class BrowserService {
         await stagingHandle.close().catch(() => undefined);
       }
       throwIfAborted(signal);
-      return { path: stagingPath, displayName: basename(candidate), size: opened.size };
+      return { path: stagingPath, displayName: basename(candidate), size: copiedBytes };
     } catch (error) {
       if (stagingPath) {
         await unlinkIfPresent(stagingPath);
