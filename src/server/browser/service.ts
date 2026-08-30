@@ -297,6 +297,7 @@ const NAVIGATION_CLICK_SETTLE_TIMEOUT_MS = 50;
 const NAVIGATION_CLICK_EVENT_TIMEOUT_MS = 250;
 const NAVIGATION_CLICK_READY_TIMEOUT_MS = 250;
 const SHUTDOWN_CONNECTION_SETTLE_TIMEOUT_MS = 1_000;
+const MAX_DEVTOOLS_PROBE_RESPONSE_BYTES = 64 * 1024;
 const COMMON_KEY_ALIASES: Readonly<Record<string, KeyInput>> = {
   ALT: "Alt",
   ARROWDOWN: "ArrowDown",
@@ -7239,7 +7240,15 @@ async function probeDevToolsEndpoint(browserURL: string, timeoutMs: number): Pro
     if (!response.ok) {
       throw new Error(`DevTools endpoint returned HTTP ${response.status}.`);
     }
-    const value: unknown = await response.json();
+    const declaredLength = response.headers.get("content-length");
+    if (declaredLength !== null) {
+      const parsedLength = Number(declaredLength);
+      if (Number.isFinite(parsedLength) && parsedLength > MAX_DEVTOOLS_PROBE_RESPONSE_BYTES) {
+        throw new Error("DevTools endpoint response exceeded the safety limit.");
+      }
+    }
+    const body = await readBoundedDevToolsResponse(response, MAX_DEVTOOLS_PROBE_RESPONSE_BYTES);
+    const value: unknown = JSON.parse(body);
     if (!isRecordValue(value)) {
       throw new Error("DevTools endpoint returned an invalid version payload.");
     }
@@ -7251,6 +7260,38 @@ async function probeDevToolsEndpoint(browserURL: string, timeoutMs: number): Pro
   } finally {
     clearTimeout(timer);
   }
+}
+
+async function readBoundedDevToolsResponse(response: Response, maxBytes: number): Promise<string> {
+  if (!response.body) {
+    const text = await response.text();
+    if (Buffer.byteLength(text, "utf8") > maxBytes) {
+      throw new Error("DevTools endpoint response exceeded the safety limit.");
+    }
+    return text;
+  }
+
+  const reader = response.body.getReader();
+  const chunks: Buffer[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const next = await reader.read();
+      if (next.done) {
+        break;
+      }
+      const chunk = Buffer.from(next.value);
+      total += chunk.byteLength;
+      if (total > maxBytes) {
+        void reader.cancel().catch(() => undefined);
+        throw new Error("DevTools endpoint response exceeded the safety limit.");
+      }
+      chunks.push(chunk);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks, total).toString("utf8");
 }
 
 function boundedEndpointField(value: unknown): string | undefined {

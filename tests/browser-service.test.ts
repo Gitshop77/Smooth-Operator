@@ -1,5 +1,6 @@
 import { EventEmitter } from "node:events";
 import { access, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -64,6 +65,89 @@ describe("browser service", () => {
         await service.close();
       }
     } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects DevTools probe bodies above the 64 KiB limit before parsing", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "smooth-operator-managed-probe-limit-"));
+    const oversizedJson = JSON.stringify({ Browser: "Chrome/140.0.0.0", padding: "x".repeat(64 * 1024) });
+    expect(Buffer.byteLength(oversizedJson)).toBeGreaterThan(64 * 1024);
+    const endpoint = createServer((request, response) => {
+      if (request.url !== "/json/version") {
+        response.writeHead(404).end();
+        return;
+      }
+      response.setHeader("content-length", String(Buffer.byteLength(oversizedJson)));
+      response.end(oversizedJson);
+    });
+    endpoint.listen(0, "127.0.0.1");
+    await new Promise<void>((resolve, reject) => {
+      endpoint.once("listening", () => resolve());
+      endpoint.once("error", reject);
+    });
+    const address = endpoint.address();
+    if (!address || typeof address === "string") {
+      throw new Error("The probe test endpoint did not expose a TCP address.");
+    }
+    await writeFile(join(directory, "DevToolsActivePort"), `${address.port}\n/devtools/browser/test\n`);
+    const config = testConfig({
+      browser: { ...testConfig().browser, mode: "managed", executablePath: "/custom/chrome", userDataDir: directory },
+    });
+    const browser = { on: () => undefined, close: async () => undefined } as unknown as Browser;
+    const launch = vi.fn(async () => browser);
+    const connect = vi.fn(async () => browser);
+    const service = new BrowserService(config, new SecurityPolicy(config), new Logger("error", {}, () => undefined), { connect, launch });
+
+    try {
+      const internal = service as unknown as { connectBrowser(generation: number): Promise<Browser> };
+      await expect(internal.connectBrowser(0)).resolves.toBe(browser);
+      expect(launch).toHaveBeenCalledTimes(1);
+      expect(connect).not.toHaveBeenCalled();
+
+      await new Promise<void>((resolve, reject) => {
+        endpoint.close((error) => error ? reject(error) : resolve());
+      });
+
+      const streamedEndpoint = createServer((request, response) => {
+        if (request.url !== "/json/version") {
+          response.writeHead(404).end();
+          return;
+        }
+        const payload = Buffer.from(oversizedJson);
+        response.write(payload.subarray(0, 64 * 1024));
+        setImmediate(() => response.end(payload.subarray(64 * 1024)));
+      });
+      streamedEndpoint.listen(0, "127.0.0.1");
+      await new Promise<void>((resolve, reject) => {
+        streamedEndpoint.once("listening", () => resolve());
+        streamedEndpoint.once("error", reject);
+      });
+      const streamedAddress = streamedEndpoint.address();
+      if (!streamedAddress || typeof streamedAddress === "string") {
+        throw new Error("The streamed probe test endpoint did not expose a TCP address.");
+      }
+      await writeFile(join(directory, "DevToolsActivePort"), `${streamedAddress.port}\n/devtools/browser/test\n`);
+      const streamedLaunch = vi.fn(async () => browser);
+      const streamedConnect = vi.fn(async () => browser);
+      const streamedService = new BrowserService(config, new SecurityPolicy(config), new Logger("error", {}, () => undefined), { connect: streamedConnect, launch: streamedLaunch });
+      try {
+        await expect((streamedService as unknown as { connectBrowser(generation: number): Promise<Browser> }).connectBrowser(0)).resolves.toBe(browser);
+        expect(streamedLaunch).toHaveBeenCalledTimes(1);
+        expect(streamedConnect).not.toHaveBeenCalled();
+      } finally {
+        await streamedService.close();
+        await new Promise<void>((resolve, reject) => {
+          streamedEndpoint.close((error) => error ? reject(error) : resolve());
+        });
+      }
+    } finally {
+      await service.close();
+      if (endpoint.listening) {
+        await new Promise<void>((resolve, reject) => {
+          endpoint.close((error) => error ? reject(error) : resolve());
+        });
+      }
       await rm(directory, { recursive: true, force: true });
     }
   });
