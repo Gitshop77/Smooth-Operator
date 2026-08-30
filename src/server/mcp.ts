@@ -16,6 +16,7 @@ import {
   NavigateRequestSchema,
   MCP_PAGE_TEXT_MAX_CHARS,
   NetworkLogRequestSchema,
+  NetworkSearchRequestSchema,
   PdfRequestSchema,
   ResearchRequestSchema,
   RESEARCH_MAX_RESULTS,
@@ -416,6 +417,11 @@ function registerBrowserTools(server: McpServer, runtime: ServerRuntime): void {
     async (input, ctx) => callTool(() => runtime.run({ action: networkAction(input.operation), pageId: input.pageId }, ctx.mcpReq.signal), runtime),
   );
   server.registerTool(
+    "browser_search_network_log",
+    { title: "Search browser network log", description: "Search the bounded redacted network journal by text, request ID, URL, method, status, or resource type. Results are deterministic and expose explicit capacity and omission metadata.", inputSchema: NetworkSearchRequestSchema, annotations: BROWSER_READ_ONLY },
+    async (input, ctx) => callTool(() => runtime.run({ action: "search_network_log", ...input }, ctx.mcpReq.signal), runtime),
+  );
+  server.registerTool(
     "browser_console_log",
     { title: "Read browser console log", description: "Enable, disable, read, clear, or read-and-clear the bounded console log.", inputSchema: NetworkLogRequestSchema, annotations: BROWSER_DESTRUCTIVE },
     async (input, ctx) => callTool(() => runtime.run({ action: consoleAction(input.operation), pageId: input.pageId }, ctx.mcpReq.signal), runtime),
@@ -571,6 +577,7 @@ function actionAnnotations(action: BrowserAction["action"]): ToolAnnotations {
     case "get_computed_style":
     case "get_page_info":
     case "get_network_log":
+    case "search_network_log":
     case "get_console_log":
     case "alert_get_text":
     case "detect_challenge":

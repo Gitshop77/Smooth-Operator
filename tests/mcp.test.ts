@@ -20,6 +20,7 @@ const EXPECTED_READ_ONLY_TOOLS = new Set([
   "browser_wait_for_text",
   "browser_wait_for_url",
   "browser_wait_for_network_idle",
+  "browser_search_network_log",
   "browser_extract",
   "browser_screenshot",
   "browser_downloads",
@@ -65,7 +66,7 @@ describe("native MCP registry", () => {
     const resourceTemplates = await client.listResourceTemplates();
     const prompts = await client.listPrompts();
 
-    expect(tools.tools).toHaveLength(61);
+    expect(tools.tools).toHaveLength(62);
     expect(resources.resources).toHaveLength(6);
     expect(resourceTemplates.resourceTemplates).toHaveLength(1);
     expect(prompts.prompts).toHaveLength(4);
@@ -232,7 +233,7 @@ describe("native MCP registry", () => {
       ["browser_back", {}], ["browser_go_back", {}], ["browser_forward", {}], ["browser_reload", {}], ["browser_close", {}], ["browser_close_all", {}],
       ["browser_wait", { milliseconds: 0 }], ["browser_wait_for_element", { selector: "#x" }],
       ["browser_wait_for_text", { text: "x" }], ["browser_wait_for_url", { url: "*" }], ["browser_wait_for_network_idle", {}],
-      ["browser_network_log", { operation: "read" }], ["browser_console_log", { operation: "read" }],
+      ["browser_network_log", { operation: "read" }], ["browser_search_network_log", { query: "fixture", limit: 10 }], ["browser_console_log", { operation: "read" }],
       ["browser_find_text", { query: "x" }], ["browser_extract", {}], ["browser_extract_content", { query: "body", extract_links: true }],
       ["browser_upload", { selector: "input[type=file]", filePath: "/tmp/smooth-operator-test/file.txt" }],
       ["browser_screenshot", {}], ["browser_pdf", { outputPath: "/tmp/smooth-operator-test/page.pdf" }], ["browser_downloads", {}],

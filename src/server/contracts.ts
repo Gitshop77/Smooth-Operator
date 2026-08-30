@@ -50,6 +50,7 @@ const BrowserActionNames = [
   "enable_network_log",
   "disable_network_log",
   "get_network_log",
+  "search_network_log",
   "clear_network_log",
   "getclear_network_log", // canonical action spelling of the read_and_clear operation
   "enable_console_log",
@@ -145,6 +146,11 @@ const BrowserActionFieldsSchema = z.object({
   script: z.string().trim().min(1).max(40_000).optional(),
   expression: z.string().trim().min(1).max(40_000).optional(),
   query: BoundedString(4_000).optional(),
+  requestId: BoundedString(256).optional(),
+  method: BoundedString(32).optional(),
+  status: z.number().int().min(0).max(999).optional(),
+  resourceType: BoundedString(64).optional(),
+  limit: z.number().int().min(1).max(200).optional(),
   includeLinks: z.boolean().optional(),
   includeSnapshot: z.boolean().optional(),
   maxChars: z.number().int().min(100).max(MCP_PAGE_TEXT_MAX_CHARS).optional(),
@@ -686,6 +692,17 @@ export const EvaluateRequestSchema = z.object({
   }
 });
 export const NetworkLogRequestSchema = z.object({ operation: z.enum(["enable", "disable", "read", "clear", "read_and_clear"]), ...PageInput }).strict();
+export const NetworkSearchRequestSchema = z.object({
+  query: BoundedString(4_000).optional(),
+  requestId: BoundedString(256).optional(),
+  url: BoundedString(8_000).optional(),
+  method: BoundedString(32).optional(),
+  status: z.number().int().min(0).max(999).optional(),
+  resourceType: BoundedString(64).optional(),
+  offset: z.number().int().min(0).max(1_000_000).optional(),
+  limit: z.number().int().min(1).max(200).optional(),
+  pageId: BoundedString(200).optional(),
+}).strict();
 export const DialogRequestSchema = z.object({ operation: z.enum(["get_text", "accept", "dismiss", "send_keys"]), text: z.string().max(20_000).optional(), ...PageInput }).strict().superRefine((input, context) => {
   if (input.operation === "send_keys" && input.text === undefined) {
     context.addIssue({ code: "custom", message: "Dialog send_keys requires text." });

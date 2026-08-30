@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { BatchRequestSchema, BrowserActionInputSchema, BrowserActionPlanSchema, BrowserActionSchema, ClickRequestSchema, CookieRequestSchema, EvaluateRequestSchema, ExtractRequestSchema, HtmlRequestSchema, InputRequestSchema, NavigateRequestSchema, ResearchRequestSchema, ScreenshotRequestSchema, SnapshotRequestSchema, SolveChallengeRequestSchema, StorageRequestSchema, TargetRequestSchema } from "@/server/contracts";
+import { BatchRequestSchema, BrowserActionInputSchema, BrowserActionPlanSchema, BrowserActionSchema, ClickRequestSchema, CookieRequestSchema, EvaluateRequestSchema, ExtractRequestSchema, HtmlRequestSchema, InputRequestSchema, NavigateRequestSchema, NetworkSearchRequestSchema, ResearchRequestSchema, ScreenshotRequestSchema, SnapshotRequestSchema, SolveChallengeRequestSchema, StorageRequestSchema, TargetRequestSchema } from "@/server/contracts";
 
 describe("MCP contracts", () => {
   it("accepts browser-use indexed and coordinate click forms", () => {
@@ -85,6 +85,15 @@ describe("MCP contracts", () => {
     expect(StorageRequestSchema.safeParse({ operation: "clear", all: true }).success).toBe(true);
     expect(StorageRequestSchema.safeParse({ operation: "clear" }).success).toBe(false);
     expect(StorageRequestSchema.safeParse({ operation: "clear", key: "a", all: true }).success).toBe(false);
+  });
+
+  it("accepts bounded network journal search filters", () => {
+    expect(NetworkSearchRequestSchema.safeParse({ query: "checkout", requestId: "req-1", url: "https://example.test", method: "post", status: 200, resourceType: "Fetch", offset: 0, limit: 20, pageId: "page-1" }).success).toBe(true);
+    expect(NetworkSearchRequestSchema.safeParse({ limit: 0 }).success).toBe(false);
+    expect(NetworkSearchRequestSchema.safeParse({ limit: 201 }).success).toBe(false);
+    expect(NetworkSearchRequestSchema.safeParse({ status: 1_000 }).success).toBe(false);
+    expect(NetworkSearchRequestSchema.safeParse({ query: "   " }).success).toBe(false);
+    expect(NetworkSearchRequestSchema.safeParse({ headers: {} }).success).toBe(false);
   });
 
   it("accepts browser-use CLI screenshot aliases with bounded downscaling", () => {

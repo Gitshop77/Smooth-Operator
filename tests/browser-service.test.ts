@@ -1602,6 +1602,74 @@ describe("browser service", () => {
     await service.close();
   });
 
+  it("records correlated network metadata only while logging is enabled", async () => {
+    const config = testConfig();
+    const service = new BrowserService(config, new SecurityPolicy(config), new Logger("error", {}, () => undefined));
+    const page = new EventEmitter() as EventEmitter & { isClosed(): boolean; mainFrame(): object };
+    page.isClosed = () => false;
+    page.mainFrame = () => page;
+    const internal = service as unknown as {
+      stateFor(page: unknown): { id: string; networkEnabled: boolean; network: unknown[] };
+      networkJournal: { query(query?: Record<string, unknown>): { entries: Array<Record<string, unknown>> } };
+      executeOnPage(action: BrowserAction, signal?: AbortSignal): Promise<unknown>;
+      pageState(pageId?: string, signal?: AbortSignal): Promise<unknown>;
+      assertCurrentPageAllowed(page: unknown): Promise<void>;
+      assertSnapshotForAction(state: unknown, action: BrowserAction): void;
+      frameFor(state: unknown, frameId?: string): Promise<unknown>;
+    };
+    const state = internal.stateFor(page);
+    const request = {
+      id: "request-1",
+      url: () => "https://example.test/api?token=secret",
+      method: () => "POST",
+      resourceType: () => "Fetch",
+      isNavigationRequest: () => false,
+    };
+    const response = {
+      request: () => request,
+      url: () => "https://example.test/api?token=secret",
+      status: () => 201,
+    };
+
+    page.emit("request", request);
+    page.emit("response", response);
+    expect(internal.networkJournal.query({}).entries).toHaveLength(0);
+
+    state.networkEnabled = true;
+    page.emit("request", request);
+    page.emit("response", response);
+    expect(internal.networkJournal.query({}).entries).toHaveLength(1);
+    expect(internal.networkJournal.query({}).entries[0]).toMatchObject({
+      requestId: "request-1",
+      method: "POST",
+      resourceType: "Fetch",
+      status: 201,
+      url: "https://example.test/api?token=%5Bredacted%5D",
+    });
+    expect(internal.networkJournal.query({}).entries[0]).not.toHaveProperty("headers");
+    expect(internal.networkJournal.query({}).entries[0]).not.toHaveProperty("body");
+
+    internal.pageState = async () => state;
+    internal.assertCurrentPageAllowed = async () => undefined;
+    internal.assertSnapshotForAction = () => undefined;
+    internal.frameFor = async () => page;
+    await expect(internal.executeOnPage({ action: "search_network_log", query: "example.test", limit: 10 } as BrowserAction)).resolves.toMatchObject({
+      entries: [expect.objectContaining({
+        requestId: "request-1",
+        status: 201,
+        url: expect.stringContaining("<untrusted_network_log_url>"),
+      })],
+      total: 1,
+      capacity: 500,
+      hasMore: false,
+    });
+    await expect(internal.executeOnPage({ action: "clear_network_log" } as BrowserAction)).resolves.toMatchObject({ cleared: true });
+    expect(state.network).toHaveLength(0);
+    expect(internal.networkJournal.query({}).entries).toHaveLength(0);
+
+    await service.close();
+  });
+
   it("configures page defaults and interception once per page state", async () => {
     const service = new BrowserService(testConfig(), new SecurityPolicy(testConfig()), new Logger("error", {}, () => undefined));
     let timeoutCalls = 0;

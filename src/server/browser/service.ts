@@ -29,6 +29,7 @@ import { chromeExecutableSearchPaths, findChromeExecutable } from "./discovery";
 import { buildFingerprintProfile } from "./fingerprints";
 import { buildStealthInitScript } from "./stealth";
 import { globMatches, sanitizeUrl as safeUrl } from "./utils";
+import { NetworkJournal } from "./network";
 
 interface BrowserTab {
   id: string;
@@ -346,6 +347,7 @@ const DOM_MUTATING_ACTIONS = new Set<BrowserAction["action"]>([
 const PARALLEL_READ_ACTIONS = new Set<BrowserAction["action"]>([
   "wait", "wait_for_element", "wait_for_text", "wait_for_url", "wait_for_network_idle",
   "get_network_log", "get_console_log", "extract", "get_html", "dropdown_options", "page_next", "search_page", "find_elements", "list_frames", "accessibility_snapshot", "get_computed_style", "get_page_info", "get_cookies", "get_storage", "list_downloads",
+  "search_network_log",
 ]);
 
 export class BrowserService {
@@ -374,6 +376,7 @@ export class BrowserService {
   private currentPageId: string | undefined;
   private sessionGeneration = 0;
   private readonly states = new Map<string, PageState>();
+  private readonly networkJournal = new NetworkJournal();
   private readonly configuredDownloadContexts = new WeakSet<object>();
   // The download directory is process/session scoped, while page setup is
   // page scoped. Share the mkdir promise across pages so opening a tab does
@@ -381,6 +384,7 @@ export class BrowserService {
   // so a later page can retry after a transient filesystem failure.
   private downloadDirectoryPromise: Promise<string> | undefined;
   private readonly ids = new WeakMap<Page, string>();
+  private readonly networkRequestIds = new WeakMap<object, string>();
   private readonly targetGuardSessions = new Map<string, TargetGuardSession>();
   private readonly targetGuardNavigationErrors = new Map<string, AppError>();
   private readonly unguardedTargetSessions = new Set<string>();
@@ -1614,12 +1618,44 @@ export class BrowserService {
         return { enabled: false };
       case "get_network_log":
         return { entries: untrustedLogEntries(state.network.slice(-MAX_LOG_ENTRIES)) };
+      case "search_network_log": {
+        const result = action.query
+          ? this.networkJournal.search(action.query, {
+            pageId: state.id,
+            requestId: action.requestId,
+            url: action.url,
+            method: action.method,
+            status: action.status,
+            resourceType: action.resourceType,
+            offset: action.offset,
+            limit: action.limit,
+          })
+          : this.networkJournal.query({
+            pageId: state.id,
+            requestId: action.requestId,
+            url: action.url,
+            method: action.method,
+            status: action.status,
+            resourceType: action.resourceType,
+            offset: action.offset,
+            limit: action.limit,
+          });
+        return {
+          ...result,
+          entries: result.entries.map((entry) => ({
+            ...entry,
+            url: wrapUntrustedText("network_log_url", redactSecretPlaceholders(entry.url), 4_096),
+          })),
+        };
+      }
       case "clear_network_log":
         state.network = [];
+        this.networkJournal.clear(state.id);
         return { cleared: true };
       case "getclear_network_log": {
         const entries = untrustedLogEntries(state.network.slice(-MAX_LOG_ENTRIES));
         state.network = [];
+        this.networkJournal.clear(state.id);
         return { entries, cleared: true };
       }
       case "enable_console_log":
@@ -3849,6 +3885,7 @@ export class BrowserService {
     state.snapshotInteractive = undefined;
     state.snapshotId = undefined;
     state.policyVerifiedUrls?.clear();
+    this.networkJournal.clear(state.id);
     state.dialogs.length = 0;
     state.navigationError = undefined;
     state.activeNavigationGeneration = undefined;
@@ -4189,6 +4226,45 @@ export class BrowserService {
     }
   }
 
+  private networkRequestId(request: HTTPRequest): string | undefined {
+    const existing = this.networkRequestIds.get(request as unknown as object);
+    if (existing) {
+      return existing;
+    }
+    try {
+      const raw = (request as unknown as { id?: unknown }).id;
+      if (typeof raw === "string" || typeof raw === "number") {
+        return String(raw);
+      }
+    } catch {
+      // A disposed request can reject access to its internal ID. The journal
+      // will allocate a stable ID for the request event in that case.
+    }
+    return undefined;
+  }
+
+  private networkRequestIdForResponse(
+    pageId: string,
+    request: HTTPRequest,
+    url: string,
+    resourceType: string | undefined,
+    timestamp: string,
+  ): string {
+    const known = this.networkRequestId(request);
+    if (known) {
+      return known;
+    }
+    const recorded = this.networkJournal.recordRequest({
+      pageId,
+      url,
+      method: "UNKNOWN",
+      ...(resourceType ? { resourceType } : {}),
+      timestamp,
+    });
+    this.networkRequestIds.set(request as unknown as object, recorded.requestId);
+    return recorded.requestId;
+  }
+
   private stateFor(page: Page): PageState {
     const existingId = this.ids.get(page);
     if (existingId) {
@@ -4215,7 +4291,20 @@ export class BrowserService {
         return;
       }
       try {
-        state.network.push({ timestamp: new Date().toISOString(), type: "request", url: safeUrl(request.url()), method: request.method() });
+        const timestamp = new Date().toISOString();
+        const url = request.url();
+        const method = request.method();
+        const resourceType = request.resourceType?.();
+        const recorded = this.networkJournal.recordRequest({
+          pageId: state.id,
+          requestId: this.networkRequestId(request),
+          url,
+          method,
+          ...(typeof resourceType === "string" ? { resourceType } : {}),
+          timestamp,
+        });
+        this.networkRequestIds.set(request as unknown as object, recorded.requestId);
+        state.network.push({ timestamp, type: "request", url: safeUrl(url), method });
         trimLog(state.network);
       } catch (error) {
         this.logger.debug("Browser request log entry was unavailable after page disposal", { pageId: state.id, error: safeErrorDiagnostic(error) });
@@ -4232,7 +4321,20 @@ export class BrowserService {
           state.mainFrameStatus = response.status();
         }
         if (state.networkEnabled) {
-          state.network.push({ timestamp: new Date().toISOString(), type: "response", url: safeUrl(response.url()), status: response.status() });
+          const timestamp = new Date().toISOString();
+          const request = response.request();
+          const url = response.url();
+          const resourceType = request.resourceType?.();
+          const requestId = this.networkRequestIdForResponse(state.id, request, url, resourceType, timestamp);
+          this.networkJournal.recordResponse({
+            pageId: state.id,
+            requestId,
+            url,
+            status: response.status(),
+            ...(typeof resourceType === "string" ? { resourceType } : {}),
+            timestamp,
+          });
+          state.network.push({ timestamp, type: "response", url: safeUrl(url), status: response.status() });
           trimLog(state.network);
         }
       } catch (error) {
