@@ -41,11 +41,11 @@
     "prepare": "npm run build"
   },
   "dependencies": {
-    "@modelcontextprotocol/node": "^2.0.0",
-    "@modelcontextprotocol/server": "^2.0.0",
-    "ghost-cursor": "^1.4.2",
-    "puppeteer-core": "^25.9.0",
-    "zod": "^4.4.3"
+    "@modelcontextprotocol/node": "2.0.0",
+    "@modelcontextprotocol/server": "2.0.0",
+    "ghost-cursor": "1.4.2",
+    "puppeteer-core": "25.9.0",
+    "zod": "4.4.3"
   },
   "devDependencies": {
     "@modelcontextprotocol/client": "^2.0.0",
