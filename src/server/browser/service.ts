@@ -425,6 +425,7 @@ export class BrowserService {
   private readonly targetGuardSessions = new Map<string, TargetGuardSession>();
   private readonly targetGuardNavigationErrors = new Map<string, AppError>();
   private readonly unguardedTargetSessions = new Set<string>();
+  private readonly handledTargetGuardSessions = new Set<string>();
   private readonly pendingTargetGuardSessions = new Map<string, CDPSession>();
   private readonly pendingTargetGuardInfos = new Map<string, { targetId: string; targetType: string }>();
   private targetGuardUnavailable = false;
@@ -3866,6 +3867,10 @@ export class BrowserService {
       if (!event) {
         return;
       }
+      if (this.handledTargetGuardSessions.has(event.sessionId)) {
+        return;
+      }
+      this.handledTargetGuardSessions.add(event.sessionId);
       const session = this.pendingTargetGuardSessions.get(event.sessionId)
         ?? getCdpSession(targetConnection, event.sessionId);
       this.pendingTargetGuardSessions.delete(event.sessionId);
@@ -3888,6 +3893,16 @@ export class BrowserService {
           void sendSessionCommand(session, "Page.close").catch(() => undefined);
           this.logger.warn("New browser target guard could not determine attachment ownership");
         }
+        return;
+      }
+      if (!this.targetGuardOriginalEmit || !this.targetGuardWrappedEmit) {
+        this.targetGuardUnavailable = true;
+        this.unguardedTargetSessions.add(event.sessionId);
+        if (targetConnection.send) {
+          void targetConnection.send("Target.closeTarget", { targetId: event.targetInfo.targetId }).catch(() => undefined);
+        }
+        void sendSessionCommand(session, "Page.close").catch(() => undefined);
+        this.logger.warn("New browser target guard cannot safely gate debugger resume");
         return;
       }
       if (!session) {
@@ -3916,6 +3931,7 @@ export class BrowserService {
       }
       this.pendingTargetGuardSessions.delete(value.sessionId);
       this.pendingTargetGuardInfos.delete(value.sessionId);
+      this.handledTargetGuardSessions.delete(value.sessionId);
     };
     targetConnection.on("sessionattached", sessionListener);
     targetConnection.on("Target.attachedToTarget", rawListener);
@@ -3926,7 +3942,8 @@ export class BrowserService {
     // the regular raw event subscription remains as a compatibility fallback
     // for alternate connection implementations.
     const originalEmit = targetConnection.emit;
-    if (originalEmit) {
+    let emitGuardInstalled = false;
+    if (typeof originalEmit === "function") {
       const wrappedEmit = (event: string, value: unknown): boolean => {
         if (event === "Target.attachedToTarget") {
           rawListener(value);
@@ -3935,8 +3952,12 @@ export class BrowserService {
       };
       try {
         targetConnection.emit = wrappedEmit;
+        if (targetConnection.emit !== wrappedEmit) {
+          throw new Error("Connection emit wrapper was not installed.");
+        }
         this.targetGuardOriginalEmit = originalEmit;
         this.targetGuardWrappedEmit = wrappedEmit;
+        emitGuardInstalled = true;
       } catch {
         this.targetGuardOriginalEmit = undefined;
         this.targetGuardWrappedEmit = undefined;
@@ -3946,6 +3967,12 @@ export class BrowserService {
     this.targetGuardConnectionListener = sessionListener;
     this.targetGuardRawConnectionListener = rawListener;
     this.targetGuardDetachedListener = detachedListener;
+    if (!emitGuardInstalled) {
+      this.targetGuardUnavailable = true;
+      this.targetGuardReadinessPromise = Promise.resolve();
+      this.logger.warn("Browser target guard is unavailable; debugger resume cannot be gated");
+      return;
+    }
     if (targetConnection.send) {
       const readiness = Promise.resolve()
         .then(() => targetConnection.send?.("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: true, flatten: true }))
@@ -4007,6 +4034,7 @@ export class BrowserService {
     this.targetGuardUnavailable = false;
     this.pendingTargetGuardSessions.clear();
     this.pendingTargetGuardInfos.clear();
+    this.handledTargetGuardSessions.clear();
     for (const guard of this.targetGuardSessions.values()) {
       guard.released = true;
       removeCdpListener(guard.session, "Fetch.requestPaused", guard.requestPausedListener);

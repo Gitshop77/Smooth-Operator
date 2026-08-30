@@ -2860,6 +2860,66 @@ describe("browser service", () => {
     await service.close();
   });
 
+  it("fails closed when the connection emit method cannot be wrapped", async () => {
+    const config = testConfig({ browser: { ...testConfig().browser, mode: "connect", url: "http://127.0.0.1:9222" } });
+    const service = new BrowserService(config, new SecurityPolicy(config), new Logger("error", {}, () => undefined));
+    const connection = new EventEmitter() as EventEmitter & {
+      isAutoAttached(targetId: string): boolean;
+      send(method: string, params?: unknown): Promise<unknown>;
+    };
+    const originalEmit = connection.emit;
+    Object.defineProperty(connection, "emit", { configurable: false, enumerable: true, value: originalEmit, writable: false });
+    connection.isAutoAttached = () => true;
+    connection.send = vi.fn(async () => ({}));
+    const browser = { _connection: connection } as unknown as Browser;
+    const internal = service as unknown as {
+      installTargetGuard(browser: Browser): Promise<void>;
+      targetGuardUnavailable: boolean;
+    };
+
+    try {
+      await internal.installTargetGuard(browser);
+      expect(internal.targetGuardUnavailable).toBe(true);
+      expect(connection.send).not.toHaveBeenCalledWith("Target.setAutoAttach", expect.anything());
+    } finally {
+      await service.close();
+    }
+  });
+
+  it("closes a missing-session target only once when raw attachment handling is duplicated", async () => {
+    const config = testConfig({ browser: { ...testConfig().browser, mode: "connect", url: "http://127.0.0.1:9222" } });
+    const service = new BrowserService(config, new SecurityPolicy(config), new Logger("error", {}, () => undefined));
+    const connection = new EventEmitter() as EventEmitter & {
+      isAutoAttached(targetId: string): boolean;
+      session(sessionId: string): unknown;
+      send(method: string, params?: unknown): Promise<unknown>;
+    };
+    const closeTarget = vi.fn(async () => undefined);
+    connection.isAutoAttached = () => true;
+    connection.session = () => undefined;
+    connection.send = vi.fn(async (method) => {
+      if (method === "Target.closeTarget") {
+        await closeTarget();
+      }
+      return {};
+    });
+    const browser = { _connection: connection } as unknown as Browser;
+    const internal = service as unknown as { installTargetGuard(browser: Browser): Promise<void> };
+
+    try {
+      await internal.installTargetGuard(browser);
+      connection.emit("Target.attachedToTarget", {
+        sessionId: "missing-session",
+        targetInfo: { targetId: "missing-target", type: "page", url: "about:blank" },
+      });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(closeTarget).toHaveBeenCalledTimes(1);
+      expect(connection.send).not.toHaveBeenCalledWith("Fetch.enable", expect.anything());
+    } finally {
+      await service.close();
+    }
+  });
+
   it("does not publish a browser connection before target auto-attach is acknowledged", async () => {
     const config = testConfig({ browser: { ...testConfig().browser, mode: "connect", url: "http://127.0.0.1:9222" } });
     const connection = new EventEmitter() as EventEmitter & {
