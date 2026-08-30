@@ -25,7 +25,7 @@ import { redactSecretPlaceholders, wrapUntrustedText } from "../security";
 import { humanMouseMove, humanType } from "./behavior";
 import { classifyChallenge } from "./challenges";
 import { nativeBrowserLaunchArgs } from "./compatibility";
-import { chromeExecutableSearchPaths, findChromeExecutable } from "./discovery";
+import { chromeExecutableSearchPaths, findChromeExecutable, isExecutableReady } from "./discovery";
 import { buildFingerprintProfile } from "./fingerprints";
 import { buildStealthInitScript } from "./stealth";
 import { globMatches, sanitizeUrl as safeUrl } from "./utils";
@@ -620,12 +620,19 @@ export class BrowserService {
 
   async doctor(): Promise<Record<string, unknown>> {
     const discovered = this.config.browser.executablePath ? undefined : findChromeExecutable();
-    const executablePath = this.config.browser.executablePath ?? discovered?.path;
+    const configuredExecutablePath = this.config.browser.executablePath;
+    const executablePath = configuredExecutablePath ?? discovered?.path;
+    const executable = configuredExecutablePath
+      ? { source: "configured", ready: isExecutableReady(configuredExecutablePath) }
+      : discovered
+        ? { source: "discovered", ready: isExecutableReady(discovered.path), label: discovered.label, channel: discovered.channel }
+        : { source: "missing", ready: false };
     const endpoint = await this.probeManagedEndpoint();
     const browser = endpoint.version?.Browser;
     return {
       mode: this.config.browser.mode,
       executablePath: executablePath ?? null,
+      executable,
       ...(executablePath ? {} : { searchedPaths: chromeExecutableSearchPaths().slice(0, 128) }),
       userDataDir: this.config.browser.userDataDir ?? null,
       endpoint: {

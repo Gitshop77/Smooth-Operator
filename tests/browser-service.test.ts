@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { access, appendFile, mkdir, mkdtemp, readdir, rm, symlink, truncate, writeFile } from "node:fs/promises";
+import { access, appendFile, chmod, mkdir, mkdtemp, readdir, rm, symlink, truncate, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -108,6 +108,36 @@ describe("browser service", () => {
     } finally {
       await configured.close();
       vi.useRealTimers();
+    }
+  });
+
+  it("reports configured executable readiness without attempting a launch", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "smooth-operator-doctor-"));
+    const executable = join(directory, "chrome");
+    try {
+      await writeFile(executable, "browser");
+      if (process.platform !== "win32") {
+        await chmod(executable, 0o755);
+      }
+      const invalid = new BrowserService(
+        testConfig({ browser: { ...testConfig().browser, mode: "launch", executablePath: directory } }),
+        new SecurityPolicy(testConfig()),
+        new Logger("error", {}, () => undefined),
+      );
+      const valid = new BrowserService(
+        testConfig({ browser: { ...testConfig().browser, mode: "launch", executablePath: executable } }),
+        new SecurityPolicy(testConfig()),
+        new Logger("error", {}, () => undefined),
+      );
+      try {
+        await expect(invalid.doctor()).resolves.toMatchObject({ executable: { source: "configured", ready: false }, executablePath: directory });
+        await expect(valid.doctor()).resolves.toMatchObject({ executable: { source: "configured", ready: true }, executablePath: executable });
+      } finally {
+        await invalid.close();
+        await valid.close();
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true });
     }
   });
 

@@ -178,6 +178,7 @@ describe("native MCP registry", () => {
     const doctor = await client.callTool({ name: "browser_doctor", arguments: {} });
     expect(doctor.isError).not.toBe(true);
     expect(doctor.structuredContent).toMatchObject({ endpoint: { state: "no-file" } });
+    expect(doctor.structuredContent).toMatchObject({ executable: { source: expect.stringMatching(/^(configured|discovered|missing)$/), ready: expect.any(Boolean) } });
 
     const rejectedOverride = await client.callTool({ name: "browser_evaluate", arguments: { code: "1 + 1", mode: "full" } });
     expect(rejectedOverride.isError).toBe(true);
