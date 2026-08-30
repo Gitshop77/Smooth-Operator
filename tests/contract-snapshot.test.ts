@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { describe, expect, it } from "vitest";
 
-import { createMcpServer } from "@/server/mcp";
+import { createMcpServer, MCP_INSTRUCTIONS } from "@/server/mcp";
 import { ServerRuntime } from "@/server/runtime";
 
 import { testConfig } from "./helpers";
@@ -22,14 +22,23 @@ describe("public MCP contract snapshot", () => {
         client.listResourceTemplates(),
         client.listPrompts(),
       ]);
+      const promptCases: Array<[string, Record<string, string>]> = [
+        ["agent-chrome-setup", {}],
+        ["browser-workflow", { task: "inspect the page", url: "https://example.test/" }],
+        ["extract-page", { question: "What is explicitly shown?" }],
+        ["research-question", { question: "What is the observed answer?" }],
+      ];
+      const generatedPrompts = await Promise.all(promptCases.map(async ([name, args]) => ({ name, result: await client.getPrompt({ name, arguments: args }) })));
       const manifest = {
-        tools: tools.tools.map(({ name, title, inputSchema, annotations }) => ({ name, title, inputSchema, annotations })),
+        instructions: MCP_INSTRUCTIONS,
+        tools: tools.tools.map(({ name, title, description, inputSchema, annotations }) => ({ name, title, description, inputSchema, annotations })),
         resources: resources.resources.map(({ name, uri, title, description, mimeType }) => ({ name, uri, title, description, mimeType })),
         resourceTemplates: resourceTemplates.resourceTemplates.map(({ name, uriTemplate, title, description, mimeType }) => ({ name, uriTemplate, title, description, mimeType })),
         prompts: prompts.prompts.map(({ name, title, description, arguments: promptArguments }) => ({ name, title, description, arguments: promptArguments })),
+        generatedPrompts,
       };
       const fingerprint = createHash("sha256").update(JSON.stringify(manifest)).digest("hex");
-      expect(fingerprint).toBe("3aa66bc4a26b09d9c909d5bddcb5b876da92f64f9c0d18e231da2d62a819569b");
+      expect(fingerprint).toBe("a308d44e404335520e60f665a9cd7b800e52e563294790fe3edca5508ec17586");
 
       const success = await client.callTool({ name: "server_health", arguments: {} });
       expect(success.isError).not.toBe(true);
