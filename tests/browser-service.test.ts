@@ -309,6 +309,70 @@ describe("browser service", () => {
     }
   });
 
+  it("cancels an oversized DevTools probe chunk before copying it", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "smooth-operator-managed-probe-chunk-limit-"));
+    const cancel = vi.fn(async () => undefined);
+    const read = vi.fn(async () => ({ done: false, value: new Uint8Array(64 * 1024 + 1) }));
+    const releaseLock = vi.fn();
+    const fetch = vi.fn(async () => ({
+      ok: true,
+      headers: { get: () => null },
+      body: { getReader: () => ({ read, cancel, releaseLock }) },
+    })) as unknown as typeof globalThis.fetch;
+    vi.stubGlobal("fetch", fetch);
+    await writeFile(join(directory, "DevToolsActivePort"), "9333\n/devtools/browser/test\n");
+    const config = testConfig({
+      browser: { ...testConfig().browser, mode: "managed", executablePath: "/custom/chrome", userDataDir: directory },
+    });
+    const browser = { on: () => undefined, close: async () => undefined } as unknown as Browser;
+    const launch = vi.fn(async () => browser);
+    const bufferFrom = vi.spyOn(Buffer, "from");
+    const service = new BrowserService(config, new SecurityPolicy(config), new Logger("error", {}, () => undefined), { launch });
+
+    try {
+      await expect((service as unknown as { connectBrowser(generation: number): Promise<Browser> }).connectBrowser(0)).resolves.toBe(browser);
+      expect(read).toHaveBeenCalledTimes(1);
+      expect(cancel).toHaveBeenCalledTimes(1);
+      expect(bufferFrom).not.toHaveBeenCalled();
+      expect(launch).toHaveBeenCalledTimes(1);
+    } finally {
+      bufferFrom.mockRestore();
+      await service.close();
+      vi.unstubAllGlobals();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("cancels a DevTools probe body when Content-Length is oversized", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "smooth-operator-managed-probe-declared-limit-"));
+    const cancel = vi.fn(async () => undefined);
+    const getReader = vi.fn(() => { throw new Error("getReader() must not be called"); });
+    const fetch = vi.fn(async () => ({
+      ok: true,
+      headers: { get: () => String(64 * 1024 + 1) },
+      body: { cancel, getReader },
+    })) as unknown as typeof globalThis.fetch;
+    vi.stubGlobal("fetch", fetch);
+    await writeFile(join(directory, "DevToolsActivePort"), "9333\n/devtools/browser/test\n");
+    const config = testConfig({
+      browser: { ...testConfig().browser, mode: "managed", executablePath: "/custom/chrome", userDataDir: directory },
+    });
+    const browser = { on: () => undefined, close: async () => undefined } as unknown as Browser;
+    const launch = vi.fn(async () => browser);
+    const service = new BrowserService(config, new SecurityPolicy(config), new Logger("error", {}, () => undefined), { launch });
+
+    try {
+      await expect((service as unknown as { connectBrowser(generation: number): Promise<Browser> }).connectBrowser(0)).resolves.toBe(browser);
+      expect(cancel).toHaveBeenCalledTimes(1);
+      expect(getReader).not.toHaveBeenCalled();
+      expect(launch).toHaveBeenCalledTimes(1);
+    } finally {
+      await service.close();
+      vi.unstubAllGlobals();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("bounds browser diagnostics without exposing endpoint paths or thrown secrets", async () => {
     const directory = await mkdtemp(join(tmpdir(), "smooth-operator-managed-diagnostic-"));
     const config = testConfig({

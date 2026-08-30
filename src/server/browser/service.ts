@@ -7898,6 +7898,7 @@ async function probeDevToolsEndpoint(browserURL: string, timeoutMs: number): Pro
     if (declaredLength !== null) {
       const parsedLength = Number(declaredLength);
       if (Number.isFinite(parsedLength) && parsedLength > MAX_DEVTOOLS_PROBE_RESPONSE_BYTES) {
+        cancelDevToolsProbeBody(response);
         throw new Error("DevTools endpoint response exceeded the safety limit.");
       }
     }
@@ -7930,18 +7931,27 @@ async function readBoundedDevToolsResponse(response: Response, maxBytes: number)
       if (next.done) {
         break;
       }
-      const chunk = Buffer.from(next.value);
-      total += chunk.byteLength;
-      if (total > maxBytes) {
+      const value = next.value;
+      if (!(value instanceof Uint8Array) || value.byteLength > maxBytes - total) {
         void reader.cancel().catch(() => undefined);
         throw new Error("DevTools endpoint response exceeded the safety limit.");
       }
+      const chunk = Buffer.from(value);
+      total += chunk.byteLength;
       chunks.push(chunk);
     }
   } finally {
     reader.releaseLock();
   }
   return Buffer.concat(chunks, total).toString("utf8");
+}
+
+function cancelDevToolsProbeBody(response: Response): void {
+  try {
+    void response.body?.cancel().catch(() => undefined);
+  } catch {
+    // A response may already be closed while the probe is being rejected.
+  }
 }
 
 function boundedEndpointField(value: unknown): string | undefined {
