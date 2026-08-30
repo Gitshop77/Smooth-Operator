@@ -282,6 +282,7 @@ export interface BrowserServiceDependencies {
   launch?: (options: PuppeteerLaunchOptions) => Promise<Browser>;
   connect?: (options: PuppeteerConnectOptions) => Promise<Browser>;
   probeEndpoint?: (browserURL: string, timeoutMs: number) => Promise<DevToolsVersion>;
+  isExecutableReady?: (path: string) => boolean;
 }
 
 interface ManagedEndpointProbe {
@@ -3554,6 +3555,7 @@ export class BrowserService {
           if (!executablePath) {
             throw new AppError("BROWSER_NOT_CONFIGURED", `Managed browser mode could not find Chrome. Checked: ${chromeExecutableSearchPaths().join(", ")}. Install Chrome or set SMOOTH_OPERATOR_BROWSER_EXECUTABLE.`);
           }
+          this.assertExecutableReady(executablePath);
           connection = this.launch({
             headless: this.config.browser.headless,
             executablePath,
@@ -3571,6 +3573,7 @@ export class BrowserService {
         if (!this.config.browser.executablePath) {
           throw new AppError("BROWSER_NOT_CONFIGURED", "Launch mode requires SMOOTH_OPERATOR_BROWSER_EXECUTABLE.");
         }
+        this.assertExecutableReady(this.config.browser.executablePath);
         ownsBrowser = true;
         connection = this.launch({
           headless: this.config.browser.headless,
@@ -3667,6 +3670,18 @@ export class BrowserService {
       return this.dependencies.launch(options);
     }
     return (await loadPuppeteer()).launch(options);
+  }
+
+  private assertExecutableReady(executablePath: string): void {
+    let ready = false;
+    try {
+      ready = this.dependencies.isExecutableReady?.(executablePath) ?? isExecutableReady(executablePath);
+    } catch {
+      ready = false;
+    }
+    if (!ready) {
+      throw new AppError("BROWSER_NOT_CONFIGURED", "Configured browser executable is not ready.", { retryable: true });
+    }
   }
 
   private async connect(options: PuppeteerConnectOptions): Promise<Browser> {

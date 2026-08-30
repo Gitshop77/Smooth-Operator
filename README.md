@@ -66,11 +66,12 @@ cancellable. All local browser tools and page features are available by default;
 remote HTTP, private-network access, and file roots remain explicitly gated.
 Faster calls do not bypass challenges or grant permission to automate a site.
 
-Managed and launch modes wait for browser launch readiness and a target-guard
-acknowledgement before returning a usable connection. The loopback DevTools
-`/json/version` probe is bounded to 64 KiB before JSON parsing, and executable
-discovery requires a regular executable. There is no arbitrary CDP or host-code
-tool; page evaluation remains an explicit page capability.
+Managed mode preflights a regular executable when it needs to launch, and
+launch mode does so before invoking Chromium. Both wait for browser launch
+readiness and a target-guard acknowledgement before returning a usable
+connection. The loopback DevTools `/json/version` probe is bounded to 64 KiB
+before JSON parsing. There is no arbitrary CDP or host-code tool; page
+evaluation remains an explicit page capability.
 
 ## Why
 

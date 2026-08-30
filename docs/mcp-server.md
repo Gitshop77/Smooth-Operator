@@ -196,11 +196,13 @@ navigation policy guard is installed; targets whose attachment ownership
 cannot be determined are blocked or closed. These controls reduce races but do
 not make a host browser or network firewall trustworthy by themselves.
 
-Managed and launch startup waits for a regular executable and browser launch
-readiness before returning a connection. The loopback `/json/version` probe
-reads at most 64 KiB, including streamed-byte enforcement before JSON parsing.
-Target auto-attach readiness is acknowledged before a browser connection is
-returned; unsupported connections retain the safe unavailable behavior.
+Managed startup preflights a regular executable when it needs to launch, and
+launch startup performs the same check before invoking Chromium. Both wait for
+browser launch readiness before returning a connection. The loopback
+`/json/version` probe reads at most 64 KiB, including streamed-byte enforcement
+before JSON parsing. Target auto-attach readiness is acknowledged before a
+browser connection is returned; unsupported connections retain the safe
+unavailable behavior.
 
 Managed and launch modes create owner-only data, files, downloads, and browser
 profile directories below `SMOOTH_OPERATOR_DATA_DIR` (unless an explicit profile

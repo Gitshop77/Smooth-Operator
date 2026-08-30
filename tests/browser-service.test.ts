@@ -223,6 +223,47 @@ describe("browser service", () => {
     }
   });
 
+  it("preflights configured launch executables before invoking the launcher", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "smooth-operator-launch-readiness-"));
+    const nonExecutable = join(directory, "not-executable");
+    const executable = join(directory, "chrome");
+    await writeFile(nonExecutable, "browser");
+    await writeFile(executable, "browser");
+    if (process.platform !== "win32") {
+      await chmod(nonExecutable, 0o644);
+      await chmod(executable, 0o755);
+    }
+    const browser = { on: vi.fn(), close: vi.fn(async () => undefined) } as unknown as Browser;
+    const launch = vi.fn(async () => browser);
+
+    try {
+      for (const executablePath of [directory, nonExecutable]) {
+        const config = testConfig({ browser: { ...testConfig().browser, mode: "launch", executablePath } });
+        const service = new BrowserService(config, new SecurityPolicy(config), new Logger("error", {}, () => undefined), { launch });
+        try {
+          await expect((service as unknown as { connectBrowser(generation: number): Promise<Browser> }).connectBrowser(0)).rejects.toMatchObject({
+            code: "BROWSER_NOT_CONFIGURED",
+            message: "Configured browser executable is not ready.",
+          });
+        } finally {
+          await service.close();
+        }
+      }
+      expect(launch).not.toHaveBeenCalled();
+
+      const validConfig = testConfig({ browser: { ...testConfig().browser, mode: "launch", executablePath: executable } });
+      const valid = new BrowserService(validConfig, new SecurityPolicy(validConfig), new Logger("error", {}, () => undefined), { launch });
+      try {
+        await expect((valid as unknown as { connectBrowser(generation: number): Promise<Browser> }).connectBrowser(0)).resolves.toBe(browser);
+      } finally {
+        await valid.close();
+      }
+      expect(launch).toHaveBeenCalledTimes(1);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("reattaches a managed browser through a live private DevTools endpoint", async () => {
     const directory = await mkdtemp(join(tmpdir(), "smooth-operator-managed-live-"));
     const config = testConfig({
@@ -264,6 +305,7 @@ describe("browser service", () => {
           connect: vi.fn(async () => browser),
           launch,
           probeEndpoint,
+          isExecutableReady: () => true,
         });
         const internal = service as unknown as { connectBrowser(generation: number): Promise<Browser> };
 
@@ -304,7 +346,7 @@ describe("browser service", () => {
     const browser = { on: () => undefined, close: async () => undefined } as unknown as Browser;
     const launch = vi.fn(async () => browser);
     const connect = vi.fn(async () => browser);
-    const service = new BrowserService(config, new SecurityPolicy(config), new Logger("error", {}, () => undefined), { connect, launch });
+    const service = new BrowserService(config, new SecurityPolicy(config), new Logger("error", {}, () => undefined), { connect, launch, isExecutableReady: () => true });
 
     try {
       const internal = service as unknown as { connectBrowser(generation: number): Promise<Browser> };
@@ -337,7 +379,7 @@ describe("browser service", () => {
       await writeFile(join(directory, "DevToolsActivePort"), `${streamedAddress.port}\n/devtools/browser/test\n`);
       const streamedLaunch = vi.fn(async () => browser);
       const streamedConnect = vi.fn(async () => browser);
-      const streamedService = new BrowserService(config, new SecurityPolicy(config), new Logger("error", {}, () => undefined), { connect: streamedConnect, launch: streamedLaunch });
+      const streamedService = new BrowserService(config, new SecurityPolicy(config), new Logger("error", {}, () => undefined), { connect: streamedConnect, launch: streamedLaunch, isExecutableReady: () => true });
       try {
         await expect((streamedService as unknown as { connectBrowser(generation: number): Promise<Browser> }).connectBrowser(0)).resolves.toBe(browser);
         expect(streamedLaunch).toHaveBeenCalledTimes(1);
@@ -376,7 +418,7 @@ describe("browser service", () => {
     const browser = { on: () => undefined, close: async () => undefined } as unknown as Browser;
     const launch = vi.fn(async () => browser);
     const connect = vi.fn(async () => browser);
-    const service = new BrowserService(config, new SecurityPolicy(config), new Logger("error", {}, () => undefined), { connect, launch });
+    const service = new BrowserService(config, new SecurityPolicy(config), new Logger("error", {}, () => undefined), { connect, launch, isExecutableReady: () => true });
 
     try {
       await expect((service as unknown as { connectBrowser(generation: number): Promise<Browser> }).connectBrowser(0)).resolves.toBe(browser);
@@ -409,7 +451,7 @@ describe("browser service", () => {
     const browser = { on: () => undefined, close: async () => undefined } as unknown as Browser;
     const launch = vi.fn(async () => browser);
     const bufferFrom = vi.spyOn(Buffer, "from");
-    const service = new BrowserService(config, new SecurityPolicy(config), new Logger("error", {}, () => undefined), { launch });
+    const service = new BrowserService(config, new SecurityPolicy(config), new Logger("error", {}, () => undefined), { launch, isExecutableReady: () => true });
 
     try {
       await expect((service as unknown as { connectBrowser(generation: number): Promise<Browser> }).connectBrowser(0)).resolves.toBe(browser);
@@ -441,7 +483,7 @@ describe("browser service", () => {
     });
     const browser = { on: () => undefined, close: async () => undefined } as unknown as Browser;
     const launch = vi.fn(async () => browser);
-    const service = new BrowserService(config, new SecurityPolicy(config), new Logger("error", {}, () => undefined), { launch });
+    const service = new BrowserService(config, new SecurityPolicy(config), new Logger("error", {}, () => undefined), { launch, isExecutableReady: () => true });
 
     try {
       await expect((service as unknown as { connectBrowser(generation: number): Promise<Browser> }).connectBrowser(0)).resolves.toBe(browser);
@@ -471,7 +513,7 @@ describe("browser service", () => {
       config,
       new SecurityPolicy(config),
       new Logger("debug", {}, (line) => lines.push(line)),
-      { connect: vi.fn(async () => browser), launch: vi.fn(async () => browser), probeEndpoint },
+      { connect: vi.fn(async () => browser), launch: vi.fn(async () => browser), probeEndpoint, isExecutableReady: () => true },
     );
 
     try {
@@ -505,6 +547,7 @@ describe("browser service", () => {
         connect: vi.fn(async () => browser),
         launch,
         probeEndpoint: vi.fn(async () => { throw new Error("closed"); }),
+        isExecutableReady: () => true,
       });
       try {
         await expect((service as unknown as { connectBrowser(generation: number): Promise<Browser> }).connectBrowser(0)).resolves.toBe(browser);
