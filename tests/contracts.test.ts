@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { BatchRequestSchema, BrowserActionInputSchema, BrowserActionPlanSchema, BrowserActionSchema, ClickRequestSchema, CookieRequestSchema, EvaluateRequestSchema, ExtractRequestSchema, HtmlRequestSchema, InspectElementRequestSchema, InputRequestSchema, NavigateRequestSchema, NetworkSearchRequestSchema, ResearchRequestSchema, ResourceBlockingRequestSchema, ScreenshotRequestSchema, SnapshotRequestSchema, SolveChallengeRequestSchema, StorageRequestSchema, TargetRequestSchema } from "@/server/contracts";
+import { BatchRequestSchema, BrowserActionInputSchema, BrowserActionPlanSchema, BrowserActionSchema, ClickRequestSchema, CookieRequestSchema, EvaluateRequestSchema, ExtractRequestSchema, HtmlRequestSchema, InspectElementRequestSchema, InputRequestSchema, NavigateRequestSchema, NetworkSearchRequestSchema, ResearchRequestSchema, ResourceBlockingRequestSchema, ScreenshotRequestSchema, SnapshotRequestSchema, SolveChallengeRequestSchema, StorageRequestSchema, TargetRequestSchema, UploadRequestSchema } from "@/server/contracts";
 
 describe("MCP contracts", () => {
   it("accepts browser-use indexed and coordinate click forms", () => {
@@ -204,6 +204,16 @@ describe("MCP contracts", () => {
     expect(BrowserActionInputSchema.safeParse({ action: "dialog", operation: "send_keys", text: "okay" }).success).toBe(true);
     expect(BrowserActionSchema.safeParse({ action: "find_elements", selector: "button", index: 0 }).success).toBe(false);
     expect(BrowserActionSchema.safeParse({ action: "run_script", script: "[]" }).success).toBe(true);
+  });
+
+  it("validates single and multi-file upload forms", () => {
+    expect(UploadRequestSchema.safeParse({ selector: "input[type=file]", filePath: "/tmp/a.txt" }).success).toBe(true);
+    expect(UploadRequestSchema.safeParse({ selector: "input[type=file]", filePaths: ["/tmp/a.txt", "/tmp/b.txt"] }).success).toBe(true);
+    expect(UploadRequestSchema.safeParse({ selector: "input[type=file]", filePath: "/tmp/a.txt", filePaths: ["/tmp/b.txt"] }).success).toBe(false);
+    expect(UploadRequestSchema.safeParse({ selector: "input[type=file]", filePaths: [] }).success).toBe(false);
+    expect(UploadRequestSchema.safeParse({ selector: "input[type=file]", filePaths: Array.from({ length: 21 }, (_, index) => `/tmp/${index}.txt`) }).success).toBe(false);
+    expect(BrowserActionSchema.safeParse({ action: "upload_file", target: "input[type=file]", filePaths: ["/tmp/a.txt", "/tmp/b.txt"] }).success).toBe(true);
+    expect(BrowserActionSchema.safeParse({ action: "upload_file", target: "input[type=file]", filePath: "/tmp/a.txt", filePaths: ["/tmp/b.txt"] }).success).toBe(false);
   });
 
   it("validates explicit action plans before execution", () => {

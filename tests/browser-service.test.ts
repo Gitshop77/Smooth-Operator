@@ -3273,6 +3273,7 @@ describe("browser service", () => {
 
       await expect(internal.executeOnPage({ action: "upload_file", selector: "#file", filePath: uploadPath } as BrowserAction, controller.signal)).rejects.toMatchObject({ code: "CANCELLED" });
       expect(disposed).toBe(1);
+      await expect(readdir(join(dataDir, "upload-staging"))).resolves.toEqual([]);
       await service.close();
     } finally {
       await rm(dataDir, { recursive: true, force: true });
@@ -3333,6 +3334,256 @@ describe("browser service", () => {
       await expect(readdir(stagingDirectory)).resolves.toEqual([]);
     } finally {
       await growAfterStagingStarts.catch(() => undefined);
+      await service.close();
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects multi-file uploads above the 100 MiB aggregate limit and cleans every staged file", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "smooth-operator-upload-aggregate-test-"));
+    const stagingDirectory = join(dataDir, "upload-staging");
+    const stagedPaths: string[] = [];
+    const base = testConfig();
+    const config = testConfig({ dataDir, security: { ...base.security, allowedFileRoots: [dataDir] } });
+    const service = new BrowserService(config, new SecurityPolicy(config), new Logger("error", {}, () => undefined));
+    const page = new EventEmitter() as EventEmitter & { isClosed(): boolean; url(): string };
+    page.isClosed = () => false;
+    page.url = () => "about:blank";
+    const inputLookup = vi.fn(async () => undefined);
+    const frame = { parentFrame: () => null, isDetached: () => false, $: inputLookup };
+    const internal = service as unknown as {
+      executeOnPage(action: BrowserAction, signal?: AbortSignal): Promise<unknown>;
+      pageState(pageId?: string, signal?: AbortSignal): Promise<unknown>;
+      assertCurrentPageAllowed(page: unknown): Promise<void>;
+      assertSnapshotForAction(state: unknown, action: BrowserAction): void;
+      frameFor(state: unknown, frameId?: string): Promise<unknown>;
+      stageUploadFile(path: string, signal?: AbortSignal): Promise<{ path: string; displayName: string; size: number }>;
+    };
+    const state = (service as unknown as { stateFor(page: unknown): unknown }).stateFor(page);
+    internal.pageState = async () => state;
+    internal.assertCurrentPageAllowed = async () => undefined;
+    internal.assertSnapshotForAction = () => undefined;
+    internal.frameFor = async () => frame;
+    internal.stageUploadFile = vi.fn(async (rawPath: string) => {
+      await mkdir(stagingDirectory, { recursive: true, mode: 0o700 });
+      const stagedPath = join(stagingDirectory, `.${stagedPaths.length}.upload`);
+      await writeFile(stagedPath, "staged");
+      stagedPaths.push(stagedPath);
+      return { path: stagedPath, displayName: rawPath, size: 50 * 1024 * 1024 };
+    });
+
+    try {
+      await expect(internal.executeOnPage({ action: "upload_file", selector: "input[type=file]", filePaths: ["/tmp/a.txt", "/tmp/b.txt", "/tmp/c.txt"] } as BrowserAction)).rejects.toMatchObject({
+        code: "FILE_TOO_LARGE",
+        message: "The combined upload sources exceed the 100 MiB size limit.",
+      });
+      expect(inputLookup).toHaveBeenCalledTimes(1);
+      for (const path of stagedPaths) {
+        await expect(access(path)).rejects.toMatchObject({ code: "ENOENT" });
+      }
+    } finally {
+      await service.close();
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects multi-file uploads when the target input is not multiple and cleans the handle", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "smooth-operator-upload-multiple-test-"));
+    const stagingDirectory = join(dataDir, "upload-staging");
+    const stagedPaths: string[] = [];
+    const base = testConfig();
+    const config = testConfig({ dataDir, security: { ...base.security, allowedFileRoots: [dataDir] } });
+    const service = new BrowserService(config, new SecurityPolicy(config), new Logger("error", {}, () => undefined));
+    const page = new EventEmitter() as EventEmitter & { isClosed(): boolean; url(): string };
+    page.isClosed = () => false;
+    page.url = () => "about:blank";
+    let disposed = 0;
+    const uploadFile = vi.fn(async () => undefined);
+    const input = { evaluate: vi.fn(async () => false), uploadFile, dispose: vi.fn(async () => { disposed += 1; }) };
+    const selectorHandle = { dispose: vi.fn(async () => undefined) };
+    const handles = [selectorHandle, input];
+    const frame = { parentFrame: () => null, isDetached: () => false, $: async () => handles.shift() };
+    const internal = service as unknown as {
+      executeOnPage(action: BrowserAction, signal?: AbortSignal): Promise<unknown>;
+      pageState(pageId?: string, signal?: AbortSignal): Promise<unknown>;
+      assertCurrentPageAllowed(page: unknown): Promise<void>;
+      assertSnapshotForAction(state: unknown, action: BrowserAction): void;
+      frameFor(state: unknown, frameId?: string): Promise<unknown>;
+      stageUploadFile(path: string, signal?: AbortSignal): Promise<{ path: string; displayName: string; size: number }>;
+    };
+    const state = (service as unknown as { stateFor(page: unknown): unknown }).stateFor(page);
+    internal.pageState = async () => state;
+    internal.assertCurrentPageAllowed = async () => undefined;
+    internal.assertSnapshotForAction = () => undefined;
+    internal.frameFor = async () => frame;
+    internal.stageUploadFile = vi.fn(async (rawPath: string) => {
+      await mkdir(stagingDirectory, { recursive: true, mode: 0o700 });
+      const stagedPath = join(stagingDirectory, `.${stagedPaths.length}.upload`);
+      await writeFile(stagedPath, "staged");
+      stagedPaths.push(stagedPath);
+      return { path: stagedPath, displayName: rawPath, size: 7 };
+    });
+
+    try {
+      await expect(internal.executeOnPage({ action: "upload_file", selector: "input[type=file]", filePaths: ["/tmp/a.txt", "/tmp/b.txt"] } as BrowserAction)).rejects.toMatchObject({
+        code: "MULTIPLE_FILES_UNSUPPORTED",
+      });
+      expect(input.evaluate).toHaveBeenCalledTimes(1);
+      expect(uploadFile).not.toHaveBeenCalled();
+      expect(disposed).toBe(1);
+      for (const path of stagedPaths) {
+        await expect(access(path)).rejects.toMatchObject({ code: "ENOENT" });
+      }
+    } finally {
+      await service.close();
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("uploads all staged files to a multiple input and cleans them on success", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "smooth-operator-upload-success-test-"));
+    const stagingDirectory = join(dataDir, "upload-staging");
+    const stagedPaths: string[] = [];
+    const uploaded: string[][] = [];
+    const base = testConfig();
+    const config = testConfig({ dataDir, security: { ...base.security, allowedFileRoots: [dataDir] } });
+    const service = new BrowserService(config, new SecurityPolicy(config), new Logger("error", {}, () => undefined));
+    const page = new EventEmitter() as EventEmitter & { isClosed(): boolean; url(): string };
+    page.isClosed = () => false;
+    page.url = () => "about:blank";
+    let disposed = 0;
+    const input = {
+      evaluate: vi.fn(async () => true),
+      uploadFile: vi.fn(async (...paths: string[]) => { uploaded.push(paths); }),
+      dispose: vi.fn(async () => { disposed += 1; }),
+    };
+    const selectorHandle = { dispose: vi.fn(async () => undefined) };
+    const handles = [selectorHandle, input];
+    const frame = { parentFrame: () => null, isDetached: () => false, $: async () => handles.shift() };
+    const internal = service as unknown as {
+      executeOnPage(action: BrowserAction, signal?: AbortSignal): Promise<unknown>;
+      pageState(pageId?: string, signal?: AbortSignal): Promise<unknown>;
+      assertCurrentPageAllowed(page: unknown): Promise<void>;
+      assertSnapshotForAction(state: unknown, action: BrowserAction): void;
+      frameFor(state: unknown, frameId?: string): Promise<unknown>;
+      stageUploadFile(path: string, signal?: AbortSignal): Promise<{ path: string; displayName: string; size: number }>;
+    };
+    const state = (service as unknown as { stateFor(page: unknown): unknown }).stateFor(page);
+    internal.pageState = async () => state;
+    internal.assertCurrentPageAllowed = async () => undefined;
+    internal.assertSnapshotForAction = () => undefined;
+    internal.frameFor = async () => frame;
+    internal.stageUploadFile = vi.fn(async (rawPath: string) => {
+      await mkdir(stagingDirectory, { recursive: true, mode: 0o700 });
+      const stagedPath = join(stagingDirectory, `.${stagedPaths.length}.upload`);
+      await writeFile(stagedPath, "staged");
+      stagedPaths.push(stagedPath);
+      return { path: stagedPath, displayName: rawPath, size: 7 };
+    });
+
+    try {
+      await expect(internal.executeOnPage({ action: "upload_file", selector: "input[type=file]", filePaths: ["/tmp/a.txt", "/tmp/b.txt"] } as BrowserAction)).resolves.toMatchObject({ count: 2, bytes: 14 });
+      expect(uploaded).toHaveLength(1);
+      expect(uploaded[0]).toEqual(stagedPaths);
+      expect(disposed).toBe(1);
+      for (const path of stagedPaths) {
+        await expect(access(path)).rejects.toMatchObject({ code: "ENOENT" });
+      }
+    } finally {
+      await service.close();
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("cleans already staged files when a later source fails validation", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "smooth-operator-upload-midstage-test-"));
+    const stagingDirectory = join(dataDir, "upload-staging");
+    const firstPath = join(stagingDirectory, ".0.upload");
+    const base = testConfig();
+    const config = testConfig({ dataDir, security: { ...base.security, allowedFileRoots: [dataDir] } });
+    const service = new BrowserService(config, new SecurityPolicy(config), new Logger("error", {}, () => undefined));
+    const page = new EventEmitter() as EventEmitter & { isClosed(): boolean; url(): string };
+    page.isClosed = () => false;
+    page.url = () => "about:blank";
+    const frame = { parentFrame: () => null, isDetached: () => false, $: async () => undefined };
+    const internal = service as unknown as {
+      executeOnPage(action: BrowserAction, signal?: AbortSignal): Promise<unknown>;
+      pageState(pageId?: string, signal?: AbortSignal): Promise<unknown>;
+      assertCurrentPageAllowed(page: unknown): Promise<void>;
+      assertSnapshotForAction(state: unknown, action: BrowserAction): void;
+      frameFor(state: unknown, frameId?: string): Promise<unknown>;
+      stageUploadFile(path: string, signal?: AbortSignal): Promise<{ path: string; displayName: string; size: number }>;
+    };
+    const state = (service as unknown as { stateFor(page: unknown): unknown }).stateFor(page);
+    internal.pageState = async () => state;
+    internal.assertCurrentPageAllowed = async () => undefined;
+    internal.assertSnapshotForAction = () => undefined;
+    internal.frameFor = async () => frame;
+    internal.stageUploadFile = vi.fn(async (rawPath: string) => {
+      if (rawPath.endsWith("b.txt")) {
+        throw new AppError("FILE_PATH_BLOCKED", "The upload source is not allowed.");
+      }
+      await mkdir(stagingDirectory, { recursive: true, mode: 0o700 });
+      await writeFile(firstPath, "staged");
+      return { path: firstPath, displayName: rawPath, size: 7 };
+    });
+
+    try {
+      await expect(internal.executeOnPage({ action: "upload_file", selector: "input[type=file]", filePaths: ["/tmp/a.txt", "/tmp/b.txt"] } as BrowserAction)).rejects.toMatchObject({ code: "FILE_PATH_BLOCKED" });
+      await expect(access(firstPath)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await service.close();
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("cleans every staged file when the multiple upload is rejected", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "smooth-operator-upload-failure-test-"));
+    const stagingDirectory = join(dataDir, "upload-staging");
+    const stagedPaths: string[] = [];
+    const base = testConfig();
+    const config = testConfig({ dataDir, security: { ...base.security, allowedFileRoots: [dataDir] } });
+    const service = new BrowserService(config, new SecurityPolicy(config), new Logger("error", {}, () => undefined));
+    const page = new EventEmitter() as EventEmitter & { isClosed(): boolean; url(): string };
+    page.isClosed = () => false;
+    page.url = () => "about:blank";
+    let disposed = 0;
+    const input = {
+      evaluate: vi.fn(async () => true),
+      uploadFile: vi.fn(async () => { throw new Error("upload failed"); }),
+      dispose: vi.fn(async () => { disposed += 1; }),
+    };
+    const selectorHandle = { dispose: vi.fn(async () => undefined) };
+    const handles = [selectorHandle, input];
+    const frame = { parentFrame: () => null, isDetached: () => false, $: async () => handles.shift() };
+    const internal = service as unknown as {
+      executeOnPage(action: BrowserAction, signal?: AbortSignal): Promise<unknown>;
+      pageState(pageId?: string, signal?: AbortSignal): Promise<unknown>;
+      assertCurrentPageAllowed(page: unknown): Promise<void>;
+      assertSnapshotForAction(state: unknown, action: BrowserAction): void;
+      frameFor(state: unknown, frameId?: string): Promise<unknown>;
+      stageUploadFile(path: string, signal?: AbortSignal): Promise<{ path: string; displayName: string; size: number }>;
+    };
+    const state = (service as unknown as { stateFor(page: unknown): unknown }).stateFor(page);
+    internal.pageState = async () => state;
+    internal.assertCurrentPageAllowed = async () => undefined;
+    internal.assertSnapshotForAction = () => undefined;
+    internal.frameFor = async () => frame;
+    internal.stageUploadFile = vi.fn(async (rawPath: string) => {
+      await mkdir(stagingDirectory, { recursive: true, mode: 0o700 });
+      const stagedPath = join(stagingDirectory, `.${stagedPaths.length}.upload`);
+      await writeFile(stagedPath, "staged");
+      stagedPaths.push(stagedPath);
+      return { path: stagedPath, displayName: rawPath, size: 7 };
+    });
+
+    try {
+      await expect(internal.executeOnPage({ action: "upload_file", selector: "input[type=file]", filePaths: ["/tmp/a.txt", "/tmp/b.txt"] } as BrowserAction)).rejects.toThrow("upload failed");
+      expect(disposed).toBe(1);
+      for (const path of stagedPaths) {
+        await expect(access(path)).rejects.toMatchObject({ code: "ENOENT" });
+      }
+    } finally {
       await service.close();
       await rm(dataDir, { recursive: true, force: true });
     }

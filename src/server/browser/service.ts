@@ -334,6 +334,7 @@ const NAVIGATION_CLICK_READY_TIMEOUT_MS = 250;
 const SHUTDOWN_CONNECTION_SETTLE_TIMEOUT_MS = 1_000;
 const MAX_DEVTOOLS_PROBE_RESPONSE_BYTES = 64 * 1024;
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
+const MAX_UPLOAD_TOTAL_BYTES = 100 * 1024 * 1024;
 const COMMON_KEY_ALIASES: Readonly<Record<string, KeyInput>> = {
   ALT: "Alt",
   ARROWDOWN: "ArrowDown",
@@ -2300,27 +2301,55 @@ export class BrowserService {
       case "upload_file": {
         throwIfAborted(signal);
         const selector = await this.selectorFor(state, targetForAction(action, "selector"), action.frameId);
-        throwIfAborted(signal);
-        const staged = await this.stageUploadFile(requireField(action.filePath, "filePath"), signal);
-        throwIfAborted(signal);
-        let input: ElementHandle<HTMLInputElement> | null;
+        const stagedFiles: Array<{ path: string; displayName: string; size: number }> = [];
+        let input: ElementHandle<HTMLInputElement> | null = null;
         try {
-          input = await frame.$(selector) as ElementHandle<HTMLInputElement> | null;
-        } catch (error) {
-          await unlinkIfPresent(staged.path);
-          throw error;
-        }
-        if (!input) {
-          await unlinkIfPresent(staged.path);
-          throw new AppError("ELEMENT_NOT_FOUND", `No element matched '${selector}'.`);
-        }
-        try {
-          await input.uploadFile(staged.path);
+          if (action.filePath !== undefined && action.filePaths !== undefined) {
+            throw new AppError("INVALID_ACTION", "Provide filePath or filePaths, not both.");
+          }
+          const rawPaths = action.filePaths ?? (action.filePath !== undefined ? [action.filePath] : []);
+          if (rawPaths.length === 0 || rawPaths.length > 20) {
+            throw new AppError("INVALID_ACTION", "Upload requires one to 20 paths in filePath or filePaths.");
+          }
+          let totalBytes = 0;
+          for (const rawPath of rawPaths) {
+            throwIfAborted(signal);
+            const staged = await this.stageUploadFile(rawPath, signal);
+            stagedFiles.push(staged);
+            totalBytes += staged.size;
+            if (totalBytes > MAX_UPLOAD_TOTAL_BYTES) {
+              throw new AppError("FILE_TOO_LARGE", "The combined upload sources exceed the 100 MiB size limit.");
+            }
+          }
           throwIfAborted(signal);
-          return { uploaded: wrapUntrustedText("uploaded_file_name", redactSecretPlaceholders(basename(staged.displayName)), 512), bytes: Math.min(staged.size, Number.MAX_SAFE_INTEGER) };
+          input = await frame.$(selector) as ElementHandle<HTMLInputElement> | null;
+          if (!input) {
+            throw new AppError("ELEMENT_NOT_FOUND", `No element matched '${selector}'.`);
+          }
+          if (stagedFiles.length > 1) {
+            const supportsMultiple = typeof (input as unknown as { evaluate?: unknown }).evaluate === "function"
+              && await input.evaluate((element) => element instanceof HTMLInputElement && element.type === "file" && element.multiple);
+            if (!supportsMultiple) {
+              throw new AppError("MULTIPLE_FILES_UNSUPPORTED", "Multiple uploads require a file input with the multiple attribute.");
+            }
+          }
+          await input.uploadFile(...stagedFiles.map((staged) => staged.path));
+          throwIfAborted(signal);
+          const names = stagedFiles.map((staged) => wrapUntrustedText("uploaded_file_name", redactSecretPlaceholders(basename(staged.displayName)), 512));
+          const bytes = Math.min(totalBytes, Number.MAX_SAFE_INTEGER);
+          if (names.length === 1) {
+            return { uploaded: names[0], bytes };
+          }
+          return { uploaded: names, files: names, count: names.length, bytes };
         } finally {
-          await input.dispose().catch(() => undefined);
-          await unlinkIfPresent(staged.path);
+          try {
+            await input?.dispose();
+          } catch {
+            // A target disposal failure must not prevent cleanup of staged files.
+          }
+          for (const staged of stagedFiles) {
+            await unlinkIfPresent(staged.path).catch(() => undefined);
+          }
         }
       }
       case "screenshot": {

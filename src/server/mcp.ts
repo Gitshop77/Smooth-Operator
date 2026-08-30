@@ -439,7 +439,7 @@ function registerBrowserTools(server: McpServer, runtime: ServerRuntime): void {
     return { ...fields, text: query };
   });
   registerAction(server, runtime, "browser_extract", "Extract page text", "Extract at most 8,000 page-text characters from the page or a CSS selector. Check truncated, offset, nextOffset, hasMore, and revision; use browser_page_next for later slices.", ExtractRequestSchema, "extract", (input) => ({ ...input, maxChars: input.maxChars ?? MCP_PAGE_TEXT_MAX_CHARS }));
-  registerAction(server, runtime, "browser_upload", "Upload a file", "Upload a file from an allowed server file root into a file input.", UploadRequestSchema, "upload_file");
+  registerAction(server, runtime, "browser_upload", "Upload files", "Upload one file or up to 20 files from allowed server file roots into a file input; multiple files require the input's multiple attribute.", UploadRequestSchema, "upload_file");
   registerAction(server, runtime, "browser_screenshot", "Capture a screenshot", "Capture a bounded PNG or JPEG screenshot of the current page.", ScreenshotRequestSchema, "screenshot", (input) => {
     const { full_page, full, max_bytes, max_dim, ...fields } = input;
     return { ...fields, fullPage: fields.fullPage ?? full_page ?? full, maxBytes: fields.maxBytes ?? max_bytes, maxDimension: fields.maxDimension ?? max_dim };

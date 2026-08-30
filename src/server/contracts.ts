@@ -146,6 +146,7 @@ const BrowserActionFieldsSchema = z.object({
   state: z.enum(["visible", "hidden", "attached", "detached"]).optional(),
   waitUntil: z.enum(["load", "domcontentloaded", "networkidle0", "networkidle2"]).optional(),
   filePath: BoundedString(4_000).optional(),
+  filePaths: z.array(BoundedString(4_000)).min(1).max(20).optional(),
   outputPath: BoundedString(4_000).optional(),
   code: z.string().trim().min(1).max(40_000).optional(),
   script: z.string().trim().min(1).max(40_000).optional(),
@@ -292,6 +293,18 @@ export const BrowserActionSchema = BrowserActionFieldsSchema.extend({ action: Ac
   if (input.outputPath !== undefined && input.filePath !== undefined && input.action === "save_as_pdf") {
     context.addIssue({ code: "custom", message: "Provide outputPath or filePath, not both." });
   }
+  if (input.action === "upload_file") {
+    const hasFilePath = input.filePath !== undefined;
+    const hasFilePaths = input.filePaths !== undefined;
+    if (hasFilePath && hasFilePaths) {
+      context.addIssue({ code: "custom", message: "Provide filePath or filePaths, not both." });
+    }
+    if (!hasFilePath && !hasFilePaths) {
+      context.addIssue({ code: "custom", message: "Upload requires filePath or filePaths." });
+    }
+  } else if (input.filePaths !== undefined) {
+    context.addIssue({ code: "custom", message: "filePaths is only valid for upload_file." });
+  }
   if (input.action === "resource_blocking") {
     if (input.operation === undefined) {
       context.addIssue({ code: "custom", message: "Resource blocking requires operation." });
@@ -391,7 +404,7 @@ export const BrowserActionSchema = BrowserActionFieldsSchema.extend({ action: Ac
       break;
     case "upload_file":
       requireOne([input.target, input.ref, input.selector, input.index], "Upload requires target, ref, selector, or index.");
-      requireOne([input.filePath], "Upload requires filePath.");
+      requireOne([input.filePath, input.filePaths], "Upload requires filePath or filePaths.");
       break;
     case "save_as_pdf":
       requireOne([input.outputPath, input.filePath], "PDF export requires outputPath.");
@@ -729,7 +742,16 @@ export const ScreenshotRequestSchema = z.object({ fullPage: z.boolean().optional
   }
 });
 export const PdfRequestSchema = z.object({ outputPath: BoundedString(4_000), ...PageInput }).strict();
-export const UploadRequestSchema = z.object({ selector: BoundedString(2_000), filePath: BoundedString(4_000), ...PageInput }).strict();
+export const UploadRequestSchema = z.object({ selector: BoundedString(2_000), filePath: BoundedString(4_000).optional(), filePaths: z.array(BoundedString(4_000)).min(1).max(20).optional(), ...PageInput }).strict().superRefine((input, context) => {
+  const hasFilePath = input.filePath !== undefined;
+  const hasFilePaths = input.filePaths !== undefined;
+  if (hasFilePath && hasFilePaths) {
+    context.addIssue({ code: "custom", message: "Provide filePath or filePaths, not both." });
+  }
+  if (!hasFilePath && !hasFilePaths) {
+    context.addIssue({ code: "custom", message: "Upload requires filePath or filePaths." });
+  }
+});
 export const EvaluateRequestSchema = z.object({
   code: z.string().trim().min(1).max(40_000).optional(),
   expression: z.string().trim().min(1).max(40_000).optional(),
