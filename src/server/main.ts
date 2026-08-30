@@ -216,6 +216,7 @@ async function serveHttp(runtime: ServerRuntime, shutdown: (reason: string) => P
     response.on("error", (error: unknown) => runtime.logger.error("MCP HTTP response error", safeErrorDiagnostic(error)));
     request.on("error", (error: unknown) => runtime.logger.error("MCP HTTP request error", safeErrorDiagnostic(error)));
     if (!accepting) {
+      closeIncompleteRequestAfterResponse(request, response);
       response.writeHead(503, { "content-type": "application/json", "retry-after": "1" });
       response.end(HTTP_SHUTTING_DOWN_BODY);
       return;
@@ -228,11 +229,13 @@ async function serveHttp(runtime: ServerRuntime, shutdown: (reason: string) => P
     }
     setCorsHeaders(request, response);
     if (!requestPathMatches(request, config.http.path)) {
+      closeIncompleteRequestAfterResponse(request, response);
       response.writeHead(404, { "content-type": "application/json" });
       response.end(HTTP_NOT_FOUND_BODY);
       return;
     }
     if (request.method === "OPTIONS") {
+      closeIncompleteRequestAfterResponse(request, response);
       response.writeHead(204, {
         "access-control-allow-methods": "GET, POST, DELETE, OPTIONS",
         "access-control-allow-headers": request.headers["access-control-request-headers"] ?? "authorization, content-type, accept, mcp-protocol-version, mcp-session-id, last-event-id",
@@ -243,6 +246,7 @@ async function serveHttp(runtime: ServerRuntime, shutdown: (reason: string) => P
       return;
     }
     if (!authorized(request, expectedAuthDigest)) {
+      closeIncompleteRequestAfterResponse(request, response);
       response.writeHead(401, { "content-type": "application/json", "www-authenticate": "Bearer" });
       response.end(HTTP_UNAUTHORIZED_BODY);
       return;
@@ -250,6 +254,7 @@ async function serveHttp(runtime: ServerRuntime, shutdown: (reason: string) => P
     let streamPool = isPotentialHttpStream(request) ? activeHttpStreams : activeHttpRequests;
     const poolLimit = streamPool === activeHttpStreams ? MAX_HTTP_STREAM_CONCURRENCY : MAX_HTTP_CONCURRENCY;
     if (streamPool.size >= poolLimit) {
+      closeIncompleteRequestAfterResponse(request, response);
       response.writeHead(503, { "content-type": "application/json", "retry-after": "1" });
       response.end(HTTP_BUSY_BODY);
       return;

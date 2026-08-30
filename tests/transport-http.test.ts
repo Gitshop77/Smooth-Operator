@@ -1,3 +1,4 @@
+import { createConnection } from "node:net";
 import { createServer, request as httpRequest, type Server } from "node:http";
 import { mkdtemp, rm } from "node:fs/promises";
 import { once } from "node:events";
@@ -48,6 +49,31 @@ describe("HTTP transport", () => {
     const ready = waitForReady(child);
     const endpoint = `http://127.0.0.1:${port}/mcp`;
     await ready;
+
+    const slowUnauthorized = await rawSlowBodyResponse(port, "/mcp", {
+      Authorization: "Bearer wrong-token",
+      "content-type": "application/json",
+    });
+    expect(slowUnauthorized.status).toBe(401);
+    expect(slowUnauthorized.body).toBe(JSON.stringify({ error: "unauthorized" }));
+    expect(slowUnauthorized.closed).toBe(true);
+
+    const slowWrongPath = await rawSlowBodyResponse(port, "/not-mcp", {
+      Authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+    });
+    expect(slowWrongPath.status).toBe(404);
+    expect(slowWrongPath.body).toBe(JSON.stringify({ error: "not_found" }));
+    expect(slowWrongPath.closed).toBe(true);
+
+    const slowPreflight = await rawSlowBodyResponse(port, "/mcp", {
+      Origin: "http://localhost",
+      "access-control-request-method": "POST",
+      "access-control-request-headers": "authorization, content-type",
+    }, "OPTIONS");
+    expect(slowPreflight.status).toBe(204);
+    expect(slowPreflight.body).toBe("");
+    expect(slowPreflight.closed).toBe(true);
 
     const request = (headers: Record<string, string> = {}, protocolVersion = "2026-07-28") => fetch(endpoint, {
       method: "POST",
@@ -324,6 +350,115 @@ async function rawAbortedPost(port: number, headers: Record<string, string>): Pr
     request.write("x".repeat(64));
     request.destroy();
   });
+}
+
+async function rawSlowBodyResponse(
+  port: number,
+  path: string,
+  headers: Record<string, string>,
+  method = "POST",
+): Promise<{ status: number; body: string; closed: boolean }> {
+  return new Promise((resolve, reject) => {
+    const socket = createConnection({ host: "127.0.0.1", port });
+    const chunks: Buffer[] = [];
+    let settled = false;
+    let responseStatus = 0;
+    let responseBody = "";
+    let responseComplete = false;
+    const timer = setTimeout(() => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      socket.destroy();
+      reject(new Error(`Timed out waiting for slow ${method} ${path} response.`));
+    }, 2_000);
+    const finish = (closed: boolean): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      resolve({ status: responseStatus, body: responseBody, closed });
+    };
+    socket.once("connect", () => {
+      const requestHeaders = {
+        Host: `127.0.0.1:${port}`,
+        Connection: "keep-alive",
+        "Content-Length": "1000000",
+        ...headers,
+      };
+      const serializedHeaders = Object.entries(requestHeaders)
+        .map(([name, value]) => `${name}: ${value}`)
+        .join("\r\n");
+      socket.write(`${method} ${path} HTTP/1.1\r\n${serializedHeaders}\r\n\r\n{`);
+    });
+    socket.on("data", (chunk) => {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      const rawResponse = Buffer.concat(chunks).toString("utf8");
+      const headerEnd = rawResponse.indexOf("\r\n\r\n");
+      if (headerEnd < 0) {
+        return;
+      }
+      const header = rawResponse.slice(0, headerEnd);
+      const body = rawResponse.slice(headerEnd + 4);
+      const statusLine = header.split("\r\n", 1)[0] ?? "";
+      responseStatus = Number(statusLine.split(" ")[1] ?? 0);
+      if (/\r\ntransfer-encoding:\s*chunked/i.test(header)) {
+        const decoded = decodeChunkedBody(body);
+        if (decoded !== undefined) {
+          responseBody = decoded;
+          responseComplete = true;
+        }
+      } else {
+        responseBody = body;
+        const contentLength = Number(header.match(/\r\ncontent-length:\s*(\d+)/i)?.[1] ?? 0);
+        responseComplete = responseStatus === 204 || body.length >= contentLength;
+      }
+    });
+    socket.once("close", () => {
+      if (!responseComplete) {
+        reject(new Error(`Slow ${method} ${path} socket closed before response completed (status=${responseStatus}, bytes=${Buffer.concat(chunks).byteLength}, raw=${JSON.stringify(Buffer.concat(chunks).toString("utf8"))}).`));
+        return;
+      }
+      finish(true);
+    });
+    socket.once("error", (error) => {
+      if (!settled) {
+        clearTimeout(timer);
+        settled = true;
+        reject(error);
+      }
+    });
+  });
+}
+
+function decodeChunkedBody(body: string): string | undefined {
+  let offset = 0;
+  const chunks: string[] = [];
+  while (true) {
+    const lineEnd = body.indexOf("\r\n", offset);
+    if (lineEnd < 0) {
+      return undefined;
+    }
+    const size = Number.parseInt(body.slice(offset, lineEnd).split(";", 1)[0] ?? "", 16);
+    if (!Number.isFinite(size) || size < 0) {
+      return undefined;
+    }
+    offset = lineEnd + 2;
+    if (body.length < offset + size + 2) {
+      return undefined;
+    }
+    chunks.push(body.slice(offset, offset + size));
+    offset += size;
+    if (body.slice(offset, offset + 2) !== "\r\n") {
+      return undefined;
+    }
+    offset += 2;
+    if (size === 0) {
+      return chunks.slice(0, -1).join("");
+    }
+  }
 }
 
 async function rawSlowDeclaredOversizedPost(port: number, headers: Record<string, string>): Promise<{ status: number; elapsedMs: number }> {
