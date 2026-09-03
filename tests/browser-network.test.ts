@@ -80,6 +80,20 @@ describe("NetworkJournal", () => {
     expect(result.hasMore).toBe(false);
   });
 
+  it("includes per-page evictions when an entire page journal is evicted", () => {
+    const journal = new NetworkJournal({ capacity: 1, maxPages: 1 });
+
+    journal.recordRequest({ pageId: "page-1", url: "https://example.test/one", method: "GET" });
+    journal.recordRequest({ pageId: "page-1", url: "https://example.test/two", method: "GET" });
+    journal.recordRequest({ pageId: "page-2", url: "https://example.test/three", method: "GET" });
+
+    expect(journal.query()).toMatchObject({
+      retainedCount: 1,
+      evictedCount: 2,
+      capacityReached: true,
+    });
+  });
+
   it("filters and paginates deterministically across supported metadata", () => {
     const journal = new NetworkJournal({ capacity: 10 });
     const events = [

@@ -288,7 +288,7 @@ export class NetworkJournal {
       const oldestPageId = this.pages.keys().next().value;
       if (oldestPageId === undefined) break;
       const oldest = this.pages.get(oldestPageId);
-      this.evictedPageCount += oldest?.entries.size ?? 0;
+      this.evictedPageCount += (oldest?.entries.size ?? 0) + (oldest?.evictedCount ?? 0);
       this.pages.delete(oldestPageId);
     }
     const page: PageJournal = { entries: new Map(), evictedCount: 0 };
