@@ -469,7 +469,10 @@ async function defaultProbe(url: string, timeoutMs: number): Promise<ProbeResult
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(url, { signal: controller.signal });
-    if (!response.ok) return { state: "no-file" };
+    if (!response.ok) {
+      cancelProbeBody(response);
+      return { state: "no-file" };
+    }
     const version = await readProbeJson(response, controller.signal);
     return isDevToolsVersion(version) ? { state: "live", version } : { state: "no-file" };
   } catch {
@@ -489,6 +492,7 @@ function isDevToolsVersion(value: unknown): boolean {
 async function readProbeJson(response: Response, signal: AbortSignal): Promise<unknown> {
   const declaredLength = Number(response.headers.get("content-length"));
   if (Number.isFinite(declaredLength) && declaredLength > MAX_PROBE_RESPONSE_BYTES) {
+    cancelProbeBody(response);
     return undefined;
   }
   if (!response.body) {
@@ -502,7 +506,7 @@ async function readProbeJson(response: Response, signal: AbortSignal): Promise<u
       if (signal.aborted) {
         return undefined;
       }
-      const next = await reader.read();
+      const next = await awaitWithAbort(reader.read(), signal);
       if (next.done) {
         break;
       }
@@ -516,8 +520,13 @@ async function readProbeJson(response: Response, signal: AbortSignal): Promise<u
       chunks.push(next.value);
     }
   } finally {
-    await reader.cancel().catch(() => undefined);
-    reader.releaseLock();
+    void reader.cancel().catch(() => undefined);
+    try {
+      reader.releaseLock();
+    } catch {
+      // Preserve the probe result if the body is still settling after the
+      // bounded read or timeout.
+    }
   }
   const bytes = new Uint8Array(total);
   let offset = 0;
@@ -530,6 +539,42 @@ async function readProbeJson(response: Response, signal: AbortSignal): Promise<u
   } catch {
     return undefined;
   }
+}
+
+function cancelProbeBody(response: Response): void {
+  try {
+    void response.body?.cancel().catch(() => undefined);
+  } catch {
+    // The endpoint may already have closed while its response was being
+    // rejected; body cleanup is best effort.
+  }
+}
+
+async function awaitWithAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) {
+    throw new Error("Operation aborted");
+  }
+  return new Promise<T>((resolvePromise, reject) => {
+    let settled = false;
+    const finish = (callback: () => void): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      callback();
+    };
+    const onAbort = (): void => finish(() => reject(new Error("Operation aborted")));
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    promise.then(
+      (value) => finish(() => resolvePromise(value)),
+      (error: unknown) => finish(() => reject(error)),
+    );
+  });
 }
 
 async function assertPrivateWizardConfig(handle: FileHandle): Promise<void> {
