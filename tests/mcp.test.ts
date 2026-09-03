@@ -173,7 +173,7 @@ describe("native MCP registry", () => {
     const health = await client.callTool({ name: "server_health", arguments: {} });
     expect(health.isError).not.toBe(true);
     expect(JSON.stringify(health)).toContain('"status":"ok"');
-    expect(health.structuredContent).toMatchObject({ status: "ok" });
+    expect(health.structuredContent).toMatchObject({ status: "ok", ready: true, checks: { runtime: "ready", research: "ready" } });
     const doctor = await client.callTool({ name: "browser_doctor", arguments: {} });
     expect(doctor.isError).not.toBe(true);
     expect(doctor.structuredContent).toMatchObject({ endpoint: { state: "no-file" } });
@@ -244,10 +244,10 @@ describe("native MCP registry", () => {
       ["browser_screenshot", {}], ["browser_pdf", { outputPath: "/tmp/smooth-operator-test/page.pdf" }], ["browser_downloads", {}],
       ["browser_dropdown_options", { selector: "select" }], ["browser_page_next", {}], ["browser_search_page", { query: "x" }],
       ["browser_find_elements", { selector: "button" }], ["browser_inspect_element", { selector: "button", maxDepth: 1, maxChildren: 10 }], ["browser_interactive", {}], ["browser_computed_style", { selector: "body" }],
-      ["browser_frames", {}], ["browser_accessibility_snapshot", {}],
-      ["browser_page_info", {}], ["browser_hover", { target: "#x" }], ["browser_move", { coordinateX: 1, coordinateY: 1 }], ["browser_press_and_hold", { target: "#x" }],
+      ["browser_frames", { pageId: "missing" }], ["browser_accessibility_snapshot", { pageId: "missing", frameId: "main" }],
+      ["browser_page_info", { pageId: "missing" }], ["browser_hover", { target: "#x" }], ["browser_move", { coordinateX: 1, coordinateY: 1 }], ["browser_press_and_hold", { target: "#x" }],
       ["browser_press_and_hold", { target: "#x", durationMs: 10 }],
-      ["browser_challenge", {}], ["browser_evaluate", { code: "1 + 1" }],
+      ["browser_challenge", { pageId: "missing" }], ["browser_evaluate", { code: "1 + 1" }],
       ["browser_wait_for_human", { timeoutMs: 500 }],
       ["browser_solve_challenge", { pageId: "missing" }],
       ["browser_exec", { code: JSON.stringify([{ action: "wait", milliseconds: 0 }]) }],
@@ -324,6 +324,25 @@ describe("native MCP registry", () => {
 
       expect(resourceSignals).toHaveLength(6);
       expect(resourceSignals.every((signal) => signal instanceof AbortSignal)).toBe(true);
+    } finally {
+      await client.close().catch(() => undefined);
+      await server.close().catch(() => undefined);
+      await runtime.close();
+    }
+  });
+
+  it("accepts the camelCase session identifier alias without changing the wire result", async () => {
+    const runtime = await ServerRuntime.create(testConfig());
+    const closeSession = vi.spyOn(runtime, "closeSession").mockResolvedValue({ closed: true, session_id: "session" });
+    const server = createMcpServer(runtime);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "session-alias-test", version: "1.0.0" });
+    try {
+      await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+      const result = await client.callTool({ name: "browser_close_session", arguments: { sessionId: "session" } });
+      expect(result.isError).not.toBe(true);
+      expect(closeSession).toHaveBeenCalledWith("session", expect.any(AbortSignal));
+      expect(result.structuredContent).toEqual({ closed: true, session_id: "session" });
     } finally {
       await client.close().catch(() => undefined);
       await server.close().catch(() => undefined);
@@ -517,6 +536,34 @@ describe("native MCP registry", () => {
     }
   });
 
+  it("forwards explicit tab targets for current-page observations", async () => {
+    const runtime = await ServerRuntime.create(testConfig());
+    const run = vi.spyOn(runtime, "run").mockResolvedValue({ ok: true });
+    const server = createMcpServer(runtime);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "page-target-test", version: "1.0.0" });
+    try {
+      await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+      await client.callTool({ name: "browser_interactive", arguments: { pageId: "tab-1" } });
+      await client.callTool({ name: "browser_frames", arguments: { pageId: "tab-1" } });
+      await client.callTool({ name: "browser_page_info", arguments: { pageId: "tab-1" } });
+      await client.callTool({ name: "browser_challenge", arguments: { pageId: "tab-1" } });
+      await client.callTool({ name: "browser_accessibility_snapshot", arguments: { pageId: "tab-1", frameId: "frame-1" } });
+
+      expect(run.mock.calls.map(([action]) => action)).toEqual([
+        { action: "list_interactive", pageId: "tab-1" },
+        { action: "list_frames", pageId: "tab-1" },
+        { action: "get_page_info", pageId: "tab-1" },
+        { action: "detect_challenge", pageId: "tab-1" },
+        { action: "accessibility_snapshot", pageId: "tab-1", frameId: "frame-1", maxChars: 8_000 },
+      ]);
+    } finally {
+      await client.close().catch(() => undefined);
+      await server.close().catch(() => undefined);
+      await runtime.close();
+    }
+  });
+
   it("maps cookie scope and SameSite fields without exposing cookie values", async () => {
     const runtime = await ServerRuntime.create(testConfig());
     const run = vi.spyOn(runtime, "run").mockResolvedValue({ set: "session" });
@@ -623,6 +670,16 @@ describe("native MCP registry", () => {
         mcpOutputTruncated: true,
       });
       expect((result.structuredContent as { entries: unknown[] }).entries).toHaveLength(20);
+      vi.mocked(runtime.run).mockResolvedValue({
+        entries: Array.from({ length: 20 }, (_, index) => ({ requestId: `request-${index}`, url: `https://example.test/${"x".repeat(3_000)}/${index}` })),
+        offset: 0, limit: 20, total: 20, returnedCount: 20, omittedCount: 0, hasMore: false,
+      });
+      const byteLimited = await client.callTool({ name: "browser_search_network_log", arguments: { limit: 20 } });
+      const payload = byteLimited.structuredContent as { entries: unknown[]; returnedCount: number; omittedCount: number; hasMore: boolean };
+      expect(payload.entries.length).toBeLessThan(20);
+      expect(payload.returnedCount).toBe(payload.entries.length);
+      expect(payload.omittedCount).toBe(20 - payload.entries.length);
+      expect(payload.hasMore).toBe(true);
     } finally {
       await client.close().catch(() => undefined);
       await server.close().catch(() => undefined);

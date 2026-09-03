@@ -16,6 +16,21 @@ import type { Browser, Page } from "puppeteer-core";
 import { testConfig } from "./helpers";
 
 describe("browser service", () => {
+  it("reports a disconnected browser handle as inactive", async () => {
+    const config = testConfig({ browser: { ...testConfig().browser, mode: "connect" } });
+    const service = new BrowserService(config, new SecurityPolicy(config), new Logger("error", {}, () => undefined));
+    const internal = service as unknown as { browser?: Browser; ownsBrowser: boolean };
+    internal.browser = { connected: false } as unknown as Browser;
+    internal.ownsBrowser = false;
+
+    try {
+      expect(service.connectionStatus()).toMatchObject({ connected: false, owned: false });
+      expect(service.sessionSummary().active).toBe(false);
+    } finally {
+      await service.close();
+    }
+  });
+
   it("keeps idle cleanup disabled by default and exposes the timeout", async () => {
     const service = new BrowserService(testConfig(), new SecurityPolicy(testConfig()), new Logger("error", {}, () => undefined));
     const internal = service as unknown as { idleSweepTimer?: unknown };
@@ -2865,9 +2880,11 @@ describe("browser service", () => {
     }
   });
 
-  it("extracts bounded non-secret form values without exposing passwords", async () => {
+  it("omits form values and textarea defaults without reading their getters", async () => {
     const service = new BrowserService(testConfig(), new SecurityPolicy(testConfig()), new Logger("error", {}, () => undefined));
     const textarea = { tagName: "TEXTAREA", textContent: "", value: "clipboard text" };
+    Object.defineProperty(textarea, "value", { get: () => { throw new Error("form value must not be read"); } });
+    Object.defineProperty(textarea, "textContent", { get: () => { throw new Error("textarea default must not be read"); } });
     const password = { tagName: "INPUT", type: "password", textContent: "", value: "secret" };
     const frame = {
       parentFrame: () => null,
@@ -2889,7 +2906,7 @@ describe("browser service", () => {
     internal.frameFor = async () => frame;
     internal.selectorFor = async (_state, target) => target;
 
-    await expect(internal.executeOnPage({ action: "extract", selector: "#textarea" } as BrowserAction)).resolves.toMatchObject({ formValue: expect.stringContaining("clipboard text") });
+    await expect(internal.executeOnPage({ action: "extract", selector: "#textarea" } as BrowserAction)).resolves.not.toHaveProperty("formValue");
     await expect(internal.executeOnPage({ action: "extract", selector: "#secret" } as BrowserAction)).resolves.not.toHaveProperty("formValue");
     await service.close();
   });

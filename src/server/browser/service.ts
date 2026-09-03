@@ -18,10 +18,10 @@ function loadPuppeteer(): Promise<PuppeteerModule> {
 
 import type { ServerConfig } from "../config";
 import { AppError, asAppError, requireField, safeErrorDiagnostic } from "../errors";
-import { BrowserActionPlanSchema, isDestructiveBatchAction, RESOURCE_BLOCKING_TYPES, type BrowserAction } from "../contracts";
+import { BROWSER_ACTION_PLAN_MAX_STEPS, BrowserActionPlanSchema, isDestructiveBatchAction, MCP_PAGE_TEXT_MAX_CHARS, RESOURCE_BLOCKING_TYPES, UPLOAD_MAX_BYTES, UPLOAD_MAX_FILES, UPLOAD_MAX_TOTAL_BYTES, type BrowserAction } from "../contracts";
 import { Logger, redactValue } from "../logger";
 import { SecurityPolicy } from "../policy";
-import { redactSecretPlaceholders, wrapUntrustedText } from "../security";
+import { prepareUntrustedText, redactSecretPlaceholders, wrapUntrustedText } from "../security";
 import { humanMouseMove, humanType } from "./behavior";
 import { classifyChallenge } from "./challenges";
 import { nativeBrowserLaunchArgs } from "./compatibility";
@@ -298,7 +298,6 @@ export interface BrowserShutdownOutcome {
 }
 
 const MAX_LOG_ENTRIES = 500;
-const MAX_ACTION_PLAN_STEPS = 100;
 // Keep a finite admission bound for hostile/unbounded clients, while leaving
 // enough headroom for legitimate concurrent read bursts. The read lane still
 // limits actual Chromium work separately.
@@ -346,8 +345,6 @@ const MIN_IDLE_SWEEP_INTERVAL_MS = 250;
 const MAX_IDLE_SWEEP_INTERVAL_MS = 60_000;
 const MAX_DEVTOOLS_PROBE_RESPONSE_BYTES = 64 * 1024;
 const MAX_DEVTOOLS_ACTIVE_PORT_FILE_BYTES = 4_096;
-const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
-const MAX_UPLOAD_TOTAL_BYTES = 100 * 1024 * 1024;
 const COMMON_KEY_ALIASES: Readonly<Record<string, KeyInput>> = {
   ALT: "Alt",
   ARROWDOWN: "ArrowDown",
@@ -652,7 +649,8 @@ export class BrowserService {
 
   connectionStatus(): { connected: boolean; owned: boolean; trackedPages: number; queuedOperations: number; currentPageId: string | null; recoveryRequired: boolean; idleTimeoutMs: number; benchmarkCounters?: BenchmarkCounters } {
     return {
-      connected: Boolean(this.browser),
+      // Check Puppeteer's transport state, not only handle existence.
+      connected: Boolean(this.browser && this.browser.connected !== false),
       owned: this.ownsBrowser,
       trackedPages: this.states.size,
       queuedOperations: this.queuedOperations,
@@ -892,7 +890,7 @@ export class BrowserService {
     await this.assertCurrentPageAllowed(state.page, state);
     const frame = await this.frameFor(state, options.frameId);
     const domRevisionAtStart = state.domRevision;
-    const maxChars = Math.min(options.maxChars ?? 40_000, this.config.browser.maxHtmlChars);
+    const maxChars = Math.min(options.maxChars ?? MCP_PAGE_TEXT_MAX_CHARS, this.config.browser.maxHtmlChars);
     const result: SnapshotEvaluation = await frame.evaluate(({ limit, maxNodes }) => {
       type StackEntry = { element: Element; hidden: boolean };
       const hiddenTags = new Set(["script", "style", "noscript", "template"]);
@@ -949,7 +947,7 @@ export class BrowserService {
           }
           const element = current.node as Element;
           const tag = element.tagName.toLowerCase();
-          if (hiddenTags.has(tag)) {
+          if (hiddenTags.has(tag) || tag === "textarea") {
             continue;
           }
           const style = element.getAttribute("style") ?? "";
@@ -1229,14 +1227,11 @@ export class BrowserService {
     if (!isDialogAction(action) && action.action !== "list_tabs" && action.action !== "close_browser") {
       this.assertNoPendingDialog(action.pageId);
     }
-    const timeoutMs = action.timeoutMs ?? this.config.browser.actionTimeoutMs;
     // wait_for_human resolves with its own status (timed_out / resolved /
     // cancelled) after `timeoutMs`. Give the operation lock a small buffer so
     // a borderline-slow challenge probe can return its status object instead
     // of being cut off by the action deadline.
-    const budgetMs = action.action === "wait_for_human"
-      ? timeoutMs + 5_000
-      : timeoutMs;
+    const budgetMs = this.actionBudgetMs(action);
     return this.withOperationLock(signal, async (operationSignal) => {
       let result: unknown;
       let snapshotInvalidated = false;
@@ -1312,8 +1307,44 @@ export class BrowserService {
     if (this.recoveryRequired) {
       throw new AppError("BROWSER_RECOVERY_REQUIRED", "Browser recovery is required before browser work can continue. Call browser_close_session and retry.", { retryable: true, details: { hint: "Call browser_close_session and retry after cleanup succeeds." } });
     }
-    const actionCount = actions.length;
-    return this.withOperationLock(signal, (operationSignal) => this.executeBatchUnlocked(actions, options, operationSignal), this.config.browser.actionTimeoutMs * Math.max(1, actionCount), this.config.browser.actionTimeoutMs * Math.max(1, actionCount));
+    const budgetMs = actions.reduce((total, action) => total + this.actionBudgetMs(action), 0) || this.config.browser.actionTimeoutMs;
+    return this.withOperationLock(signal, (operationSignal) => this.executeBatchUnlocked(actions, options, operationSignal), budgetMs, budgetMs);
+  }
+
+  private actionBudgetMs(action: BrowserAction): number {
+    const timeoutMs = action.timeoutMs ?? (action.action === "wait_for_human" ? 120_000 : this.config.browser.actionTimeoutMs);
+    if (action.timeoutMs === undefined && (action.action === "wait" || action.action === "press_and_hold")) {
+      const duration = action.action === "wait" ? action.milliseconds ?? 500 : action.durationMs ?? action.milliseconds ?? 2_000;
+      return timeoutMs + duration;
+    }
+    return action.action === "wait_for_human" ? timeoutMs + 5_000 : timeoutMs;
+  }
+
+  private async executeBatchStep(action: BrowserAction, signal?: AbortSignal): Promise<unknown> {
+    const budgetMs = this.actionBudgetMs(action);
+    const deadline = new AbortController();
+    const stepSignal = combineSignals(signal, deadline.signal)!;
+    const timer = setTimeout(() => deadline.abort(), budgetMs);
+    const operation = Promise.resolve().then(() => {
+      throwIfAborted(stepSignal);
+      return this.executeUnlocked({ ...action, includeSnapshot: false }, stepSignal);
+    });
+    try {
+      return await awaitWithAbort(operation, stepSignal);
+    } catch (error) {
+      if (stepSignal.aborted) {
+        // Recover the underlying step before advancing the queue.
+        await this.recoverAfterAbort(operation);
+        if (deadline.signal.aborted && !signal?.aborted) {
+          throw new AppError("BROWSER_TIMEOUT", `The browser batch action exceeded its ${budgetMs}ms action deadline.`, {
+            retryable: true, details: { phase: "action", timeoutMs: budgetMs }, cause: error,
+          });
+        }
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   private async executeUnlocked(action: BrowserAction, signal?: AbortSignal): Promise<unknown> {
@@ -1758,7 +1789,7 @@ export class BrowserService {
           await frame.waitForFunction((needle, maxNodes) => {
             const target = needle.normalize("NFKC").replace(/\s+/g, " ").trim().toLowerCase();
             if (!target || !document.body) return false;
-            const hiddenTags = new Set(["script", "style", "noscript", "template"]);
+            const hiddenTags = new Set(["script", "style", "noscript", "template", "textarea"]);
             const stack: Array<{ node: Node; hidden: boolean }> = [{ node: document.body, hidden: false }];
             let visited = 0;
             let rolling = "";
@@ -1902,7 +1933,7 @@ export class BrowserService {
         const match = await frame.evaluate((needle, maxNodes) => {
           const target = needle.normalize("NFKC").replace(/\s+/g, " ").trim().toLowerCase();
           if (!target) return undefined;
-          const hiddenTags = new Set(["script", "style", "noscript", "template"]);
+          const hiddenTags = new Set(["script", "style", "noscript", "template", "textarea"]);
           const readText = (root: Element | null): string => {
             if (!root) return "";
             const maybeChildNodes = (root as unknown as { childNodes?: unknown }).childNodes;
@@ -1920,6 +1951,7 @@ export class BrowserService {
                 continue;
               }
               if (node.nodeType !== 1) continue;
+              if (hiddenTags.has((node as Element).tagName.toLowerCase())) continue;
               const children = (node as Element).childNodes;
               for (let index = children.length - 1; index >= 0; index -= 1) {
                 const child = children[index];
@@ -2004,14 +2036,14 @@ export class BrowserService {
             }
           }
         }
-        const maxChars = Math.min(action.maxChars ?? 40_000, this.config.browser.maxHtmlChars);
+        const maxChars = Math.min(action.maxChars ?? MCP_PAGE_TEXT_MAX_CHARS, this.config.browser.maxHtmlChars);
         const resolvedSelector = selector ? await this.selectorFor(state, selector, action.frameId, frame) : undefined;
         const includeLinks = action.includeLinks === true;
         const extracted = (resolvedSelector
           ? await frame.$eval(resolvedSelector, (element, options: { start: number; limit: number; includeLinks: boolean; maxNodes: number }) => {
-            const hiddenTags = new Set(["script", "style", "noscript", "template"]);
+            const hiddenTags = new Set(["script", "style", "noscript", "template", "textarea"]);
             const boundedText = (root: Node | null): { value: string; totalLength: number; truncated: boolean } => {
-              if (!root) {
+              if (!root || hiddenTags.has((root as Element).tagName?.toLowerCase())) {
                 return { value: "", totalLength: 0, truncated: false };
               }
               // Test adapters and older DOM shims may expose textContent but
@@ -2119,14 +2151,8 @@ export class BrowserService {
               return links;
             };
             const slice = boundedText(element);
-            const tagName = element.tagName.toLowerCase();
-            const inputType = tagName === "input" ? String((element as HTMLInputElement).type ?? "text").toLowerCase() : "";
-            const formValue = tagName === "textarea" || tagName === "select"
-              || (tagName === "input" && !["password", "hidden", "file"].includes(inputType))
-              ? String((element as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement).value ?? "").slice(0, options.limit)
-              : undefined;
             const links = options.includeLinks ? collectLinks(element) : undefined;
-            return { value: slice.value, formValue, totalLength: slice.totalLength, truncated: slice.truncated, links };
+            return { value: slice.value, totalLength: slice.totalLength, truncated: slice.truncated, links };
           }, { start: offset, limit: maxChars, includeLinks, maxNodes: MAX_DOM_TRAVERSAL_NODES }).catch((error: unknown) => {
             if (isMissingElementError(error)) {
               throw new AppError("ELEMENT_NOT_FOUND", `No element matched '${resolvedSelector}'.`, { cause: error });
@@ -2134,7 +2160,7 @@ export class BrowserService {
             throw normalizeBrowserOperationError(error, signal);
           })
           : await frame.evaluate(({ start, limit, includeLinks, maxNodes }) => {
-            const hiddenTags = new Set(["script", "style", "noscript", "template"]);
+            const hiddenTags = new Set(["script", "style", "noscript", "template", "textarea"]);
             const boundedText = (root: Node | null): { value: string; totalLength: number; truncated: boolean } => {
               if (!root) return { value: "", totalLength: 0, truncated: false };
               const stack: Node[] = [root];
@@ -2229,7 +2255,6 @@ export class BrowserService {
             return { value: slice.value, totalLength: slice.totalLength, truncated: slice.truncated, links: includeLinks ? links : undefined };
           }, { start: offset, limit: maxChars, includeLinks, maxNodes: MAX_DOM_TRAVERSAL_NODES })) as {
             value: string;
-            formValue?: string;
             totalLength: number;
             truncated: boolean;
             links?: Array<{ text: string; href: string }>;
@@ -2237,16 +2262,17 @@ export class BrowserService {
         if (state.domRevision !== revision) {
           throw new AppError("STALE_PAGE_SLICE", "The page changed while its text slice was being collected. Retry with a fresh revision.", { retryable: true, details: { hint: "Capture browser_extract again and use its new revision." } });
         }
-        const nextOffset = offset + extracted.value.length;
+        const evidence = pageSliceEvidence("extracted_text", extracted.value, maxChars);
+        const nextOffset = offset + evidence.consumedChars;
+        const truncated = extracted.truncated || evidence.truncated;
         return {
           offset,
           nextOffset,
-          hasMore: extracted.truncated,
+          hasMore: truncated,
           revision,
-          text: wrapUntrustedText("extracted_text", redactSecretPlaceholders(extracted.value), maxChars),
-          ...(extracted.formValue !== undefined ? { formValue: wrapUntrustedText("extracted_form_value", redactSecretPlaceholders(extracted.formValue), maxChars) } : {}),
-          truncated: extracted.truncated,
-          textTruncated: extracted.truncated,
+          text: evidence.text,
+          truncated,
+          textTruncated: truncated,
           ...(extracted.links ? {
             links: extracted.links.map((link) => ({
               text: wrapUntrustedText("extracted_link_text", redactSecretPlaceholders(link.text), 500),
@@ -2258,7 +2284,7 @@ export class BrowserService {
       }
       case "get_html": {
         const selector = action.selector ?? action.target ?? action.ref ?? (action.index !== undefined ? `e${action.index + 1}` : undefined);
-        const maxChars = Math.min(action.maxChars ?? this.config.browser.maxHtmlChars, this.config.browser.maxHtmlChars);
+        const maxChars = Math.min(action.maxChars ?? MCP_PAGE_TEXT_MAX_CHARS, this.config.browser.maxHtmlChars);
         const result = selector
           ? await frame.$eval(await this.selectorFor(state, selector, action.frameId, frame), (element, limit: number) => {
             const serialize = (root: Node | null): { html: string; truncated: boolean } => {
@@ -2482,8 +2508,8 @@ export class BrowserService {
             throw new AppError("INVALID_ACTION", "Provide filePath or filePaths, not both.");
           }
           const rawPaths = action.filePaths ?? (action.filePath !== undefined ? [action.filePath] : []);
-          if (rawPaths.length === 0 || rawPaths.length > 20) {
-            throw new AppError("INVALID_ACTION", "Upload requires one to 20 paths in filePath or filePaths.");
+          if (rawPaths.length === 0 || rawPaths.length > UPLOAD_MAX_FILES) {
+            throw new AppError("INVALID_ACTION", `Upload requires one to ${UPLOAD_MAX_FILES} paths in filePath or filePaths.`);
           }
           let totalBytes = 0;
           for (const rawPath of rawPaths) {
@@ -2491,7 +2517,7 @@ export class BrowserService {
             const staged = await this.stageUploadFile(rawPath, signal);
             stagedFiles.push(staged);
             totalBytes += staged.size;
-            if (totalBytes > MAX_UPLOAD_TOTAL_BYTES) {
+            if (totalBytes > UPLOAD_MAX_TOTAL_BYTES) {
               throw new AppError("FILE_TOO_LARGE", "The combined upload sources exceed the 100 MiB size limit.");
             }
           }
@@ -2611,11 +2637,11 @@ export class BrowserService {
         if (revision !== undefined && revision !== revisionAtStart) {
           throw new AppError("STALE_PAGE_SLICE", "The requested page slice revision is stale. Extract the page again and retry.", { retryable: true, details: { expectedRevision: revisionAtStart, providedRevision: revision, hint: "Capture browser_extract again and use its new revision." } });
         }
-        const maxChars = Math.min(action.maxChars ?? 40_000, this.config.browser.maxHtmlChars);
+        const maxChars = Math.min(action.maxChars ?? MCP_PAGE_TEXT_MAX_CHARS, this.config.browser.maxHtmlChars);
         const result = await frame.evaluate(({ start, limit, maxNodes }) => {
           const root = document.body;
           if (!root) return { text: "", totalLength: 0, hasMore: false };
-          const hiddenTags = new Set(["script", "style", "noscript", "template"]);
+          const hiddenTags = new Set(["script", "style", "noscript", "template", "textarea"]);
           const stack: Node[] = [root];
           let visited = 0;
           let totalLength = 0;
@@ -2656,7 +2682,8 @@ export class BrowserService {
         if (state.domRevision !== revisionAtStart) {
           throw new AppError("STALE_PAGE_SLICE", "The page changed while its text slice was being collected. Retry with a fresh revision.", { retryable: true, details: { hint: "Capture browser_extract again and use its new revision." } });
         }
-        return { offset, nextOffset: offset + result.text.length, hasMore: result.hasMore, revision: revisionAtStart, text: wrapUntrustedText("page_text", redactSecretPlaceholders(result.text), maxChars) };
+        const evidence = pageSliceEvidence("page_text", result.text, maxChars);
+        return { offset, nextOffset: offset + evidence.consumedChars, hasMore: result.hasMore || evidence.truncated, revision: revisionAtStart, text: evidence.text };
       }
       case "search_page": {
         if (this.benchmarkCounters) {
@@ -2668,7 +2695,7 @@ export class BrowserService {
           if (!root) return { matches: [], totalMatches: 0, scanTruncated: false };
           const target = needle.normalize("NFKC").replace(/\s+/g, " ").trim().toLowerCase();
           if (!target) return { matches: [], totalMatches: 0, scanTruncated: false };
-          const hiddenTags = new Set(["script", "style", "noscript", "template"]);
+          const hiddenTags = new Set(["script", "style", "noscript", "template", "textarea"]);
           const stack: Node[] = [root];
           let visited = 0;
           let text = "";
@@ -2809,7 +2836,7 @@ export class BrowserService {
               }
               if (node.nodeType !== 1) continue;
               const childElement = node as Element;
-              if (excludedTags.has(childElement.tagName.toLowerCase())) continue;
+              if (excludedTags.has(childElement.tagName.toLowerCase()) || childElement.tagName.toLowerCase() === "textarea") continue;
               const children = childElement.childNodes;
               for (let index = children.length - 1; index >= 0; index -= 1) {
                 const child = children[index];
@@ -2992,6 +3019,8 @@ export class BrowserService {
         const safeSelector = await this.selectorFor(state, selector, action.frameId, frame);
         function collectFindElements(matches: Element[], fallbackSelector: string, safeAttributeNames: string[], safeDataAttributeNames: string[]): Array<{ tag: string; selector: string; rect: { x: number; y: number; width: number; height: number }; text: string; attributes: Record<string, string>; omittedAttributes: number }> {
           const boundedText = (root: Element): string => {
+            const omittedTags = new Set(["script", "style", "noscript", "template", "textarea"]);
+            if (omittedTags.has(root.tagName.toLowerCase())) return "";
             const maybeChildNodes = (root as unknown as { childNodes?: unknown }).childNodes;
             if (!maybeChildNodes) {
               return String((root as unknown as { textContent?: unknown }).textContent ?? "").trim().slice(0, 300);
@@ -3009,6 +3038,7 @@ export class BrowserService {
                 continue;
               }
               if (node.nodeType !== 1) continue;
+              if (omittedTags.has((node as Element).tagName.toLowerCase())) continue;
               const children = (node as Element).childNodes;
               for (let index = children.length - 1; index >= 0; index -= 1) {
                 const child = children[index];
@@ -3117,7 +3147,7 @@ export class BrowserService {
       case "list_frames":
         return this.listFrames(state);
       case "accessibility_snapshot":
-        return this.accessibilitySnapshot(state, action.maxNodes ?? 500, action.maxChars ?? 40_000, action.interestingOnly ?? true, frame, signal);
+        return this.accessibilitySnapshot(state, action.maxNodes ?? 500, action.maxChars ?? MCP_PAGE_TEXT_MAX_CHARS, action.interestingOnly ?? true, frame, signal);
       case "get_computed_style": {
         const selector = await this.selectorFor(state, targetForAction(action, "selector"), action.frameId, frame);
         return frame.$eval(selector, (element) => {
@@ -3455,8 +3485,8 @@ export class BrowserService {
     } catch (error) {
       throw new AppError("SCRIPT_INVALID", "run_script currently accepts a JSON array of browser actions.", { cause: error });
     }
-    if (!Array.isArray(parsed) || parsed.length === 0 || parsed.length > MAX_ACTION_PLAN_STEPS) {
-      throw new AppError("SCRIPT_INVALID", `The script must be a non-empty JSON array of at most ${MAX_ACTION_PLAN_STEPS} actions.`);
+    if (!Array.isArray(parsed) || parsed.length === 0 || parsed.length > BROWSER_ACTION_PLAN_MAX_STEPS) {
+      throw new AppError("SCRIPT_INVALID", `The script must be a non-empty JSON array of at most ${BROWSER_ACTION_PLAN_MAX_STEPS} actions.`);
     }
     const validation = BrowserActionPlanSchema.safeParse(parsed);
     if (!validation.success) {
@@ -3488,7 +3518,7 @@ export class BrowserService {
       try {
         // A batch owns one trailing snapshot. Suppress per-action snapshots so
         // the result remains ordered and bounded even when every action opts in.
-        const result = await this.executeUnlocked({ ...action, includeSnapshot: false }, signal);
+        const result = await this.executeBatchStep(action, signal);
         if (DOM_MUTATING_ACTIONS.has(action.action)) {
           this.invalidateActionSnapshot(action, result);
         }
@@ -5181,10 +5211,37 @@ export class BrowserService {
       // monopolizing the CDP connection; the response is still capped below.
       const depth = Math.min(24, Math.max(1, Math.ceil(Math.log2(nodeLimit + 1)) + 2));
       const response = await awaitWithAbort(client.send("Accessibility.getFullAXTree", { ...(frameId ? { frameId } : {}), depth }), signal) as unknown as { nodes?: Array<Record<string, unknown>> };
-      const sourceNodes = Array.isArray(response.nodes) ? response.nodes : [];
+      const allNodes = Array.isArray(response.nodes) ? response.nodes : [];
+      const sourceNodes = allNodes.slice(0, MAX_DOM_TRAVERSAL_NODES);
+      // Editable values may also appear in StaticText descendants.
+      const byId = new Map(sourceNodes.filter((node) => typeof node.nodeId === "string").map((node) => [node.nodeId as string, node]));
+      const formRoles = new Set(["textbox", "searchbox", "combobox", "spinbutton", "slider", "date", "datetime", "inputtime"]);
+      const isFormControl = (node: Record<string, unknown>): boolean => formRoles.has(axValue(node.role).toLowerCase())
+        || (Array.isArray(node.properties) && node.properties.some((property) => {
+          if (!isRecordValue(property) || property.name !== "editable") return false;
+          return ["true", "plaintext", "richtext"].includes(axValue(property.value).toLowerCase());
+        }));
+      const omittedDescendants = new Set<string>();
+      const pending: string[] = [];
+      const addChildren = (node: Record<string, unknown>): void => {
+        if (!Array.isArray(node.childIds)) return;
+        for (const id of node.childIds.slice(0, MAX_DOM_TRAVERSAL_NODES)) {
+          if (typeof id !== "string" || omittedDescendants.has(id) || !byId.has(id)) continue;
+          // Mark on enqueue to bound cycles and duplicate edges.
+          omittedDescendants.add(id);
+          pending.push(id);
+        }
+      };
+      for (const node of sourceNodes) if (isFormControl(node)) addChildren(node);
+      while (pending.length > 0) {
+        const node = byId.get(pending.pop()!);
+        if (node) addChildren(node);
+      }
+      const safeProperties = new Set(["disabled", "invalid", "required", "readonly", "focusable", "focused", "multiline", "multiselectable", "checked", "pressed", "selected", "expanded", "level", "orientation", "modal", "busy", "hasPopup", "autocomplete", "editable"]);
       const nodes: Array<Record<string, unknown>> = [];
-      let sourceTruncated = false;
+      let sourceTruncated = allNodes.length > sourceNodes.length;
       for (const node of sourceNodes) {
+        if (typeof node.nodeId === "string" && omittedDescendants.has(node.nodeId)) continue;
         if (interestingOnly && !isInterestingAxNode(node)) {
           continue;
         }
@@ -5194,14 +5251,13 @@ export class BrowserService {
         }
         const role = axValue(node.role);
         const name = axValue(node.name);
-        const value = axValue(node.value);
         const properties = Array.isArray(node.properties)
           ? node.properties.slice(0, 20).reduce<Record<string, string>>((result, property) => {
             if (property && typeof property === "object") {
               const item = property as Record<string, unknown>;
               const key = typeof item.name === "string" ? item.name : "";
               const itemValue = axValue(item.value);
-              if (key && itemValue) {
+              if (safeProperties.has(key) && itemValue) {
                 result[key.slice(0, 200)] = wrapUntrustedText("accessibility_property", redactSecretPlaceholders(itemValue), 200);
               }
             }
@@ -5212,7 +5268,7 @@ export class BrowserService {
           ref: `ax-${nodes.length + 1}`,
           role: role ? role.slice(0, 200) : "unknown",
           name: wrapUntrustedText("accessibility_name", redactSecretPlaceholders(name.slice(0, 500)), 500),
-          ...(value ? { value: wrapUntrustedText("accessibility_value", redactSecretPlaceholders(value.slice(0, 500)), 500) } : {}),
+          ...(node.value !== undefined || isFormControl(node) ? { valueOmitted: true } : {}),
           properties,
         });
       }
@@ -5223,6 +5279,8 @@ export class BrowserService {
         // let clients act on an id that PageState never recorded.
         ...(state.snapshotId ? { snapshotId: state.snapshotId } : {}),
         nodes: boundedNodes.nodes,
+        valuesOmitted: true,
+        omittedFormDescendants: omittedDescendants.size,
         truncated: sourceTruncated || boundedNodes.truncated,
       };
     } finally {
@@ -5310,7 +5368,7 @@ export class BrowserService {
         const htmlElement = element as HTMLElement & { type?: string };
         const anchor = element.closest("a") as HTMLAnchorElement | null;
         const boundedText = (root: Node): string => {
-          const hiddenTags = new Set(["script", "style", "noscript", "template"]);
+          const hiddenTags = new Set(["script", "style", "noscript", "template", "textarea"]);
           const stack: Array<{ node: Node; hidden: boolean }> = [{ node: root, hidden: false }];
           let output = "";
           let visited = 0;
@@ -5392,7 +5450,7 @@ export class BrowserService {
       const anchor = clickable.closest("a") as HTMLAnchorElement | null;
       const rect = clickable.getBoundingClientRect();
       const boundedText = (root: Node): string => {
-        const hiddenTags = new Set(["script", "style", "noscript", "template"]);
+        const hiddenTags = new Set(["script", "style", "noscript", "template", "textarea"]);
         const stack: Array<{ node: Node; hidden: boolean }> = [{ node: root, hidden: false }];
         let output = "";
         let visited = 0;
@@ -7078,32 +7136,51 @@ export class BrowserService {
     if (before.isSymbolicLink()) {
       throw new AppError("FILE_PATH_BLOCKED", "The upload source must not be a symbolic link.");
     }
-    if (before.size > MAX_UPLOAD_BYTES) {
+    if (!before.isFile()) {
+      throw new AppError("FILE_PATH_BLOCKED", "The upload source must be a regular file.");
+    }
+    if (before.size > UPLOAD_MAX_BYTES) {
       throw new AppError("FILE_TOO_LARGE", "The upload source exceeds the 50 MiB size limit.");
     }
     const noFollow = typeof fsConstants.O_NOFOLLOW === "number" ? fsConstants.O_NOFOLLOW : 0;
     let sourceHandle: FileHandle | undefined;
     let stagingPath: string | undefined;
     try {
-      sourceHandle = await open(candidate, fsConstants.O_RDONLY | noFollow);
+      // O_NONBLOCK prevents a FIFO swap from blocking before fstat.
+      sourceHandle = await open(candidate, fsConstants.O_RDONLY | noFollow | (fsConstants.O_NONBLOCK ?? 0));
       const opened = await sourceHandle.stat();
       if (!opened.isFile()) {
         throw new AppError("FILE_PATH_BLOCKED", "The upload source must be a regular file.");
       }
-      if (opened.size > MAX_UPLOAD_BYTES) {
+      if (opened.size > UPLOAD_MAX_BYTES) {
         throw new AppError("FILE_TOO_LARGE", "The upload source exceeds the 50 MiB size limit.");
       }
       const after = await lstat(candidate);
-      if (after.isSymbolicLink() || !sameFileIdentity(opened, after)) {
+      if (after.isSymbolicLink() || !sameFileIdentity(before, opened) || !sameFileIdentity(opened, after)) {
         throw new AppError("FILE_PATH_BLOCKED", "The upload source changed while it was being opened.", { retryable: true });
       }
       throwIfAborted(signal);
-      const stagingDirectory = join(this.config.dataDir, "upload-staging");
-      await mkdir(stagingDirectory, { recursive: true, mode: 0o700 });
+      const dataRoot = await realpath(this.config.dataDir);
+      const stagingDirectory = join(dataRoot, "upload-staging");
+      // Require a private, owned staging directory.
+      await mkdir(stagingDirectory, { mode: 0o700 }).catch((error: unknown) => {
+        if (!(error && typeof error === "object" && "code" in error && error.code === "EEXIST")) throw error;
+      });
+      const directoryIdentity = await lstat(stagingDirectory);
+      const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
+      if (!directoryIdentity.isDirectory() || directoryIdentity.isSymbolicLink()
+        || (uid !== undefined && directoryIdentity.uid !== uid)
+        || (platform !== "win32" && (directoryIdentity.mode & 0o077) !== 0)) {
+        throw new AppError("FILE_PATH_BLOCKED", "The upload staging directory must be a private, owned directory without symbolic links.");
+      }
       stagingPath = join(stagingDirectory, `.upload-${randomUUID()}`);
       const stagingHandle = await open(stagingPath, "wx", 0o600);
       let copiedBytes = 0;
       try {
+        const currentDirectory = await lstat(stagingDirectory);
+        if (!currentDirectory.isDirectory() || !sameFileIdentity(directoryIdentity, currentDirectory)) {
+          throw new AppError("FILE_PATH_BLOCKED", "The upload staging directory changed before copying began.", { retryable: true });
+        }
         // Copy from the already-open source handle rather than reopening the
         // path through a convenience copy helper. This keeps the bytes tied
         // to the identity checked above and makes cancellation observable at
@@ -7112,7 +7189,7 @@ export class BrowserService {
           throwIfAborted(signal);
           const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
           copiedBytes += buffer.byteLength;
-          if (copiedBytes > MAX_UPLOAD_BYTES) {
+          if (copiedBytes > UPLOAD_MAX_BYTES) {
             throw new AppError("FILE_TOO_LARGE", "The upload source exceeds the 50 MiB size limit.");
           }
           let offset = 0;
@@ -7766,6 +7843,25 @@ function uniqueStorageKey(key: string, usedKeys: Set<string>): string {
       usedKeys.add(candidate);
       return candidate;
     }
+  }
+}
+
+function pageSliceEvidence(label: string, source: string, maxChars: number): { text: string; consumedChars: number; truncated: boolean } {
+  // Reserve MCP record space before advancing the source offset.
+  const maxBytes = 12_000;
+  let consumedChars = source.length;
+  while (true) {
+    if (consumedChars > 0 && consumedChars < source.length
+      && /[\uD800-\uDBFF]/.test(source[consumedChars - 1]) && /[\uDC00-\uDFFF]/.test(source[consumedChars])) {
+      consumedChars -= 1;
+    }
+    const prepared = prepareUntrustedText(source.slice(0, consumedChars));
+    const redacted = redactValue(prepared) as string;
+    const text = wrapUntrustedText(label, redacted, maxChars);
+    if ((redacted.length <= maxChars && Buffer.byteLength(JSON.stringify(text), "utf8") <= maxBytes) || consumedChars === 0) {
+      return { text, consumedChars, truncated: consumedChars < source.length };
+    }
+    consumedChars = Math.floor(consumedChars / 2);
   }
 }
 

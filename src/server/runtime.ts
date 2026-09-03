@@ -5,7 +5,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import process from "node:process";
 
 import type { ServerConfig } from "./config";
-import type { BrowserAction, ResearchRequest } from "./contracts";
+import { BROWSER_ACTION_PLAN_MAX_STEPS, BROWSER_BATCH_MAX_STEPS, MCP_PAGE_TEXT_MAX_CHARS, RESEARCH_MAX_CHARS, RESEARCH_MAX_RESULTS, RESEARCH_MIN_CHARS, RESEARCH_QUERY_MAX_CHARS, UPLOAD_MAX_BYTES, UPLOAD_MAX_FILES, UPLOAD_MAX_TOTAL_BYTES, type BrowserAction, type ResearchRequest } from "./contracts";
 import { BrowserService, type PageSnapshot } from "./browser/service";
 import { AppError, safeErrorDiagnostic } from "./errors";
 import { Logger } from "./logger";
@@ -18,6 +18,7 @@ export class ServerRuntime {
   readonly policy: SecurityPolicy;
   readonly browser: BrowserService;
   readonly research: ResearchService;
+  private readonly startedAt = Date.now();
   private closePromise?: Promise<void>;
   private profileLeasePromise?: Promise<void>;
   private closing = false;
@@ -208,6 +209,42 @@ export class ServerRuntime {
     return this.research.research(query, options, signal);
   }
 
+  /** Return bounded runtime readiness without page data. */
+  health(): Record<string, unknown> {
+    const browserDisabled = this.config.browser.mode === "disabled";
+    const profileUnavailable = this.profileLeaseRequired && !this.browserProfileLease;
+    const browser = browserDisabled
+      ? { status: "disabled", connected: false, recoveryRequired: false }
+      : (() => {
+        const status = this.browser.connectionStatus();
+        return {
+          status: status.recoveryRequired ? "recovery_required" : profileUnavailable ? "profile_unavailable" : status.connected ? "connected" : "idle",
+          connected: status.connected,
+          recoveryRequired: status.recoveryRequired,
+          queuedOperations: status.queuedOperations,
+          profileLease: this.profileLeaseRequired ? this.browserProfileLease ? "held" : "not_held" : "not_required",
+        };
+      })();
+    const overallStatus = this.closing
+      ? "shutting_down"
+      : browser.recoveryRequired || profileUnavailable
+        ? "degraded"
+        : "ok";
+    return {
+      status: overallStatus,
+      ready: !this.closing && !browser.recoveryRequired && !profileUnavailable,
+      uptimeMs: Math.max(0, Date.now() - this.startedAt),
+      server: { name: "SmoothOperator", version: SERVER_VERSION },
+      transport: this.config.transport,
+      checks: {
+        runtime: this.closing ? "shutting_down" : "ready",
+        browser,
+        research: this.closing ? "shutting_down" : "ready",
+      },
+      capabilities: this.publicCapabilities(),
+    };
+  }
+
   private assertOpen(): void {
     if (this.closing) {
       throw new AppError("SERVER_CLOSING", "The MCP runtime is shutting down.", { retryable: true });
@@ -255,6 +292,27 @@ export class ServerRuntime {
         dnsResolution: "preflight-only; browser resolver remains unpinned",
         evaluateAllowed: this.config.security.allowEval,
         httpRemoteAllowed: this.config.http.allowRemote,
+      },
+      http: {
+        path: this.config.http.path,
+        healthPath: `${this.config.http.path.replace(/\/+$/, "")}/healthz`,
+        authenticationRequired: Boolean(this.config.http.token || this.config.http.allowRemote),
+      },
+      limits: {
+        pageTextChars: MCP_PAGE_TEXT_MAX_CHARS,
+        browserActionPlanSteps: BROWSER_ACTION_PLAN_MAX_STEPS,
+        browserBatchSteps: BROWSER_BATCH_MAX_STEPS,
+        research: {
+          queryChars: RESEARCH_QUERY_MAX_CHARS,
+          minTextChars: RESEARCH_MIN_CHARS,
+          maxTextChars: RESEARCH_MAX_CHARS,
+          maxResults: RESEARCH_MAX_RESULTS,
+        },
+        upload: {
+          maxFiles: UPLOAD_MAX_FILES,
+          maxBytesPerFile: UPLOAD_MAX_BYTES,
+          maxTotalBytes: UPLOAD_MAX_TOTAL_BYTES,
+        },
       },
       challenges: {
         classification: "bounded-evidence",

@@ -31,7 +31,10 @@ The wizard asks exactly 3 focused questions: browser profile ownership, browser 
 
 Requires Node 22.23.2+ and an installed Chromium-based browser. Profile at `~/.smooth-operator/browser` — sign in once.
 
-Verify: `smooth-operator --help` and `server_health` / `browser_doctor` appear after restart.
+Verify: `smooth-operator --help` and `server_health` / `browser_doctor` appear after restart. `server_health` reports `ok` when the runtime is ready, `degraded` when browser recovery is required or its managed profile lease is not held, and `shutting_down` during teardown; an idle lazy browser is healthy.
+
+For a local release check, run `npm run verify`; it covers lint, type safety,
+tests, dead-code analysis, and the package smoke test.
 
 ## What it does
 
@@ -57,7 +60,7 @@ Talk to your harness normally. It can call `browser_navigate` → `browser_snaps
 
 Browser identity remains native, page JavaScript is available by default, and
 behavioral timing is off for fast deterministic input. Set the explicit
-environment flags to change those choices. See `docs/STEALTH-GUIDE.md` for
+environment flags to change those choices. See the [browser compatibility guide](docs/STEALTH-GUIDE.md) for
 details and responsible use.
 
 For the fastest supported operation, keep behavioral timing off with
@@ -79,6 +82,10 @@ evaluation remains an explicit page capability.
 - Secure by default — domain and file policy, bounded outputs, redaction, and explicit safety boundaries
 - Reliable — private profiles, stale-reference recovery, reconnect handling, and structured errors
 - Flexible — stdio by default, Streamable HTTP when you need it, plus connect and disabled modes
+
+For HTTP deployments, the configured MCP path also has a bounded readiness
+endpoint at `<path>/healthz` (normally `/mcp/healthz`), subject to the same
+HTTP authentication policy as the MCP endpoint.
 
 ## Benchmarks
 

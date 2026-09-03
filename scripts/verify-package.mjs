@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { access, mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
-import { dirname, extname, join, resolve } from "node:path";
+import { dirname, extname, join, relative, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
@@ -21,6 +21,7 @@ const REQUIRED_PACKAGED_FILES = new Set([
   ".env.example",
   "docs/mcp-server.md",
   "docs/harnesses.md",
+  "docs/STEALTH-GUIDE.md",
   DIST_ENTRY,
   DIST_MAP,
 ]);
@@ -144,7 +145,7 @@ async function verifySourceMetadata(packageJson) {
     throw new Error("package.json name must remain smooth-operator-mcp.");
   }
   const declaredFiles = new Set(Array.isArray(packageJson.files) ? packageJson.files : []);
-  const expectedFiles = new Set(["dist", "docs/mcp-server.md", "docs/harnesses.md", "README.md", "LICENSE", ".env.example"]);
+  const expectedFiles = new Set(["dist", "docs/mcp-server.md", "docs/harnesses.md", "docs/STEALTH-GUIDE.md", "README.md", "LICENSE", ".env.example"]);
   if (declaredFiles.size !== expectedFiles.size || [...expectedFiles].some((file) => !declaredFiles.has(file))) {
     throw new Error(`package.json files must intentionally allowlist: ${[...expectedFiles].join(", ")}.`);
   }
@@ -166,7 +167,7 @@ async function verifySourceMetadata(packageJson) {
   if (!match || match[1] !== packageJson.version) {
     throw new Error(`Version drift: package.json=${packageJson.version}; src/server/version.ts=${match?.[1] ?? "missing"}.`);
   }
-  for (const file of ["README.md", "docs/mcp-server.md", "docs/harnesses.md"]) {
+  for (const file of ["README.md", "docs/mcp-server.md", "docs/harnesses.md", "docs/STEALTH-GUIDE.md"]) {
     const path = join(root, file);
     await access(path);
     const source = await readFile(path, "utf8");
@@ -187,6 +188,7 @@ const SOURCE_HYGIENE_ROOTS = [
   "package.json",
   "docs/mcp-server.md",
   "docs/harnesses.md",
+  "docs/STEALTH-GUIDE.md",
   ".env.example",
 ];
 const SOURCE_HYGIENE_EXCLUSIONS = new Set([
@@ -251,6 +253,7 @@ async function verifyPackText(files) {
       return;
     }
     const source = file.startsWith("dist/") ? await readFile(sourcePath, "utf8") : await readFile(sourcePath, "utf8");
+    if (extname(file) === ".md") await verifyMarkdownLinks(file, source, files);
     for (const pattern of FORBIDDEN_RUNTIME_REFERENCES) {
       if (pattern.test(source)) {
         throw new Error(`Forbidden legacy/runtime reference ${pattern} found in packaged file ${file}.`);
@@ -259,7 +262,7 @@ async function verifyPackText(files) {
   }));
 }
 
-async function verifyMarkdownLinks(file, source) {
+async function verifyMarkdownLinks(file, source, packagedFiles) {
   const linkPattern = /\[[^\]]*\]\(([^)]+)\)/g;
   for (const match of source.matchAll(linkPattern)) {
     const raw = match[1].trim().replace(/^<|>$/g, "");
@@ -270,6 +273,9 @@ async function verifyMarkdownLinks(file, source) {
     const resolved = resolve(root, dirname(file), target);
     if (!(await pathExists(resolved))) {
       throw new Error(`Broken local Markdown link in ${file}: ${raw}`);
+    }
+    if (packagedFiles && !packagedFiles.has(relative(root, resolved).replaceAll("\\", "/"))) {
+      throw new Error(`Local Markdown link in ${file} is missing from the npm package: ${raw}`);
     }
   }
 }

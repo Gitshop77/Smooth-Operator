@@ -25,11 +25,17 @@ const INSTALL_USAGE = `Usage: smooth-operator install [harness]   (interactive w
 const HELP = `SmoothOperator MCP server
 
 Usage:
-  smooth-operator [--transport stdio|http] [--config path]
-  npm start -- [--transport stdio|http] [--config path]
+  smooth-operator [--transport stdio|http] [--config path] [--host host] [--port port]
+  npm start -- [--transport stdio|http] [--config path] [--host host] [--port port]
   smooth-operator --version
   smooth-operator install <harness>
   smooth-operator install --help
+
+Options:
+  --transport stdio|http  Select the MCP transport (default: stdio)
+  --config path           Load an explicit JSON configuration file
+  --host host             HTTP bind host (default: 127.0.0.1)
+  --port port             HTTP bind port (default: 3344)
 
 Environment:
   SMOOTH_OPERATOR_TRANSPORT=stdio|http
@@ -205,6 +211,7 @@ async function serveHttp(runtime: ServerRuntime, shutdown: (reason: string) => P
   const nodeHandler = toNodeHandler(handler, { onerror: (error) => runtime.logger.error("MCP HTTP adapter error", safeErrorDiagnostic(error)) });
   const allowedHostnames = new Set(config.http.allowRemote ? config.http.allowedHosts : LOCALHOST_HOSTNAMES);
   const allowedOriginHostnames = new Set(config.http.allowRemote ? config.http.allowedOrigins : LOCALHOST_HOSTNAMES);
+  const healthPath = `${config.http.path.replace(/\/+$/, "")}/healthz`;
   // The configured token is immutable for the lifetime of this listener.
   // Hash it once instead of re-hashing it for every authenticated request.
   const expectedAuthDigest = config.http.token ? authDigest(config.http.token) : undefined;
@@ -228,7 +235,8 @@ async function serveHttp(runtime: ServerRuntime, shutdown: (reason: string) => P
       return;
     }
     setCorsHeaders(request, response);
-    if (!requestPathMatches(request, config.http.path)) {
+    const isHealthPath = requestPathMatches(request, healthPath);
+    if (!requestPathMatches(request, config.http.path) && !isHealthPath) {
       closeIncompleteRequestAfterResponse(request, response);
       response.writeHead(404, { "content-type": "application/json" });
       response.end(HTTP_NOT_FOUND_BODY);
@@ -249,6 +257,31 @@ async function serveHttp(runtime: ServerRuntime, shutdown: (reason: string) => P
       closeIncompleteRequestAfterResponse(request, response);
       response.writeHead(401, { "content-type": "application/json", "www-authenticate": "Bearer" });
       response.end(HTTP_UNAUTHORIZED_BODY);
+      return;
+    }
+    if (isHealthPath) {
+      if (request.method !== "GET" && request.method !== "HEAD") {
+        closeIncompleteRequestAfterResponse(request, response);
+        response.writeHead(405, { "content-type": "application/json", allow: "GET, HEAD, OPTIONS" });
+        response.end(JSON.stringify({ error: "method_not_allowed" }));
+        return;
+      }
+      const health = runtime.health();
+      const ready = health.ready === true;
+      const payload = {
+        status: health.status,
+        ready,
+        server: health.server,
+        transport: health.transport,
+        checks: health.checks,
+      };
+      closeIncompleteRequestAfterResponse(request, response);
+      response.writeHead(ready ? 200 : 503, {
+        "content-type": "application/json",
+        "cache-control": "no-store",
+        "x-content-type-options": "nosniff",
+      });
+      response.end(JSON.stringify(redactValue(payload)));
       return;
     }
     let streamPool = isPotentialHttpStream(request) ? activeHttpStreams : activeHttpRequests;

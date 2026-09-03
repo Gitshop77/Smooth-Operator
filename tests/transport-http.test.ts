@@ -50,6 +50,21 @@ describe("HTTP transport", () => {
     const endpoint = `http://127.0.0.1:${port}/mcp`;
     await ready;
 
+    const health = await fetch(`${endpoint}/healthz`, {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(5_000),
+    });
+    expect(health.status).toBe(200);
+    expect(health.headers.get("cache-control")).toBe("no-store");
+    expect(await health.json()).toMatchObject({ status: "ok", ready: true, checks: { runtime: "ready", research: "ready" } });
+
+    const unauthorizedHealth = await fetch(`${endpoint}/healthz`, { signal: AbortSignal.timeout(5_000) });
+    expect(unauthorizedHealth.status).toBe(401);
+    const healthPreflight = await fetch(`${endpoint}/healthz`, { method: "OPTIONS", headers: { Origin: "http://localhost" } });
+    expect(healthPreflight.status).toBe(204);
+    const healthPost = await fetch(`${endpoint}/healthz`, { method: "POST", headers: { Authorization: `Bearer ${token}`, "content-type": "application/json" }, body: "{}" });
+    expect(healthPost.status).toBe(405);
+
     const slowUnauthorized = await rawSlowBodyResponse(port, "/mcp", {
       Authorization: "Bearer wrong-token",
       "content-type": "application/json",

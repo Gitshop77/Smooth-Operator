@@ -1,6 +1,6 @@
 {
   "name": "smooth-operator-mcp",
-  "version": "3.0.6",
+  "version": "3.1.0",
   "type": "module",
   "packageManager": "npm@12.0.2",
   "description": "A lightweight, production-grade MCP server for secure browser automation.",
@@ -13,6 +13,7 @@
     "dist",
     "docs/mcp-server.md",
     "docs/harnesses.md",
+    "docs/STEALTH-GUIDE.md",
     "README.md",
     "LICENSE",
     ".env.example"
@@ -33,6 +34,7 @@
     "test:browser:live": "node scripts/test-browser-live.mjs",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
+    "verify": "npm run lint && npm run typecheck && npm test && npm run dead-code && npm run package:smoke",
     "dead-code": "knip --include files,exports,dependencies,unlisted --no-progress",
     "mcp:stdio": "npm run start -- --transport stdio",
     "mcp:http": "npm run start -- --transport http",
@@ -46,8 +48,8 @@
     "@modelcontextprotocol/node": "2.0.0",
     "@modelcontextprotocol/server": "2.0.0",
     "ghost-cursor": "1.4.2",
-    "puppeteer-core": "25.9.0",
-    "zod": "4.4.3"
+    "puppeteer-core": "25.10.0",
+    "zod": "4.5.4"
   },
   "devDependencies": {
     "@modelcontextprotocol/client": "^2.0.0",

@@ -8,6 +8,11 @@ const KeyboardString = (max: number) => z.string().min(1).max(max);
 // whitespace-only keys instead of trimming them into a different key.
 const StorageKey = (max: number) => z.string().max(max);
 export const MCP_PAGE_TEXT_MAX_CHARS = 8_000;
+export const BROWSER_ACTION_PLAN_MAX_STEPS = 100;
+export const BROWSER_BATCH_MAX_STEPS = 50;
+export const UPLOAD_MAX_FILES = 20;
+export const UPLOAD_MAX_BYTES = 50 * 1024 * 1024;
+export const UPLOAD_MAX_TOTAL_BYTES = 100 * 1024 * 1024;
 // Keep the research input contract and its service/serialization budgets in
 // one place. These constants do not add fields to the public MCP schema.
 export const RESEARCH_QUERY_MAX_CHARS = 4_000;
@@ -149,7 +154,7 @@ const BrowserActionFieldsSchema = z.object({
   state: z.enum(["visible", "hidden", "attached", "detached"]).optional(),
   waitUntil: z.enum(["load", "domcontentloaded", "networkidle0", "networkidle2"]).optional(),
   filePath: BoundedString(4_000).optional(),
-  filePaths: z.array(BoundedString(4_000)).min(1).max(20).optional(),
+  filePaths: z.array(BoundedString(4_000)).min(1).max(UPLOAD_MAX_FILES).optional(),
   outputPath: BoundedString(4_000).optional(),
   code: z.string().trim().min(1).max(40_000).optional(),
   script: z.string().trim().min(1).max(40_000).optional(),
@@ -207,6 +212,56 @@ const BrowserActionFieldsSchema = z.object({
   revision: z.number().int().min(0).max(1_000_000_000).optional(),
 }).strict();
 
+const scopedActions = (...actions: ActionName[]): ReadonlySet<ActionName> => new Set(actions);
+const ACTION_FIELD_SCOPES: Readonly<Record<string, ReadonlySet<ActionName>>> = {
+  target: scopedActions("click", "input", "select_dropdown", "scroll", "switch_tab", "close_tab", "wait_for_element", "extract", "get_html", "upload_file", "dropdown_options", "find_elements", "inspect_element", "get_computed_style", "hover", "press_and_hold"),
+  ref: scopedActions("click", "input", "select_dropdown", "scroll", "wait_for_element", "extract", "get_html", "upload_file", "dropdown_options", "find_elements", "inspect_element", "get_computed_style", "hover", "press_and_hold"),
+  selector: scopedActions("click", "input", "select_dropdown", "scroll", "wait_for_element", "extract", "get_html", "upload_file", "dropdown_options", "find_elements", "inspect_element", "get_computed_style", "hover", "press_and_hold"),
+  index: scopedActions("click", "input", "select_dropdown", "scroll", "wait_for_element", "extract", "get_html", "upload_file", "dropdown_options", "find_elements", "inspect_element", "get_computed_style", "hover", "press_and_hold"),
+  text: scopedActions("input", "wait_for_text", "find_text", "search_page", "alert_send_keys"),
+  query: scopedActions("wait_for_text", "find_text", "search_page", "extract", "search_network_log"),
+  value: scopedActions("input", "select_dropdown", "wait_for_url", "alert_send_keys", "set_cookie", "set_storage"),
+  url: scopedActions("navigate", "wait_for_url", "search_network_log", "get_cookies", "set_cookie", "delete_cookies"),
+  newTab: scopedActions("navigate", "click"), new_tab: scopedActions("navigate", "click"),
+  coordinateX: scopedActions("click", "move"), coordinateY: scopedActions("click", "move"),
+  coordinate_x: scopedActions("click", "move"), coordinate_y: scopedActions("click", "move"),
+  startCoordinateX: scopedActions("press_and_hold"), startCoordinateY: scopedActions("press_and_hold"),
+  start_coordinate_x: scopedActions("press_and_hold"), start_coordinate_y: scopedActions("press_and_hold"),
+  endCoordinateX: scopedActions("press_and_hold"), endCoordinateY: scopedActions("press_and_hold"),
+  end_coordinate_x: scopedActions("press_and_hold"), end_coordinate_y: scopedActions("press_and_hold"),
+  path: scopedActions("press_and_hold"), durationMs: scopedActions("press_and_hold"),
+  button: scopedActions("click", "press_and_hold"), pointerType: scopedActions("click"), clickCount: scopedActions("click"),
+  key: scopedActions("send_keys"), keys: scopedActions("send_keys"),
+  direction: scopedActions("scroll"), amount: scopedActions("scroll", "page_next"),
+  offset: scopedActions("extract", "page_next", "search_network_log"),
+  milliseconds: scopedActions("wait", "press_and_hold"),
+  maxScrolls: scopedActions("scroll_to_bottom"), restoreTop: scopedActions("scroll_to_bottom"),
+  state: scopedActions("wait_for_element"), waitUntil: scopedActions("navigate", "click", "go_back", "go_forward", "reload"),
+  filePath: scopedActions("upload_file", "save_as_pdf"), filePaths: scopedActions("upload_file"), outputPath: scopedActions("save_as_pdf"),
+  code: scopedActions("evaluate", "run_script"), script: scopedActions("run_script"), expression: scopedActions("evaluate"),
+  requestId: scopedActions("search_network_log"), method: scopedActions("search_network_log"),
+  status: scopedActions("search_network_log"), resourceType: scopedActions("search_network_log"), limit: scopedActions("search_network_log"),
+  operation: scopedActions("resource_blocking"), resourceTypes: scopedActions("resource_blocking"),
+  includeLinks: scopedActions("extract"),
+  includeSnapshot: scopedActions("navigate", "click", "input", "select_dropdown", "scroll", "send_keys", "go_back", "go_forward", "reload"),
+  maxChars: scopedActions("extract", "get_html", "page_next", "accessibility_snapshot", "solve_challenge", "get_storage"),
+  maxNodes: scopedActions("accessibility_snapshot"), interestingOnly: scopedActions("accessibility_snapshot"),
+  maxDepth: scopedActions("inspect_element"), maxChildren: scopedActions("inspect_element"),
+  maxBytes: scopedActions("screenshot"), max_bytes: scopedActions("screenshot"), format: scopedActions("screenshot"), quality: scopedActions("screenshot"),
+  includeScreenshot: scopedActions("solve_challenge"), include_screenshot: scopedActions("solve_challenge"),
+  fullPage: scopedActions("screenshot", "solve_challenge"), full_page: scopedActions("screenshot", "solve_challenge"), full: scopedActions("screenshot", "solve_challenge"),
+  maxDimension: scopedActions("screenshot", "solve_challenge"), max_dim: scopedActions("screenshot", "solve_challenge"),
+  clear: scopedActions("input"), append: scopedActions("input"), verify: scopedActions("input"),
+  pollMs: scopedActions("wait_for_human"), maxAttempts: scopedActions("solve_challenge"),
+  optionValue: scopedActions("select_dropdown"), optionValues: scopedActions("select_dropdown"),
+  cookieName: scopedActions("set_cookie", "delete_cookies"), cookieValue: scopedActions("set_cookie"),
+  cookieDomain: scopedActions("set_cookie", "delete_cookies"), cookiePath: scopedActions("set_cookie", "delete_cookies"),
+  cookieSecure: scopedActions("set_cookie"), cookieHttpOnly: scopedActions("set_cookie"), cookieSameSite: scopedActions("set_cookie"),
+  storageArea: scopedActions("get_storage", "set_storage", "clear_storage"), storageKey: scopedActions("get_storage", "set_storage", "clear_storage"),
+  storageValue: scopedActions("set_storage"), storageAll: scopedActions("clear_storage"), includeValues: scopedActions("get_storage"),
+  confirmDestructive: scopedActions("run_script"), revision: scopedActions("page_next"),
+};
+
 export const BrowserActionSchema = BrowserActionFieldsSchema.extend({ action: ActionNameSchema }).superRefine((input, context) => {
   const targetForms = [input.target !== undefined, input.ref !== undefined, input.selector !== undefined, input.index !== undefined].filter(Boolean).length;
   if (targetForms > 1) {
@@ -218,17 +273,35 @@ export const BrowserActionSchema = BrowserActionFieldsSchema.extend({ action: Ac
   if (input.coordinateY !== undefined && input.coordinate_y !== undefined) {
     context.addIssue({ code: "custom", message: "Provide coordinateY or coordinate_y, not both." });
   }
+  if ((input.coordinateX === undefined) !== (input.coordinateY === undefined)) {
+    context.addIssue({ code: "custom", message: "coordinateX and coordinateY must be provided together." });
+  }
+  if ((input.coordinate_x === undefined) !== (input.coordinate_y === undefined)) {
+    context.addIssue({ code: "custom", message: "coordinate_x and coordinate_y must be provided together." });
+  }
   if (input.endCoordinateX !== undefined && input.end_coordinate_x !== undefined) {
     context.addIssue({ code: "custom", message: "Provide endCoordinateX or end_coordinate_x, not both." });
   }
   if (input.endCoordinateY !== undefined && input.end_coordinate_y !== undefined) {
     context.addIssue({ code: "custom", message: "Provide endCoordinateY or end_coordinate_y, not both." });
   }
+  if ((input.endCoordinateX === undefined) !== (input.endCoordinateY === undefined)) {
+    context.addIssue({ code: "custom", message: "endCoordinateX and endCoordinateY must be provided together." });
+  }
+  if ((input.end_coordinate_x === undefined) !== (input.end_coordinate_y === undefined)) {
+    context.addIssue({ code: "custom", message: "end_coordinate_x and end_coordinate_y must be provided together." });
+  }
   if (input.startCoordinateX !== undefined && input.start_coordinate_x !== undefined) {
     context.addIssue({ code: "custom", message: "Provide startCoordinateX or start_coordinate_x, not both." });
   }
   if (input.startCoordinateY !== undefined && input.start_coordinate_y !== undefined) {
     context.addIssue({ code: "custom", message: "Provide startCoordinateY or start_coordinate_y, not both." });
+  }
+  if ((input.startCoordinateX === undefined) !== (input.startCoordinateY === undefined)) {
+    context.addIssue({ code: "custom", message: "startCoordinateX and startCoordinateY must be provided together." });
+  }
+  if ((input.start_coordinate_x === undefined) !== (input.start_coordinate_y === undefined)) {
+    context.addIssue({ code: "custom", message: "start_coordinate_x and start_coordinate_y must be provided together." });
   }
   const hasEndX = input.endCoordinateX !== undefined || input.end_coordinate_x !== undefined;
   const hasEndY = input.endCoordinateY !== undefined || input.end_coordinate_y !== undefined;
@@ -442,6 +515,11 @@ export const BrowserActionSchema = BrowserActionFieldsSchema.extend({ action: Ac
     default:
       break;
   }
+  for (const [field, actions] of Object.entries(ACTION_FIELD_SCOPES)) {
+    if (Object.hasOwn(input, field) && !actions.has(input.action)) {
+      context.addIssue({ code: "custom", path: [field], message: `'${field}' is not supported by the '${input.action}' action.` });
+    }
+  }
 });
 export type BrowserAction = z.infer<typeof BrowserActionSchema>;
 
@@ -608,7 +686,7 @@ const ClickTargetFormSchema = z.union([
 export const ClickRequestSchema = ClickTargetFormSchema.superRefine((input, context) => {
   const targetForms = [input.target !== undefined, input.ref !== undefined, input.selector !== undefined, input.index !== undefined].filter(Boolean).length;
   if (targetForms > 1) {
-    context.addIssue({ code: "custom", message: "Provide exactly one of target, selector, or index." });
+    context.addIssue({ code: "custom", message: "Provide exactly one of target, ref, selector, or index." });
   }
   const hasTarget = targetForms > 0;
   const hasX = input.coordinateX !== undefined || input.coordinate_x !== undefined;
@@ -750,7 +828,7 @@ export const ScreenshotRequestSchema = z.object({ fullPage: z.boolean().optional
   }
 });
 export const PdfRequestSchema = z.object({ outputPath: BoundedString(4_000), ...PageInput }).strict();
-export const UploadRequestSchema = z.object({ selector: BoundedString(2_000), filePath: BoundedString(4_000).optional(), filePaths: z.array(BoundedString(4_000)).min(1).max(20).optional(), ...PageInput }).strict().superRefine((input, context) => {
+export const UploadRequestSchema = z.object({ selector: BoundedString(2_000), filePath: BoundedString(4_000).optional(), filePaths: z.array(BoundedString(4_000)).min(1).max(UPLOAD_MAX_FILES).optional(), ...PageInput }).strict().superRefine((input, context) => {
   const hasFilePath = input.filePath !== undefined;
   const hasFilePaths = input.filePaths !== undefined;
   if (hasFilePath && hasFilePaths) {
@@ -828,6 +906,12 @@ export const CookieRequestSchema = z.object({
   if (input.sameSite !== undefined && input.operation !== "set") {
     context.addIssue({ code: "custom", message: "Cookie sameSite is only valid for set." });
   }
+  if (input.operation === "get" && [input.name, input.value, input.domain, input.path, input.secure, input.httpOnly].some((value) => value !== undefined)) {
+    context.addIssue({ code: "custom", message: "Cookie get accepts only url and pageId scope fields." });
+  }
+  if (input.operation === "delete" && [input.value, input.secure, input.httpOnly].some((value) => value !== undefined)) {
+    context.addIssue({ code: "custom", message: "Cookie delete does not accept value, secure, or httpOnly." });
+  }
 });
 export const StorageRequestSchema = z.object({
   operation: z.enum(["get", "set", "clear"]),
@@ -847,9 +931,18 @@ export const StorageRequestSchema = z.object({
   if (input.operation === "clear" && input.key !== undefined && input.all === true) {
     context.addIssue({ code: "custom", message: "Storage clear accepts key or all=true, not both." });
   }
+  if (input.operation !== "set" && input.value !== undefined) {
+    context.addIssue({ code: "custom", message: `Storage ${input.operation} does not accept value.` });
+  }
+  if (input.operation !== "clear" && input.all !== undefined) {
+    context.addIssue({ code: "custom", message: `Storage ${input.operation} does not accept all.` });
+  }
+  if (input.operation !== "get" && input.includeValues !== undefined) {
+    context.addIssue({ code: "custom", message: `Storage ${input.operation} does not accept includeValues.` });
+  }
 });
 export const BatchRequestSchema = z.object({
-  actions: z.array(BrowserActionInputSchema).min(1).max(50).superRefine(validateActionPlan),
+  actions: z.array(BrowserActionInputSchema).min(1).max(BROWSER_BATCH_MAX_STEPS).superRefine(validateActionPlan),
   confirmDestructive: z.boolean().optional(),
   includeSnapshot: z.boolean().optional(),
 }).strict().superRefine((input, context) => {
@@ -878,7 +971,7 @@ function validateActionPlan(actions: Array<z.infer<typeof BrowserActionSchema>>,
   }
 }
 
-export const BrowserActionPlanSchema = z.array(BrowserActionInputSchema).min(1).max(100).superRefine(validateActionPlan);
+export const BrowserActionPlanSchema = z.array(BrowserActionInputSchema).min(1).max(BROWSER_ACTION_PLAN_MAX_STEPS).superRefine(validateActionPlan);
 
 const DESTRUCTIVE_BATCH_ACTIONS = new Set<ActionName>([
   "close_tab",

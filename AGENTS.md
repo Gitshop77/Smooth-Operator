@@ -52,6 +52,8 @@ SMOOTH_OPERATOR_TRANSPORT=http SMOOTH_OPERATOR_HTTP_TOKEN="$(openssl rand -hex 3
 ~~~
 
 Default `127.0.0.1:3344`. Remote needs `SMOOTH_OPERATOR_ALLOW_REMOTE_HTTP=true` + 32-character token. Host/Origin values are parsed and allowlisted, bodies are capped at 2M, and malformed/partial responses close safely.
+The sibling `<SMOOTH_OPERATOR_HTTP_PATH>/healthz` endpoint follows the same
+Host, Origin, and bearer policy and reports current readiness without page data.
 
 ## MCP
 
@@ -125,6 +127,7 @@ No model service.
 | npm run mcp:http | http |
 | npm run typecheck | tsc |
 | npm run lint | eslint |
+| npm run verify | lint, typecheck, tests, dead code, package smoke |
 | npm test | vitest |
 | npm run test:browser:live | live Chrome |
 | npm run test:coverage | coverage |
@@ -136,7 +139,7 @@ No model service.
 
 - Thin boundary: validation in `mcp.ts`/`main.ts`, browser in `BrowserService`, policy re-checked at service.
 - No model SDKs or planner loop.
-- Treat page/search/DOM as untrusted, bound and redact; strip credentials, secret placeholders, scripts, event attributes, and form values from returned evidence.
+- Treat page/search/DOM as untrusted, bound and redact; strip credentials, secret placeholders, scripts, event attributes, and form values (including accessibility descendants) from returned evidence.
 - HTTP loopback unless remote + 32-char token.
 - File writes: canonical allowedRoot + realpath; reject unresolved symlink escapes and filesystem-root roots.
 - JS eval defaults on for the native capability profile; set `SMOOTH_OPERATOR_ALLOW_EVAL=false` to disable it.

@@ -50,7 +50,30 @@ describe("runtime lifecycle", () => {
       expect(runtime.publicCapabilities()).toMatchObject({
         defaults: { browserMode: "managed", headedBrowser: true, pageEvaluation: true, stealth: true, behavioralTiming: false },
         features: { localBrowserTools: "available", pageEvaluation: false, stealth: false, behavioralTiming: false },
+        limits: { pageTextChars: 8_000, browserActionPlanSteps: 100, browserBatchSteps: 50, research: { queryChars: 4_000, minTextChars: 500, maxTextChars: 4_000, maxResults: 10 }, upload: { maxFiles: 20, maxBytesPerFile: 50 * 1024 * 1024, maxTotalBytes: 100 * 1024 * 1024 } },
         challenges: { classification: "bounded-evidence", connectedAiLoop: true, humanHandoff: true, successRequiresAbsentClassification: true, defaultMaxAttempts: 32, maxAttempts: 100 },
+      });
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it("reports lazy browser readiness separately from degraded recovery", async () => {
+    const base = testConfig();
+    const runtime = await ServerRuntime.create(testConfig({ browser: { ...base.browser, mode: "connect" } }));
+    const internal = runtime.browser as unknown as { recoveryRequired: boolean };
+    try {
+      expect(runtime.health()).toMatchObject({
+        status: "ok",
+        ready: true,
+        checks: { runtime: "ready", browser: { status: "idle", connected: false, recoveryRequired: false }, research: "ready" },
+      });
+
+      internal.recoveryRequired = true;
+      expect(runtime.health()).toMatchObject({
+        status: "degraded",
+        ready: false,
+        checks: { browser: { status: "recovery_required", recoveryRequired: true } },
       });
     } finally {
       await runtime.close();
@@ -111,6 +134,8 @@ describe("runtime lifecycle", () => {
       // A second harness session must stay fully connected while the first
       // owns the profile lease; only its browser operations conflict.
       second = await ServerRuntime.create(config);
+      expect(first.health()).toMatchObject({ status: "ok", ready: true });
+      expect(second.health()).toMatchObject({ status: "degraded", ready: false, checks: { browser: { status: "profile_unavailable", profileLease: "not_held" } } });
       await expect(second.run({ action: "navigate", url: "https://example.test/" } as never)).rejects.toMatchObject({ code: "BROWSER_PROFILE_IN_USE" });
       const cancelled = new AbortController();
       cancelled.abort();
@@ -119,6 +144,7 @@ describe("runtime lifecycle", () => {
       await first.close();
       const lease = second as unknown as { ensureBrowserProfileLease(): Promise<void> };
       await expect(lease.ensureBrowserProfileLease()).resolves.toBeUndefined();
+      expect(second.health()).toMatchObject({ status: "ok", ready: true, checks: { browser: { profileLease: "held" } } });
     } finally {
       await first.close().catch(() => undefined);
       await second?.close();

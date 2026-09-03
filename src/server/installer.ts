@@ -641,12 +641,11 @@ async function pathExists(path: string): Promise<boolean> {
 }
 
 export function parseJsonc(source: string, path: string): Record<string, unknown> {
-  // Harness configuration files are often JSONC. A regex-based comment
-  // stripper corrupts valid values such as https://example.test or strings
-  // containing //, so scan strings/comments explicitly.
-  const withoutComments = stripJsoncComments(source);
-  const normalized = removeJsonTrailingCommas(withoutComments);
   try {
+    // Scan JSONC comments without changing comment-like string values.
+    // Strip a UTF-8 BOM before JSON.parse.
+    const withoutComments = stripJsoncComments(source.charCodeAt(0) === 0xFEFF ? source.slice(1) : source);
+    const normalized = removeJsonTrailingCommas(withoutComments);
     const parsed: unknown = JSON.parse(normalized);
     if (!isRecord(parsed)) {
       throw new Error("root must be an object");
@@ -707,6 +706,9 @@ function stripJsoncComments(source: string): string {
     } else {
       output.push(character);
     }
+  }
+  if (inBlockComment) {
+    throw new Error("unterminated JSONC block comment");
   }
   return output.join("");
 }

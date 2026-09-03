@@ -151,6 +151,13 @@ describe("MCP contracts", () => {
     expect(BrowserActionSchema.safeParse({ action: "screenshot", full: true, fullPage: false }).success).toBe(false);
   });
 
+  it("rejects mixed coordinate naming when a pair is incomplete", () => {
+    expect(BrowserActionSchema.safeParse({ action: "click", coordinateX: 10, coordinate_y: 20 }).success).toBe(false);
+    expect(BrowserActionSchema.safeParse({ action: "move", coordinateX: 10, coordinate_y: 20 }).success).toBe(false);
+    expect(BrowserActionSchema.safeParse({ action: "press_and_hold", target: "#drag", startCoordinateX: 10, start_coordinate_y: 20 }).success).toBe(false);
+    expect(BrowserActionSchema.safeParse({ action: "press_and_hold", target: "#drag", endCoordinateX: 10, end_coordinate_y: 20 }).success).toBe(false);
+  });
+
   it("accepts only absolute HTTP(S) navigation URLs", () => {
     expect(NavigateRequestSchema.safeParse({ url: "https://example.com/path" }).success).toBe(true);
     expect(NavigateRequestSchema.safeParse({ url: "javascript:alert(1)" }).success).toBe(false);
@@ -205,6 +212,23 @@ describe("MCP contracts", () => {
     expect(BrowserActionSchema.safeParse({ action: "wait", milliseconds: 0, provider: "openai" }).success).toBe(false);
     expect(CookieRequestSchema.safeParse({ operation: "set", name: "session" }).success).toBe(false);
     expect(CookieRequestSchema.safeParse({ operation: "delete" }).success).toBe(false);
+    expect(CookieRequestSchema.safeParse({ operation: "get", name: "ignored" }).success).toBe(false);
+    expect(CookieRequestSchema.safeParse({ operation: "delete", name: "session", value: "ignored" }).success).toBe(false);
+    expect(StorageRequestSchema.safeParse({ operation: "get", value: "ignored" }).success).toBe(false);
+    expect(StorageRequestSchema.safeParse({ operation: "set", key: "theme", value: "dark", all: false }).success).toBe(false);
+  });
+
+  it("rejects action-specific fields that the selected batch action cannot consume", () => {
+    const cases = [
+      { action: "wait", milliseconds: 0, newTab: true },
+      { action: "click", selector: "#button", optionValue: "ignored" },
+      { action: "navigate", url: "https://example.test", includeLinks: true },
+      { action: "get_storage", storageKey: "theme", storageValue: "ignored" },
+      { action: "get_cookies", cookieDomain: "example.test" },
+      { action: "search_page", query: "text", maxNodes: 5 },
+      { action: "wait", milliseconds: 0, fullPage: true },
+    ];
+    for (const action of cases) expect(BrowserActionSchema.safeParse(action).success, JSON.stringify(action)).toBe(false);
   });
 
   it("validates required fields for batched actions at the second trust boundary", () => {

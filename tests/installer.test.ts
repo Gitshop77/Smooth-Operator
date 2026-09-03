@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { ensureSecureDirectory, installHarness, planHarnessInstall, type HarnessCommand } from "@/server/installer";
+import { ensureSecureDirectory, installHarness, parseJsonc, planHarnessInstall, type HarnessCommand } from "@/server/installer";
 
 const SOURCE_ENTRY: HarnessCommand = { command: "smooth-operator", args: [] };
 
@@ -96,6 +96,14 @@ describe("harness installer", () => {
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
+  });
+
+  it("rejects unterminated JSONC block comments", () => {
+    expect(() => parseJsonc('{"mcpServers": {}} /* missing close', "config.jsonc")).toThrowError(/Could not parse config\.jsonc as JSON\/JSONC/);
+  });
+
+  it("accepts a UTF-8 BOM in Windows-authored JSONC", () => {
+    expect(parseJsonc("\uFEFF{\"mcpServers\": {}}", "config.jsonc")).toEqual({ mcpServers: {} });
   });
 
   it("fails closed for a non-object mcpServers value without changing the file", async () => {

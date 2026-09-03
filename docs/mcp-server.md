@@ -337,6 +337,14 @@ variables include:
 | `SMOOTH_OPERATOR_ALLOWED_ORIGINS` | `localhost,127.0.0.1,[::1]` | HTTP Origin allowlist |
 | `SMOOTH_OPERATOR_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, or `error` |
 
+Streamable HTTP also exposes a JSON readiness endpoint, subject to the same
+authentication policy, at
+`<SMOOTH_OPERATOR_HTTP_PATH>/healthz` (for the default path:
+`/mcp/healthz`). It returns `200` while `ready` is true and `503` when the
+runtime is degraded or shutting down. It is a transport-level health check,
+not a replacement for the MCP `server_health` tool; it never returns page
+contents or browser credentials.
+
 ### Fast operation mode
 
 The default configuration is a native managed browser with page evaluation
@@ -427,6 +435,15 @@ individual descriptions and limits are returned by `tools/list`.
 browser permissions. Page evaluation is available by default and can be
 disabled explicitly with `SMOOTH_OPERATOR_ALLOW_EVAL=false`.
 
+`server_health` returns a bounded readiness projection in addition to the
+capabilities metadata. `status` is `ok` when the runtime is ready, `degraded`
+when browser recovery is required or its managed profile lease is not held,
+and `shutting_down` during teardown. The browser check reports `disabled`,
+`idle`, `connected`, `profile_unavailable`, or `recovery_required`; an idle
+browser is expected because browser startup is lazy. Health checks do not
+acquire a profile lease; the next browser operation retries acquisition.
+`ready` reports readiness based on the runtime's current ownership state.
+
 `browser_evaluate` is page JavaScript and is available by default (set
 `SMOOTH_OPERATOR_ALLOW_EVAL=false` when it is not wanted). `browser_exec`
 accepts only a JSON array of validated browser actions; it is not a shell,
@@ -450,6 +467,18 @@ revision. A snapshot failure is reported as `snapshot: null` with a bounded
 accepts the same option at the top level and captures only one snapshot after
 the final action.
 
+The current-page observation tools `browser_interactive`, `browser_frames`,
+`browser_page_info`, and `browser_challenge` accept an optional `pageId`; omit
+it to use the active tab. `browser_accessibility_snapshot` also accepts an
+optional `frameId`, which is useful when the accessible content is inside a
+same-page frame.
+
+Passive text and accessibility observations omit form values and textarea
+defaults, including editable control descendants in the accessibility tree.
+Controls keep their labels, roles, and state so they remain actionable through
+fresh refs. Use the explicit page-evaluation capability when reading a value
+is part of the authorized task.
+
 `browser_extract` returns `offset`, `nextOffset`, `hasMore`, and `revision`.
 Use `browser_page_next` with the returned offset and revision; a stale revision
 returns the retryable `STALE_PAGE_SLICE` error instead of silently overlapping
@@ -464,6 +493,16 @@ network-log, and console-log operations are normalized before validation;
 conflicting alias and canonical fields fail with their action index and field
 names. A failed batch preserves bounded completed results and reports
 `failedIndex`, `failedAction`, and `completedActions`.
+Action-specific fields are also validated after alias normalization; a field
+that the selected action cannot consume is rejected instead of being silently
+ignored.
+
+Each batch step enforces its own `timeoutMs` or the configured action deadline.
+The total batch budget includes the individual step budgets. A step that
+ignores cancellation is retired before the browser queue advances; subsequent
+steps do not execute after a failure. Without an explicit deadline, requested
+wait/hold durations are added to the setup budget, and human handoff retains
+its documented 120-second default.
 
 If browser teardown times out or fails, later browser work returns the
 retryable `BROWSER_RECOVERY_REQUIRED` error. Call `browser_close_session` to
@@ -527,9 +566,10 @@ The server publishes read-only resources:
 Resource output is bounded and follows the same redaction and policy rules as
 tool output. The capabilities resource also reports the native defaults and
 effective feature flags for local browser tools, page evaluation, stealth, and
-behavioral timing. Its challenge metadata includes the default and maximum
-connected-AI attempt budgets and states that success requires an explicit
-absent classification.
+behavioral timing. Its `limits` metadata publishes the page-text, action-plan,
+research, and upload budgets used by the public boundary. Its challenge
+metadata includes the default and maximum connected-AI attempt budgets and
+states that success requires an explicit absent classification.
 
 ### Prompts
 

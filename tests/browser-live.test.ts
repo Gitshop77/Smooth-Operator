@@ -20,6 +20,7 @@ const LIVE_ACTION_TIMEOUT_MS = 60_000;
 const LIVE_CONNECT_TIMEOUT_MS = 60_000;
 const PROFILE_CLEANUP_ATTEMPTS = 24;
 const PROFILE_CLEANUP_DELAY_MS = 250;
+const PAGINATED_RAW_TEXT = "㍿漢字".repeat(3_000);
 
 async function waitForChildExit(child: ChildProcess | undefined, timeoutMs = 5_000): Promise<void> {
   if (!child || child.exitCode !== null || child.signalCode !== null) {
@@ -95,6 +96,18 @@ describe("live browser contract", () => {
       fixtureRequests.push(request.url ?? "");
       if (request.url === "/frame") {
         response.end("<!doctype html><button id=frame-button>Frame action</button>");
+        return;
+      }
+      if (request.url === "/private-form") {
+        response.end(`<!doctype html><title>Private form</title><section id="container">
+          <p>Public label</p><textarea id="private-text" aria-label="Notes">private-textarea-default-42</textarea>
+          <input aria-label="Account" value="private-input-value-42">
+          <script>window.fixtureSecret = 'private-script-source-42';</script></section>`);
+        return;
+      }
+      if (request.url === "/page-slices") {
+        response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+        response.end(`<!doctype html><p>${PAGINATED_RAW_TEXT}</p>`);
         return;
       }
       if (request.url === "/scroll-container") {
@@ -181,6 +194,50 @@ describe("live browser contract", () => {
     if (dataDir) {
       await removeDirectoryAfterBrowserExit(dataDir);
     }
+  });
+
+  it("omits private form values and script content from passive observations", async () => {
+    await service.execute({ action: "navigate", url: `${baseUrl}/private-form` });
+    const snapshot = await service.snapshot();
+    const textarea = snapshot.interactive.find((element) => element.selector === "#private-text");
+    expect(textarea).toBeDefined();
+    await service.execute({ action: "click", ref: textarea!.ref, snapshotId: snapshot.snapshotId });
+    const observations = [
+      snapshot,
+      await service.execute({ action: "extract" }),
+      await service.execute({ action: "extract", selector: "#private-text" }),
+      await service.execute({ action: "page_next" }),
+      await service.execute({ action: "find_elements", selector: "#container, textarea, script" }),
+      await service.execute({ action: "inspect_element", selector: "#container" }),
+      await service.execute({ action: "accessibility_snapshot", interestingOnly: false }),
+    ];
+    for (const observation of observations) {
+      expect(JSON.stringify(observation)).not.toMatch(/private-(?:textarea-default|input-value|script-source)-42/);
+    }
+    expect(await service.execute({ action: "search_page", query: "private-textarea-default-42" })).toMatchObject({ matches: [], totalMatches: 0 });
+  });
+
+  it("advances page offsets only for text represented after normalization and byte bounds", async () => {
+    await service.execute({ action: "navigate", url: `${baseUrl}/page-slices` });
+    const chunks: string[] = [];
+    let offset = 0;
+    let revision: number | undefined;
+    let hasMore = true;
+    for (let page = 0; hasMore && page < 10; page += 1) {
+      const result = await service.execute(page === 0
+        ? { action: "extract", offset, maxChars: 8_000 }
+        : { action: "page_next", offset, revision, maxChars: 8_000 }) as { text: string; nextOffset: number; revision: number; hasMore: boolean };
+      const match = /^<untrusted_[a-z0-9_]+>\n([\s\S]*)\n<\/untrusted_[a-z0-9_]+>$/.exec(result.text);
+      expect(match).not.toBeNull();
+      chunks.push(match![1]);
+      expect(result.nextOffset).toBeGreaterThan(offset);
+      offset = result.nextOffset;
+      revision = result.revision;
+      hasMore = result.hasMore;
+    }
+    expect(hasMore).toBe(false);
+    expect(offset).toBe(PAGINATED_RAW_TEXT.length);
+    expect(chunks.join("")).toBe(PAGINATED_RAW_TEXT.normalize("NFKC"));
   });
 
   it("supports state-first refs, frames, popups, accessibility, screenshots, challenges, and downloads", async () => {
