@@ -1,4 +1,5 @@
-import { chmod, lstat, mkdir, open, readFile, realpath, rename, unlink } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, realpath, rename, unlink, type FileHandle } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { basename, dirname, join, resolve } from "node:path";
 import process from "node:process";
@@ -140,7 +141,10 @@ export class ServerRuntime {
         if (pendingProfileAcquisition) {
           await runShutdownPhase("browser profile lease acquisition", () => pendingProfileAcquisition, PROFILE_ACQUISITION_SETTLE_TIMEOUT_MS, this.logger);
         }
-        const browserClose = await runShutdownPhase("browser close", () => this.browser.shutdownOutcome(), RUNTIME_SHUTDOWN_TIMEOUT_MS, this.logger);
+        const [browserClose] = await Promise.all([
+          runShutdownPhase("browser close", () => this.browser.shutdownOutcome(), RUNTIME_SHUTDOWN_TIMEOUT_MS, this.logger),
+          runShutdownPhase("research close", () => this.research.close(), PROFILE_ACQUISITION_SETTLE_TIMEOUT_MS, this.logger),
+        ]);
         const browserOutcome = browserClose.value as { succeeded?: unknown } | undefined;
         if (browserClose.status === "complete" && browserOutcome?.succeeded !== false) {
           await runShutdownPhase("browser profile lease release", () => this.browserProfileLease?.release() ?? Promise.resolve(), PROFILE_RELEASE_TIMEOUT_MS, this.logger);
@@ -274,6 +278,7 @@ interface BrowserProfileLease {
 }
 
 const BROWSER_PROFILE_LOCK_NAME = ".smooth-operator-profile.lock";
+const MAX_PROFILE_LOCK_BYTES = 4_096;
 const RUNTIME_SHUTDOWN_TIMEOUT_MS = 5_000;
 const PROFILE_ACQUISITION_SETTLE_TIMEOUT_MS = 1_000;
 const PROFILE_RELEASE_TIMEOUT_MS = 1_000;
@@ -329,7 +334,7 @@ async function acquireBrowserProfileLease(profileDirectory: string): Promise<Bro
           if (!currentIdentity || !sameFileIdentity(lockIdentity, currentIdentity)) {
             return;
           }
-          const current = await readFile(lockPath, "utf8").catch(() => undefined);
+          const current = await readBoundedProfileLock(lockPath);
           let ownsCurrentLock = false;
           if (current) {
             try {
@@ -380,7 +385,13 @@ async function acquireBrowserProfileLease(profileDirectory: string): Promise<Bro
 async function reclaimStaleLock(lockPath: string): Promise<boolean> {
   try {
     const before = await lstat(lockPath);
-    const raw = await readFile(lockPath, "utf8");
+    if (before.isSymbolicLink() || !before.isFile()) {
+      return false;
+    }
+    const raw = await readBoundedProfileLock(lockPath);
+    if (raw === undefined) {
+      return false;
+    }
     const pid = (JSON.parse(raw) as { pid?: unknown }).pid;
     if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) {
       return false;
@@ -411,11 +422,18 @@ async function reclaimStaleLock(lockPath: string): Promise<boolean> {
 }
 
 async function readProfileLock(lockPath: string): Promise<"active" | "stale" | "missing" | "unknown"> {
-  let raw: string;
+  let info: Awaited<ReturnType<typeof lstat>>;
   try {
-    raw = await readFile(lockPath, "utf8");
+    info = await lstat(lockPath);
   } catch (error) {
     return fileSystemErrorCode(error) === "ENOENT" ? "missing" : "unknown";
+  }
+  if (info.isSymbolicLink() || !info.isFile()) {
+    return "unknown";
+  }
+  const raw = await readBoundedProfileLock(lockPath);
+  if (raw === undefined) {
+    return "unknown";
   }
   try {
     const value = JSON.parse(raw) as { pid?: unknown };
@@ -431,6 +449,33 @@ async function readProfileLock(lockPath: string): Promise<"active" | "stale" | "
     }
   } catch {
     return "unknown";
+  }
+}
+
+/** Read only the small JSON envelope used for profile ownership. */
+async function readBoundedProfileLock(lockPath: string): Promise<string | undefined> {
+  const noFollow = typeof fsConstants.O_NOFOLLOW === "number" ? fsConstants.O_NOFOLLOW : 0;
+  let handle: FileHandle | undefined;
+  try {
+    handle = await open(lockPath, fsConstants.O_RDONLY | noFollow);
+    const info = await handle.stat();
+    if (!info.isFile() || info.size > MAX_PROFILE_LOCK_BYTES) {
+      return undefined;
+    }
+    const buffer = Buffer.allocUnsafe(MAX_PROFILE_LOCK_BYTES + 1);
+    let offset = 0;
+    while (offset < buffer.byteLength) {
+      const { bytesRead } = await handle.read(buffer, offset, buffer.byteLength - offset, offset);
+      if (bytesRead === 0) {
+        break;
+      }
+      offset += bytesRead;
+    }
+    return offset > MAX_PROFILE_LOCK_BYTES ? undefined : buffer.subarray(0, offset).toString("utf8");
+  } catch {
+    return undefined;
+  } finally {
+    await handle?.close().catch(() => undefined);
   }
 }
 

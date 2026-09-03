@@ -68,9 +68,13 @@ interface ResearchWaiter {
 
 class ResearchAdmission {
   private active = 0;
+  private closed = false;
   private readonly queue: ResearchWaiter[] = [];
 
   acquire(signal?: AbortSignal, abortError: () => AppError = cancelledResearchError): Promise<() => void> {
+    if (this.closed) {
+      return Promise.reject(researchClosingError());
+    }
     if (signal?.aborted) {
       return Promise.reject(abortError());
     }
@@ -105,6 +109,19 @@ class ResearchAdmission {
     });
   }
 
+  close(): void {
+    this.closed = true;
+    const error = researchClosingError();
+    while (this.queue.length > 0) {
+      const waiter = this.queue.shift();
+      if (!waiter) {
+        continue;
+      }
+      waiter.signal?.removeEventListener("abort", waiter.onAbort as () => void);
+      waiter.reject(error);
+    }
+  }
+
   private createRelease(): () => void {
     let released = false;
     return (): void => {
@@ -118,6 +135,9 @@ class ResearchAdmission {
   }
 
   private drain(): void {
+    if (this.closed) {
+      return;
+    }
     while (this.active < MAX_CONCURRENT_RESEARCH && this.queue.length > 0) {
       const waiter = this.queue.shift();
       if (!waiter) {
@@ -136,13 +156,30 @@ class ResearchAdmission {
 
 export class ResearchService {
   private readonly admission = new ResearchAdmission();
+  private readonly activeControllers = new Set<AbortController>();
+  private closed = false;
 
   constructor(
     private readonly policy: SecurityPolicy,
     private readonly logger: Logger,
   ) {}
 
+  /** Stop accepting research work and abort every in-flight request. */
+  async close(): Promise<void> {
+    if (this.closed) {
+      return;
+    }
+    this.closed = true;
+    this.admission.close();
+    for (const controller of this.activeControllers) {
+      controller.abort();
+    }
+  }
+
   async research(query: string, options: { maxResults?: number; maxChars?: number } = {}, signal?: AbortSignal): Promise<ResearchResult> {
+    if (this.closed) {
+      throw researchClosingError();
+    }
     if (typeof query !== "string") {
       throw new AppError("RESEARCH_INVALID", "A non-empty research query is required.");
     }
@@ -174,6 +211,7 @@ export class ResearchService {
       throw new AppError("CANCELLED", "The research request was cancelled.");
     }
     const controller = new AbortController();
+    this.activeControllers.add(controller);
     let timedOut = false;
     const timeout = setTimeout(() => {
       timedOut = true;
@@ -183,8 +221,17 @@ export class ResearchService {
     signal?.addEventListener("abort", abort, { once: true });
     let release: (() => void) | undefined;
     try {
+      if (signal?.aborted) {
+        controller.abort();
+        throw new AppError("CANCELLED", "The research request was cancelled.");
+      }
+      if (this.closed) {
+        throw researchClosingError();
+      }
       const abortError = (): AppError => signal?.aborted
         ? new AppError("CANCELLED", "The research request was cancelled.")
+        : this.closed
+          ? researchClosingError()
         : new AppError("RESEARCH_TIMEOUT", `The research request exceeded its ${REQUEST_TIMEOUT_MS / 1_000}-second timeout.`, {
           retryable: true,
           details: { classification: "timeout", timeoutMs: REQUEST_TIMEOUT_MS },
@@ -212,6 +259,7 @@ export class ResearchService {
       const response = fetched.response;
       const declaredLength = Number(response.headers.get("content-length"));
       if (Number.isFinite(declaredLength) && declaredLength > MAX_RESPONSE_BYTES) {
+        discardResponseBody(response);
         throw new AppError("RESEARCH_RESPONSE_TOO_LARGE", "The search response exceeded the safety limit.", {
           details: { classification: "response_too_large", attempts: fetched.attempts },
         });
@@ -255,6 +303,9 @@ export class ResearchService {
       if (signal?.aborted) {
         throw new AppError("CANCELLED", "The research request was cancelled.", { cause: error });
       }
+      if (this.closed) {
+        throw researchClosingError(error);
+      }
       if (timedOut) {
         throw new AppError("RESEARCH_TIMEOUT", `The research request exceeded its ${REQUEST_TIMEOUT_MS / 1_000}-second timeout.`, {
           retryable: true,
@@ -274,12 +325,17 @@ export class ResearchService {
       clearTimeout(timeout);
       signal?.removeEventListener("abort", abort);
       release?.();
+      this.activeControllers.delete(controller);
     }
   }
 }
 
 function cancelledResearchError(): AppError {
   return new AppError("CANCELLED", "The research request was cancelled.");
+}
+
+function researchClosingError(cause?: unknown): AppError {
+  return new AppError("SERVER_CLOSING", "The research service is shutting down.", { retryable: true, cause });
 }
 
 async function fetchWithRetry(url: URL, signal: AbortSignal): Promise<{ response: Response; attempts: number }> {

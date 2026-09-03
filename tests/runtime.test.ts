@@ -257,6 +257,28 @@ describe("runtime lifecycle", () => {
     await rm(directory, { recursive: true, force: true });
   });
 
+  it("fails closed on an oversized profile lock without trusting its contents", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "smooth-operator-runtime-oversized-lock-"));
+    const profile = join(directory, "browser");
+    const base = testConfig();
+    const config = testConfig({
+      dataDir: directory,
+      browser: { ...base.browser, mode: "launch", executablePath: "/usr/bin/chromium", userDataDir: profile },
+    });
+    const lockPath = join(profile, ".smooth-operator-profile.lock");
+    await mkdir(profile, { recursive: true });
+    await writeFile(lockPath, "x".repeat(100_000));
+
+    const runtime = await ServerRuntime.create(config);
+    try {
+      await expect(runtime.run({ action: "navigate", url: "https://example.test/" } as never)).rejects.toMatchObject({ code: "BROWSER_PROFILE_IN_USE", retryable: true });
+      await expect(access(lockPath)).resolves.toBeUndefined();
+    } finally {
+      await runtime.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("does not remove a replacement profile lock during lease release", async () => {
     const directory = await mkdtemp(join(tmpdir(), "smooth-operator-runtime-lock-race-"));
     const profile = join(directory, "browser");

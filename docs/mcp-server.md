@@ -545,9 +545,10 @@ data directories, constructs the runtime, and registers the MCP surface. The
 browser is connected or launched only when a browser operation requires it.
 
 On SIGINT/SIGTERM, the server stops accepting HTTP requests, waits for active
-requests up to a bounded grace period, closes the MCP transport, closes pages,
-and terminates a browser process that it owns. A browser connected in `connect`
-mode remains under the operator's ownership.
+requests up to a bounded grace period, cancels in-flight research retrieval,
+closes the MCP transport, closes pages, and terminates a browser process that
+it owns. A browser connected in `connect` mode remains under the operator's
+ownership.
 
 To clean up a local installation:
 

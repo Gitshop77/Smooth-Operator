@@ -415,6 +415,24 @@ describe("research service", () => {
     vi.unstubAllGlobals();
   });
 
+  it("aborts active work and rejects queued work when the service closes", async () => {
+    const fetchMock = vi.fn((_url: string, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(new Error("synthetic shutdown abort")), { once: true });
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const service = new ResearchService(researchPolicy(), new Logger("error", {}, () => undefined));
+    const activeCalls = Array.from({ length: 4 }, (_, index) => service.research(`shutdown-active-${index}`, { maxResults: 1 }));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    const queued = service.research("shutdown-queued", { maxResults: 1 });
+
+    await service.close();
+    const outcomes = await Promise.allSettled([...activeCalls, queued]);
+    expect(outcomes.every((outcome) => outcome.status === "rejected" && outcome.reason.code === "SERVER_CLOSING")).toBe(true);
+    await expect(service.research("after-close", { maxResults: 1 })).rejects.toMatchObject({ code: "SERVER_CLOSING", retryable: true });
+    vi.unstubAllGlobals();
+  });
+
   it("recovers a permit after a policy rejection", async () => {
     const policy = researchPolicy();
     const policyCheck = vi.spyOn(policy, "assertNavigationAllowedAsync")
