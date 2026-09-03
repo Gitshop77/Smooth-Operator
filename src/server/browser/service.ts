@@ -1,5 +1,5 @@
-import { lstat, mkdir, open, readFile, readdir, realpath, rename, stat, unlink, type FileHandle } from "node:fs/promises";
-import { constants as fsConstants } from "node:fs";
+import { lstat, mkdir, open, opendir, realpath, rename, stat, unlink, type FileHandle } from "node:fs/promises";
+import { constants as fsConstants, type Dirent } from "node:fs";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { randomUUID } from "node:crypto";
 import { platform } from "node:process";
@@ -327,7 +327,14 @@ const CHALLENGE_AI_GUIDANCE = "Use normal browser click, input, scroll, or key t
 const CHALLENGE_DEFAULT_MAX_ATTEMPTS = 32;
 const CHALLENGE_MAX_ATTEMPTS = 100;
 const MAX_DOWNLOAD_ENTRIES = 100;
+const MAX_STORAGE_ENTRIES = 200;
+const MAX_STORAGE_KEY_CHARS = 1_000;
+const MAX_STORAGE_VALUE_CHARS = 20_000;
+const MAX_STORAGE_TOTAL_CHARS = 100_000;
 const TARGET_GUARD_MAX_REQUEST_IDS = 128;
+const MAX_TARGET_GUARD_SESSION_BOOKKEEPING = 512;
+const MAX_POLICY_VERIFIED_URLS = 256;
+const TARGET_GUARD_CLOSE_TIMEOUT_MS = 500;
 const CLICK_SETTLE_TIMEOUT_MS = 10;
 const CLICK_RETRY_ATTEMPTS = 3;
 const CLICK_RETRY_DELAY_MS = 16;
@@ -338,6 +345,7 @@ const SHUTDOWN_CONNECTION_SETTLE_TIMEOUT_MS = 1_000;
 const MIN_IDLE_SWEEP_INTERVAL_MS = 250;
 const MAX_IDLE_SWEEP_INTERVAL_MS = 60_000;
 const MAX_DEVTOOLS_PROBE_RESPONSE_BYTES = 64 * 1024;
+const MAX_DEVTOOLS_ACTIVE_PORT_FILE_BYTES = 4_096;
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
 const MAX_UPLOAD_TOTAL_BYTES = 100 * 1024 * 1024;
 const COMMON_KEY_ALIASES: Readonly<Record<string, KeyInput>> = {
@@ -708,6 +716,17 @@ export class BrowserService {
     for (const controller of this.activeOperationControllers) {
       controller.abort();
     }
+    if (this.connectionSettlementPromise) {
+      const settlement = this.connectionSettlementPromise;
+      const settled = await settlesWithinTimeout(settlement, SHUTDOWN_CONNECTION_SETTLE_TIMEOUT_MS);
+      if (!settled) {
+        this.recoveryRequired = true;
+        return { closed: false, session_id: this.sessionId };
+      }
+      if (this.connectionSettlementPromise === settlement) {
+        this.connectionSettlementPromise = undefined;
+      }
+    }
     let interruptedCleanupFailed = false;
     if (this.interruptedBrowserShutdown) {
       const cleanup = await settleWithTimeout(this.interruptedBrowserShutdown, SHUTDOWN_CONNECTION_SETTLE_TIMEOUT_MS);
@@ -755,11 +774,12 @@ export class BrowserService {
   private async closeBrowserUnlocked(): Promise<BrowserShutdownOutcome> {
     this.lifecycleGeneration += 1;
     const pendingConnection = this.connectionPromise;
+    let pendingConnectionSettled = true;
     if (pendingConnection) {
-      if (this.shuttingDown) {
-        await settlesWithinTimeout(pendingConnection, SHUTDOWN_CONNECTION_SETTLE_TIMEOUT_MS);
-      } else {
-        await pendingConnection.catch(() => undefined);
+      pendingConnectionSettled = await settlesWithinTimeout(pendingConnection, SHUTDOWN_CONNECTION_SETTLE_TIMEOUT_MS);
+      if (!pendingConnectionSettled) {
+        this.trackConnectionSettlement(pendingConnection);
+        this.logger.warn("Browser connection did not settle before close");
       }
     }
     if (this.connectionPromise === pendingConnection) {
@@ -773,7 +793,7 @@ export class BrowserService {
     this.ownsBrowser = false;
     this.retireAllStates();
     if (!browser) {
-      const succeeded = !this.browserShutdownFailure;
+      const succeeded = pendingConnectionSettled && !this.browserShutdownFailure;
       this.recoveryRequired = !succeeded;
       return { closed: false, owned: false, succeeded };
     }
@@ -1076,10 +1096,10 @@ export class BrowserService {
           (element.getAttribute("role") ?? "").slice(0, 500),
           (element.getAttribute("aria-label") ?? "").slice(0, 500),
           (element.getAttribute("placeholder") ?? "").slice(0, 500),
-          element.getAttribute("disabled") ?? "",
-          element.getAttribute("aria-disabled") ?? "",
+          (element.getAttribute("disabled") ?? "").slice(0, 500),
+          (element.getAttribute("aria-disabled") ?? "").slice(0, 500),
           String(htmlElement.type ?? "").slice(0, 100),
-          boundedElementText,
+          (boundedElementText || element.getAttribute("value") || "").slice(0, 500),
           (anchor?.href ?? "").slice(0, 4_096),
         ].join("\u001f");
         return {
@@ -1374,7 +1394,7 @@ export class BrowserService {
     const page = state.page;
     await this.assertCurrentPageAllowed(page, state);
     this.assertSnapshotForAction(state, action);
-    const frame = await this.frameFor(state, action.frameId);
+    const frame = await this.frameFor(state, this.frameIdForReference(state, action) ?? action.frameId);
     throwIfAborted(signal);
 
     switch (action.action) {
@@ -1517,8 +1537,9 @@ export class BrowserService {
         const directionName = action.direction ?? "down";
         const direction = directionName === "up" || directionName === "left" ? -1 : 1;
         const delta = { x: directionName === "left" || directionName === "right" ? amount * direction : 0, y: directionName === "up" || directionName === "down" ? amount * direction : 0 };
-        if (action.selector) {
-          const selector = await this.selectorFor(state, action.selector, action.frameId, frame);
+        const scrollTarget = action.selector ?? action.target ?? action.ref ?? (action.index !== undefined ? `e${action.index + 1}` : undefined);
+        if (scrollTarget) {
+          const selector = await this.selectorFor(state, scrollTarget, action.frameId, frame);
           const scrollResult = await frame.$eval(selector, (element, { x, y: deltaY }) => {
             let container: HTMLElement | null = element instanceof HTMLElement ? element : element.parentElement;
             while (container && container !== document.body) {
@@ -1967,7 +1988,7 @@ export class BrowserService {
         }
         const offset = Math.max(0, Math.floor(action.offset ?? 0));
         const revision = state.domRevision;
-        let selector = action.selector ?? action.target ?? (action.index !== undefined ? `e${action.index + 1}` : undefined);
+        let selector = action.selector ?? action.target ?? action.ref ?? (action.index !== undefined ? `e${action.index + 1}` : undefined);
         if (!selector && action.query) {
           try {
             const queryHandle = await frame.$(action.query);
@@ -2236,7 +2257,7 @@ export class BrowserService {
         };
       }
       case "get_html": {
-        const selector = action.selector ?? action.target ?? (action.index !== undefined ? `e${action.index + 1}` : undefined);
+        const selector = action.selector ?? action.target ?? action.ref ?? (action.index !== undefined ? `e${action.index + 1}` : undefined);
         const maxChars = Math.min(action.maxChars ?? this.config.browser.maxHtmlChars, this.config.browser.maxHtmlChars);
         const result = selector
           ? await frame.$eval(await this.selectorFor(state, selector, action.frameId, frame), (element, limit: number) => {
@@ -3186,17 +3207,29 @@ export class BrowserService {
           if (path !== undefined && action.frameId && action.frameId !== "main") {
             throw new AppError("FRAME_ACTION_UNSUPPORTED", "Pointer paths target the top-level viewport; use a selector/ref in the main frame.");
           }
+          let pointerViewport: { width: number; height: number } | undefined;
+          const getPointerViewport = async (): Promise<{ width: number; height: number }> => {
+            pointerViewport ??= page.viewport() ?? await page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight }));
+            return pointerViewport;
+          };
           if (path !== undefined && path.some((item) => !Number.isFinite(item.x) || !Number.isFinite(item.y))) {
             throw new AppError("INVALID_ACTION", "Every pointer path point must contain finite x and y coordinates.");
           }
           if (path !== undefined && path.some((item) => item.x < 0 || item.y < 0)) {
             throw new AppError("COORDINATE_OUT_OF_BOUNDS", "Pointer path coordinates must be non-negative.");
           }
+          if (path !== undefined) {
+            const viewport = await getPointerViewport();
+            const outside = path.find((item) => item.x >= viewport.width || item.y >= viewport.height);
+            if (outside) {
+              throw new AppError("COORDINATE_OUT_OF_BOUNDS", `The pointer path coordinate (${outside.x}, ${outside.y}) is outside the ${viewport.width}x${viewport.height} viewport.`);
+            }
+          }
           if (startCoordinateX !== undefined && startCoordinateY !== undefined && path === undefined) {
             if (action.frameId && action.frameId !== "main") {
               throw new AppError("FRAME_ACTION_UNSUPPORTED", "Drag start coordinates target the top-level viewport; use a selector/ref in the main frame.");
             }
-            const viewport = page.viewport() ?? await page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight }));
+            const viewport = await getPointerViewport();
             if (startCoordinateX < 0 || startCoordinateY < 0 || startCoordinateX >= viewport.width || startCoordinateY >= viewport.height) {
               throw new AppError("COORDINATE_OUT_OF_BOUNDS", `The drag start (${startCoordinateX}, ${startCoordinateY}) is outside the ${viewport.width}x${viewport.height} viewport.`);
             }
@@ -3209,7 +3242,7 @@ export class BrowserService {
             if (action.frameId && action.frameId !== "main") {
               throw new AppError("FRAME_ACTION_UNSUPPORTED", "Drag destinations target the top-level viewport; use a selector/ref in the main frame.");
             }
-            const viewport = page.viewport() ?? await page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight }));
+            const viewport = await getPointerViewport();
             if (endCoordinateX < 0 || endCoordinateY < 0 || endCoordinateX >= viewport.width || endCoordinateY >= viewport.height) {
               throw new AppError("COORDINATE_OUT_OF_BOUNDS", `The drag destination (${endCoordinateX}, ${endCoordinateY}) is outside the ${viewport.width}x${viewport.height} viewport.`);
             }
@@ -3223,12 +3256,6 @@ export class BrowserService {
           try {
             await wait(action.durationMs ?? action.milliseconds ?? 2_000, signal);
             if (path !== undefined) {
-              const viewport = page.viewport() ?? await page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight }));
-              for (const item of path) {
-                if (item.x >= viewport.width || item.y >= viewport.height) {
-                  throw new AppError("COORDINATE_OUT_OF_BOUNDS", `The pointer path coordinate (${item.x}, ${item.y}) is outside the ${viewport.width}x${viewport.height} viewport.`);
-                }
-              }
               for (const item of path.slice(1)) {
                 throwIfAborted(signal);
                 await page.mouse.move(item.x, item.y);
@@ -3306,31 +3333,63 @@ export class BrowserService {
         const area = action.storageArea ?? "local";
         const key = action.storageKey;
         const maxValueChars = Math.min(action.maxChars ?? 20_000, 50_000);
-        const result = await page.evaluate(({ areaName, storageKey, valueLimit, includeValues }) => {
+        const result = await page.evaluate(({ areaName, storageKey, valueLimit, includeValues, maxEntries, maxKeyChars }) => {
           const storage = areaName === "session" ? window.sessionStorage : window.localStorage;
-          if (storageKey) {
-            const value = storage.getItem(storageKey);
-            return { area: areaName, key: storageKey, value: value?.slice(0, valueLimit) ?? null, truncated: Boolean(value && value.length > valueLimit) };
+          if (storageKey !== undefined) {
+            const rawValue = storage.getItem(storageKey);
+            const value = typeof rawValue === "string" ? rawValue : null;
+            return { area: areaName, key: storageKey, value: value === null ? null : value.slice(0, valueLimit), truncated: value !== null && value.length > valueLimit };
           }
-          const rawKeys = Array.from({ length: storage.length }, (_, index) => storage.key(index)).filter((entryKey): entryKey is string => Boolean(entryKey)).slice(0, 200);
-          const keys = rawKeys.map((entryKey) => entryKey.slice(0, 1_000));
+          const rawLength = storage.length;
+          const valueCount = typeof rawLength === "number" && Number.isSafeInteger(rawLength) && rawLength >= 0 ? rawLength : 0;
+          const rawKeys: string[] = [];
+          for (let index = 0; index < Math.min(valueCount, maxEntries); index += 1) {
+            const entryKey = storage.key(index);
+            if (typeof entryKey === "string") {
+              rawKeys.push(entryKey);
+            }
+          }
+          const usedKeys = new Set<string>();
+          const projectedKey = (entryKey: string): string => {
+            const base = entryKey.length > maxKeyChars ? `${entryKey.slice(0, maxKeyChars - 1)}…` : entryKey;
+            if (!usedKeys.has(base)) {
+              usedKeys.add(base);
+              return base;
+            }
+            for (let occurrence = 2; ; occurrence += 1) {
+              const suffix = `~${occurrence}`;
+              const prefixLength = Math.max(1, maxKeyChars - suffix.length - 1);
+              const candidate = `${base.slice(0, prefixLength)}…${suffix}`;
+              if (!usedKeys.has(candidate)) {
+                usedKeys.add(candidate);
+                return candidate;
+              }
+            }
+          };
+          const keys = rawKeys.map(projectedKey);
+          const keysTruncated = valueCount > maxEntries || rawKeys.length < valueCount || rawKeys.some((entryKey) => entryKey.length > maxKeyChars);
           if (!includeValues) {
-            return { area: areaName, keys, valueCount: storage.length, valuesOmitted: true };
+            return { area: areaName, keys, valueCount, valuesOmitted: true, ...(keysTruncated ? { truncated: true } : {}) };
           }
-          const values: Record<string, string> = {};
-          let truncated = storage.length > 200;
-          for (const entryKey of rawKeys) {
-            const entryValue = storage.getItem(entryKey) ?? "";
-            values[entryKey.slice(0, 1_000)] = entryValue.slice(0, valueLimit);
-            truncated ||= entryValue.length > valueLimit || entryKey.length > 1_000;
+          const values: Record<string, string> = Object.create(null) as Record<string, string>;
+          let truncated = keysTruncated;
+          for (let index = 0; index < rawKeys.length; index += 1) {
+            const entryKey = rawKeys[index];
+            const rawValue = storage.getItem(entryKey);
+            const entryValue = typeof rawValue === "string" ? rawValue : "";
+            values[keys[index] ?? projectedKey(entryKey)] = entryValue.slice(0, valueLimit);
+            truncated ||= entryValue.length > valueLimit;
           }
           return { area: areaName, values, truncated };
-        }, { areaName: area, storageKey: key, valueLimit: maxValueChars, includeValues: action.includeValues === true });
+        }, { areaName: area, storageKey: key, valueLimit: maxValueChars, includeValues: action.includeValues === true, maxEntries: MAX_STORAGE_ENTRIES, maxKeyChars: MAX_STORAGE_KEY_CHARS });
         return sanitizeStorageResult(result);
       }
       case "set_storage": {
         const area = action.storageArea ?? "local";
-        const key = requireField(action.storageKey, "storageKey");
+        if (typeof action.storageKey !== "string") {
+          throw new AppError("INVALID_ACTION", "The 'storageKey' field is required.");
+        }
+        const key = action.storageKey;
         const value = action.storageValue ?? action.value ?? "";
         await page.evaluate(({ areaName, storageKey, storageValue }) => {
           const storage = areaName === "session" ? window.sessionStorage : window.localStorage;
@@ -3340,10 +3399,10 @@ export class BrowserService {
       }
       case "clear_storage": {
         const area = action.storageArea ?? "local";
-        if (!action.storageKey && action.storageAll !== true) {
+        if (action.storageKey === undefined && action.storageAll !== true) {
           throw new AppError("INVALID_ACTION", "Clearing storage requires storageKey or storageAll=true.");
         }
-        if (action.storageKey) {
+        if (action.storageKey !== undefined) {
           await page.evaluate(({ areaName, storageKey }) => {
             const storage = areaName === "session" ? window.sessionStorage : window.localStorage;
             storage.removeItem(storageKey);
@@ -3665,6 +3724,23 @@ export class BrowserService {
     });
   }
 
+  private trackConnectionSettlement(connection: Promise<Browser>): void {
+    if (this.connectionSettlementPromise) {
+      return;
+    }
+    const settling = connection.then(() => undefined, () => undefined);
+    this.connectionSettlementPromise = settling;
+    void settling.then(() => {
+      if (this.connectionSettlementPromise === settling) {
+        this.connectionSettlementPromise = undefined;
+      }
+    }, () => {
+      if (this.connectionSettlementPromise === settling) {
+        this.connectionSettlementPromise = undefined;
+      }
+    });
+  }
+
   private async launch(options: PuppeteerLaunchOptions): Promise<Browser> {
     if (this.dependencies.launch) {
       return this.dependencies.launch(options);
@@ -3700,13 +3776,17 @@ export class BrowserService {
     let raw: string;
     try {
       const info = await lstat(activePortPath);
-      if (!info.isFile() || info.size > 4_096) {
+      if (!info.isFile() || info.size > MAX_DEVTOOLS_ACTIVE_PORT_FILE_BYTES) {
         this.logger.debug("Managed browser DevTools endpoint file is invalid", {
-          endpointFile: { kind: "devtools-active-port", regular: info.isFile(), bounded: info.size <= 4_096 },
+          endpointFile: { kind: "devtools-active-port", regular: info.isFile(), bounded: info.size <= MAX_DEVTOOLS_ACTIVE_PORT_FILE_BYTES },
         });
         return { state: "stale-probe-failed" };
       }
-      raw = await readFile(activePortPath, "utf8");
+      const bounded = await readBoundedTextFile(activePortPath, MAX_DEVTOOLS_ACTIVE_PORT_FILE_BYTES);
+      if (bounded === undefined) {
+        return { state: "stale-probe-failed" };
+      }
+      raw = bounded;
     } catch (error) {
       if (isMissingFile(error)) {
         return { state: "no-file" };
@@ -3909,7 +3989,20 @@ export class BrowserService {
       if (!isCdpSessionLike(value)) {
         return;
       }
-      this.pendingTargetGuardSessions.set(value.id(), value);
+      let sessionId: string;
+      try {
+        sessionId = value.id();
+      } catch {
+        return;
+      }
+      if (!this.pendingTargetGuardSessions.has(sessionId) && this.pendingTargetGuardSessions.size >= MAX_TARGET_GUARD_SESSION_BOOKKEEPING) {
+        const oldest = this.pendingTargetGuardSessions.keys().next().value;
+        if (oldest !== undefined) {
+          this.pendingTargetGuardSessions.delete(oldest);
+          this.pendingTargetGuardInfos.delete(oldest);
+        }
+      }
+      this.pendingTargetGuardSessions.set(sessionId, value);
     };
     const rawListener = (value: unknown): void => {
       const event = parseTargetAttachedEvent(value);
@@ -3918,6 +4011,12 @@ export class BrowserService {
       }
       if (this.handledTargetGuardSessions.has(event.sessionId)) {
         return;
+      }
+      if (this.handledTargetGuardSessions.size >= MAX_TARGET_GUARD_SESSION_BOOKKEEPING) {
+        const oldest = this.handledTargetGuardSessions.values().next().value;
+        if (oldest !== undefined) {
+          this.handledTargetGuardSessions.delete(oldest);
+        }
       }
       this.handledTargetGuardSessions.add(event.sessionId);
       const session = this.pendingTargetGuardSessions.get(event.sessionId)
@@ -4187,20 +4286,40 @@ export class BrowserService {
   private async closeGuardedTarget(guard: TargetGuardSession): Promise<void> {
     const connection = this.targetGuardConnection;
     if (connection?.send) {
-      await connection.send("Target.closeTarget", { targetId: guard.targetId }).catch(() => undefined);
+      await settleWithTimeout(
+        Promise.resolve()
+          .then(() => connection.send?.("Target.closeTarget", { targetId: guard.targetId }))
+          .catch(() => undefined),
+        TARGET_GUARD_CLOSE_TIMEOUT_MS,
+      );
     }
-    await guard.session.send("Page.close").catch(() => undefined);
+    await settleWithTimeout(
+      Promise.resolve().then(() => guard.session.send("Page.close")).catch(() => undefined),
+      TARGET_GUARD_CLOSE_TIMEOUT_MS,
+    );
   }
 
   private async handleTargetGuardRequest(guard: TargetGuardSession, event: unknown): Promise<void> {
-    if (guard.released || !guard.enabled || !isRecordValue(event)) {
+    if (guard.released || !guard.enabled) {
+      return;
+    }
+    if (!isRecordValue(event)) {
+      guard.released = true;
+      await this.closeGuardedTarget(guard);
+      this.logger.warn("New browser target emitted an invalid paused request; target closed");
       return;
     }
     const requestId = typeof event.requestId === "string" ? event.requestId : "";
     const request = isRecordValue(event.request) ? event.request : undefined;
     const requestUrl = typeof request?.url === "string" ? request.url : "";
     const resourceType = typeof event.resourceType === "string" ? event.resourceType : "";
-    if (!requestId || guard.requestIds.has(requestId)) {
+    if (guard.requestIds.has(requestId)) {
+      return;
+    }
+    if (!requestId || !requestUrl) {
+      guard.released = true;
+      await this.closeGuardedTarget(guard);
+      this.logger.warn("New browser target emitted an incomplete paused request; target closed");
       return;
     }
     if (guard.requestIds.size >= TARGET_GUARD_MAX_REQUEST_IDS) {
@@ -4226,7 +4345,7 @@ export class BrowserService {
         // navigation — main or sub-frame — is reported as "Document", while
         // subresources use other types); request.frame()/navigation semantics
         // are unavailable on the raw request-paused event.
-        allowed = resourceType !== "Document";
+        allowed = resourceType.length > 0 && resourceType.toLowerCase() !== "document";
       } else if (/^wss?:\/\//i.test(requestUrl)) {
         await this.policy.assertNavigationAllowedAsync(requestUrl.replace(/^ws/i, "http"));
         allowed = true;
@@ -4251,6 +4370,8 @@ export class BrowserService {
       }
     } catch (error) {
       this.logger.debug("New target request could not be resolved", { error: safeErrorDiagnostic(error) });
+      guard.released = true;
+      await this.closeGuardedTarget(guard);
     } finally {
       guard.requestIds.delete(requestId);
     }
@@ -5145,6 +5266,22 @@ export class BrowserService {
     return frame;
   }
 
+  /** Resolve a snapshot ref in the frame where it was observed when callers
+   * omit frameId. An explicit frame remains authoritative and is checked by
+   * selectorFor/clickSnapshotRef. */
+  private frameIdForReference(state: PageState, action: BrowserAction): string | undefined {
+    if (action.frameId !== undefined) {
+      return action.frameId;
+    }
+    const target = elementReferenceForAction(action);
+    if (!target) {
+      return undefined;
+    }
+    const normalized = target.trim();
+    const ref = normalized.startsWith("ref:") ? normalized.slice(4) : normalized;
+    return /^e\d+$/.test(ref) ? state.refs.get(ref)?.frameId : undefined;
+  }
+
   private async selectorFor(state: PageState, target: string, requestedFrameId?: string, resolvedFrame?: Frame): Promise<string> {
     this.assertStateLive(state);
     const normalized = target.trim();
@@ -5154,7 +5291,7 @@ export class BrowserService {
       if (!stored || stored.snapshotId !== state.snapshotId) {
         throw new AppError("STALE_REFERENCE", `Element reference '${ref}' is stale. Capture a fresh browser snapshot before acting.`, { retryable: true });
       }
-      const effectiveFrameId = requestedFrameId ?? "main";
+      const effectiveFrameId = requestedFrameId ?? stored.frameId;
       if (effectiveFrameId !== stored.frameId) {
         throw new AppError("FRAME_MISMATCH", `Reference '${ref}' belongs to frame '${stored.frameId}', not '${effectiveFrameId}'.`, { retryable: true });
       }
@@ -5205,15 +5342,15 @@ export class BrowserService {
         const text = boundedText(element).replace(/\s+/g, " ").trim().slice(0, 500);
         return [
           element.tagName.toLowerCase(),
-          element.getAttribute("id") ?? "",
-          element.getAttribute("name") ?? "",
-          element.getAttribute("role") ?? "",
-          element.getAttribute("aria-label") ?? "",
-          element.getAttribute("placeholder") ?? "",
-          element.getAttribute("disabled") ?? "",
-          element.getAttribute("aria-disabled") ?? "",
-          htmlElement.type ?? "",
-          text || element.getAttribute("value") || "",
+          (element.getAttribute("id") ?? "").slice(0, 500),
+          (element.getAttribute("name") ?? "").slice(0, 500),
+          (element.getAttribute("role") ?? "").slice(0, 500),
+          (element.getAttribute("aria-label") ?? "").slice(0, 500),
+          (element.getAttribute("placeholder") ?? "").slice(0, 500),
+          (element.getAttribute("disabled") ?? "").slice(0, 500),
+          (element.getAttribute("aria-disabled") ?? "").slice(0, 500),
+          String(htmlElement.type ?? "").slice(0, 100),
+          (text || element.getAttribute("value") || "").slice(0, 500),
           (anchor?.href ?? "").slice(0, 4_096),
         ].join("\u001f");
       }).catch(() => undefined);
@@ -5289,15 +5426,15 @@ export class BrowserService {
       return {
         signature: [
           element.tagName.toLowerCase(),
-          element.getAttribute("id") ?? "",
-          element.getAttribute("name") ?? "",
-          element.getAttribute("role") ?? "",
-          element.getAttribute("aria-label") ?? "",
-          element.getAttribute("placeholder") ?? "",
-          element.getAttribute("disabled") ?? "",
-          element.getAttribute("aria-disabled") ?? "",
-          htmlElement.type ?? "",
-          elementText || element.getAttribute("value") || "",
+          (element.getAttribute("id") ?? "").slice(0, 500),
+          (element.getAttribute("name") ?? "").slice(0, 500),
+          (element.getAttribute("role") ?? "").slice(0, 500),
+          (element.getAttribute("aria-label") ?? "").slice(0, 500),
+          (element.getAttribute("placeholder") ?? "").slice(0, 500),
+          (element.getAttribute("disabled") ?? "").slice(0, 500),
+          (element.getAttribute("aria-disabled") ?? "").slice(0, 500),
+          String(htmlElement.type ?? "").slice(0, 100),
+          (elementText || element.getAttribute("value") || "").slice(0, 500),
           (anchor?.href ?? "").slice(0, 4_096),
         ].join("\u001f"),
         tag: clickable.tagName.toLowerCase(),
@@ -6153,6 +6290,12 @@ export class BrowserService {
     }
     await this.policy.assertNavigationAllowedAsync(normalized);
     state.policyVerifiedUrls.add(normalized);
+    if (state.policyVerifiedUrls.size > MAX_POLICY_VERIFIED_URLS) {
+      const oldest = state.policyVerifiedUrls.values().next().value;
+      if (oldest !== undefined) {
+        state.policyVerifiedUrls.delete(oldest);
+      }
+    }
   }
 
   private async assertNavigationUrl(baseUrl: string, rawUrl: string): Promise<void> {
@@ -6869,11 +7012,27 @@ export class BrowserService {
     const downloadDir = resolve(this.config.dataDir, "downloads");
     try {
       throwIfAborted(signal);
-      const entries = await awaitWithAbort(readdir(downloadDir, { withFileTypes: true }), signal);
-      const candidates = entries
-        .filter((entry) => entry.isFile())
-        .sort((left, right) => left.name.localeCompare(right.name))
-        .slice(0, MAX_DOWNLOAD_ENTRIES);
+      const directory = await opendir(downloadDir);
+      const candidates: Dirent[] = [];
+      try {
+        // Keep only the lexicographically first bounded page while streaming
+        // the directory. A single download directory can contain an
+        // attacker-controlled number of files; readdir() would materialize
+        // every name before the output cap was applied.
+        for await (const entry of directory) {
+          throwIfAborted(signal);
+          if (!entry.isFile()) {
+            continue;
+          }
+          candidates.push(entry);
+          candidates.sort((left, right) => left.name.localeCompare(right.name));
+          if (candidates.length > MAX_DOWNLOAD_ENTRIES) {
+            candidates.pop();
+          }
+        }
+      } finally {
+        await directory.close().catch(() => undefined);
+      }
       const listed: Array<Record<string, unknown>> = [];
       for (const entry of candidates) {
         throwIfAborted(signal);
@@ -7552,35 +7711,62 @@ function sanitizeStorageResult(value: unknown): unknown {
   }
   const result = { ...(value as Record<string, unknown>) };
   if (typeof result.key === "string") {
-    result.key = wrapUntrustedText("storage_key", redactSecretPlaceholders(result.key), 1_000);
+    result.key = wrapUntrustedText("storage_key", redactSecretPlaceholders(result.key), MAX_STORAGE_KEY_CHARS);
   }
   if (Array.isArray(result.keys)) {
-    result.keys = result.keys
-      .filter((key): key is string => typeof key === "string")
-      .slice(0, 200)
-      .map((key) => wrapUntrustedText("storage_key", redactSecretPlaceholders(key), 1_000));
+    const sourceKeys = result.keys;
+    const validKeys = sourceKeys.filter((key): key is string => typeof key === "string");
+    const usedKeys = new Set<string>();
+    result.keys = validKeys
+      .slice(0, MAX_STORAGE_ENTRIES)
+      .map((key) => wrapUntrustedText("storage_key", uniqueStorageKey(redactSecretPlaceholders(key), usedKeys), MAX_STORAGE_KEY_CHARS));
+    result.truncated = result.truncated === true
+      || sourceKeys.length > MAX_STORAGE_ENTRIES
+      || validKeys.length < sourceKeys.length
+      || validKeys.some((key) => key.length > MAX_STORAGE_KEY_CHARS);
   }
   if (typeof result.value === "string") {
-    result.value = wrapUntrustedText("storage_value", redactSecretPlaceholders(result.value), 20_000);
+    result.value = wrapUntrustedText("storage_value", redactSecretPlaceholders(result.value), MAX_STORAGE_VALUE_CHARS);
   }
   if (result.values && typeof result.values === "object" && !Array.isArray(result.values)) {
     const sourceValues = result.values as Record<string, unknown>;
-    const sourceCount = Object.keys(sourceValues).length;
+    const sourceKeys = Object.keys(sourceValues);
+    const sourceCount = sourceKeys.length;
     const values: Record<string, string> = Object.create(null) as Record<string, string>;
+    const usedKeys = new Set<string>();
     let totalChars = 0;
-    for (const [key, rawValue] of Object.entries(sourceValues)) {
-      if (typeof rawValue !== "string" || totalChars >= 100_000) {
+    for (const key of sourceKeys.slice(0, MAX_STORAGE_ENTRIES)) {
+      const rawValue = sourceValues[key];
+      if (typeof rawValue !== "string" || totalChars >= MAX_STORAGE_TOTAL_CHARS) {
         continue;
       }
-      const bounded = rawValue.slice(0, Math.min(20_000, 100_000 - totalChars));
+      const bounded = rawValue.slice(0, Math.min(MAX_STORAGE_VALUE_CHARS, MAX_STORAGE_TOTAL_CHARS - totalChars));
       totalChars += bounded.length;
-      const safeKey = wrapUntrustedText("storage_key", redactSecretPlaceholders(key), 1_000);
-      values[safeKey] = wrapUntrustedText("storage_value", redactSecretPlaceholders(bounded), 20_000);
+      const projectedKey = uniqueStorageKey(redactSecretPlaceholders(key), usedKeys);
+      const safeKey = wrapUntrustedText("storage_key", projectedKey, MAX_STORAGE_KEY_CHARS);
+      values[safeKey] = wrapUntrustedText("storage_value", redactSecretPlaceholders(bounded), MAX_STORAGE_VALUE_CHARS);
     }
     result.values = values;
-    result.truncated = result.truncated === true || Object.keys(values).length < sourceCount || totalChars >= 100_000;
+    result.truncated = result.truncated === true || sourceCount > MAX_STORAGE_ENTRIES || Object.keys(values).length < sourceCount || totalChars >= MAX_STORAGE_TOTAL_CHARS;
   }
   return result;
+}
+
+function uniqueStorageKey(key: string, usedKeys: Set<string>): string {
+  const base = key.length > MAX_STORAGE_KEY_CHARS ? `${key.slice(0, MAX_STORAGE_KEY_CHARS - 1)}…` : key;
+  if (!usedKeys.has(base)) {
+    usedKeys.add(base);
+    return base;
+  }
+  for (let occurrence = 2; ; occurrence += 1) {
+    const suffix = `~${occurrence}`;
+    const prefixLength = Math.max(1, MAX_STORAGE_KEY_CHARS - suffix.length - 1);
+    const candidate = `${base.slice(0, prefixLength)}…${suffix}`;
+    if (!usedKeys.has(candidate)) {
+      usedKeys.add(candidate);
+      return candidate;
+    }
+  }
 }
 
 function sanitizeEvaluateResult(value: unknown): unknown {
@@ -7677,7 +7863,10 @@ function targetForAction(action: BrowserAction, field: string): string {
 }
 
 function elementReferenceForAction(action: BrowserAction): string | undefined {
-  const target = action.ref ?? action.target ?? (action.index !== undefined ? `e${action.index + 1}` : undefined);
+  const target = action.ref
+    ?? action.target
+    ?? (action.selector !== undefined && isElementReference(action.selector) ? action.selector : undefined)
+    ?? (action.index !== undefined ? `e${action.index + 1}` : undefined);
   return target && isElementReference(target) ? target : undefined;
 }
 
@@ -7945,12 +8134,39 @@ function parseDevToolsActivePort(raw: string): string | undefined {
   return Number.isInteger(port) && port >= 1_024 && port <= 65_535 ? `http://127.0.0.1:${port}` : undefined;
 }
 
+async function readBoundedTextFile(path: string, maxBytes: number): Promise<string | undefined> {
+  const noFollow = typeof fsConstants.O_NOFOLLOW === "number" ? fsConstants.O_NOFOLLOW : 0;
+  let handle: FileHandle | undefined;
+  try {
+    handle = await open(path, fsConstants.O_RDONLY | noFollow);
+    const info = await handle.stat();
+    if (!info.isFile() || info.size > maxBytes) {
+      return undefined;
+    }
+    const buffer = Buffer.allocUnsafe(maxBytes + 1);
+    let offset = 0;
+    while (offset < buffer.byteLength) {
+      const { bytesRead } = await handle.read(buffer, offset, buffer.byteLength - offset, offset);
+      if (bytesRead === 0) {
+        break;
+      }
+      offset += bytesRead;
+    }
+    return offset > maxBytes ? undefined : buffer.subarray(0, offset).toString("utf8");
+  } catch {
+    return undefined;
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
 async function probeDevToolsEndpoint(browserURL: string, timeoutMs: number): Promise<DevToolsVersion> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(new URL("/json/version", browserURL), { signal: controller.signal });
     if (!response.ok) {
+      cancelDevToolsProbeBody(response);
       throw new Error(`DevTools endpoint returned HTTP ${response.status}.`);
     }
     const declaredLength = response.headers.get("content-length");
@@ -7961,7 +8177,7 @@ async function probeDevToolsEndpoint(browserURL: string, timeoutMs: number): Pro
         throw new Error("DevTools endpoint response exceeded the safety limit.");
       }
     }
-    const body = await readBoundedDevToolsResponse(response, MAX_DEVTOOLS_PROBE_RESPONSE_BYTES);
+    const body = await readBoundedDevToolsResponse(response, MAX_DEVTOOLS_PROBE_RESPONSE_BYTES, controller.signal);
     const value: unknown = JSON.parse(body);
     if (!isRecordValue(value)) {
       throw new Error("DevTools endpoint returned an invalid version payload.");
@@ -7976,7 +8192,7 @@ async function probeDevToolsEndpoint(browserURL: string, timeoutMs: number): Pro
   }
 }
 
-async function readBoundedDevToolsResponse(response: Response, maxBytes: number): Promise<string> {
+async function readBoundedDevToolsResponse(response: Response, maxBytes: number, signal?: AbortSignal): Promise<string> {
   if (!response.body) {
     throw new Error("DevTools endpoint returned an empty response body.");
   }
@@ -7984,23 +8200,35 @@ async function readBoundedDevToolsResponse(response: Response, maxBytes: number)
   const reader = response.body.getReader();
   const chunks: Buffer[] = [];
   let total = 0;
+  let cancelReader = false;
   try {
     while (true) {
-      const next = await reader.read();
+      const next = await awaitWithAbort(reader.read(), signal);
       if (next.done) {
         break;
       }
       const value = next.value;
       if (!(value instanceof Uint8Array) || value.byteLength > maxBytes - total) {
-        void reader.cancel().catch(() => undefined);
+        cancelReader = true;
         throw new Error("DevTools endpoint response exceeded the safety limit.");
       }
       const chunk = Buffer.from(value);
       total += chunk.byteLength;
       chunks.push(chunk);
     }
+  } catch (error) {
+    cancelReader = true;
+    throw error;
   } finally {
-    reader.releaseLock();
+    if (cancelReader) {
+      void reader.cancel().catch(() => undefined);
+    }
+    try {
+      reader.releaseLock();
+    } catch {
+      // Preserve the original probe/abort error if the stream is still
+      // settling when its lock is released.
+    }
   }
   return Buffer.concat(chunks, total).toString("utf8");
 }

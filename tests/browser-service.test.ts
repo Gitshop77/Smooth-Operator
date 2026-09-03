@@ -1041,6 +1041,30 @@ describe("browser service", () => {
     await service.close();
   });
 
+  it("bounds browser session close while a connection handshake ignores cancellation", async () => {
+    vi.useFakeTimers();
+    let releaseConnection!: (browser: Browser) => void;
+    const pendingConnection = new Promise<Browser>((resolve) => { releaseConnection = resolve; });
+    const service = new BrowserService(testConfig(), new SecurityPolicy(testConfig()), new Logger("error", {}, () => undefined));
+    const internal = service as unknown as { connectionPromise?: Promise<Browser> };
+    internal.connectionPromise = pendingConnection;
+
+    try {
+      const closing = service.closeSession(service.sessionSummary().session_id);
+      await vi.advanceTimersByTimeAsync(1_000);
+      await expect(closing).resolves.toMatchObject({ closed: false, session_id: service.sessionSummary().session_id });
+      expect(service.connectionStatus()).toMatchObject({ recoveryRequired: true, connected: false });
+
+      releaseConnection({} as Browser);
+      await Promise.resolve();
+      await service.closeSession(service.sessionSummary().session_id);
+      expect(service.connectionStatus()).toMatchObject({ recoveryRequired: false });
+    } finally {
+      await service.close();
+      vi.useRealTimers();
+    }
+  });
+
   it("does not execute browser work queued before a session close", async () => {
     const service = new BrowserService(testConfig(), new SecurityPolicy(testConfig()), new Logger("error", {}, () => undefined));
     const internal = service as unknown as {
@@ -1571,7 +1595,7 @@ describe("browser service", () => {
     page.viewport = () => ({ width: 100, height: 100 });
     page.mouse = {
       move: async (x: number, y: number) => { moves.push({ x, y }); },
-      down: async () => undefined,
+      down: vi.fn(async () => undefined),
       up: async () => undefined,
     };
     const handle = { clickablePoint: async () => ({ x: 5, y: 5 }), dispose: vi.fn(async () => undefined) };
@@ -1592,9 +1616,13 @@ describe("browser service", () => {
     internal.frameFor = async () => frame;
     internal.selectorFor = async () => "#drag";
 
+    await expect(internal.executeOnPage({ action: "press_and_hold", target: "#drag", durationMs: 0, path: [{ x: 101, y: 10 }, { x: 20, y: 30 }] } as BrowserAction)).rejects.toMatchObject({ code: "COORDINATE_OUT_OF_BOUNDS" });
+    expect(moves).toEqual([]);
+    expect((page.mouse.down as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+
     await expect(internal.executeOnPage({ action: "press_and_hold", target: "#drag", durationMs: 0, path: [{ x: 10, y: 10 }, { x: 20, y: 30 }, { x: 40, y: 50 }] } as BrowserAction)).resolves.toMatchObject({ draggedPath: 3 });
     expect(moves).toEqual([{ x: 10, y: 10 }, { x: 20, y: 30 }, { x: 40, y: 50 }]);
-    expect(handle.dispose).toHaveBeenCalledTimes(1);
+    expect(handle.dispose).toHaveBeenCalledTimes(2);
     await service.close();
   });
 
@@ -1944,10 +1972,12 @@ describe("browser service", () => {
     session.emit("Fetch.requestPaused", { resourceType: "Image", requestId: "data-sub", request: { url: "data:text/plain,fixture" } });
     session.emit("Fetch.requestPaused", { resourceType: "Script", requestId: "blob-sub", request: { url: "blob:https://example.test/fixture" } });
     session.emit("Fetch.requestPaused", { resourceType: "Document", requestId: "data-frame", request: { url: "data:text/html,fixture" } });
+    session.emit("Fetch.requestPaused", { resourceType: "document", requestId: "data-frame-lower", request: { url: "data:text/html,fixture" } });
     await new Promise<void>((resolve) => setImmediate(resolve));
     expect(calls.some((call) => call.method === "Fetch.continueRequest" && call.params.requestId === "data-sub")).toBe(true);
     expect(calls.some((call) => call.method === "Fetch.continueRequest" && call.params.requestId === "blob-sub")).toBe(true);
     expect(calls.some((call) => call.method === "Fetch.failRequest" && call.params.requestId === "data-frame")).toBe(true);
+    expect(calls.some((call) => call.method === "Fetch.failRequest" && call.params.requestId === "data-frame-lower")).toBe(true);
 
     // Both layers agree: non-frame data/blob allowed, frame data/blob blocked.
     await service.close();
@@ -2513,6 +2543,7 @@ describe("browser service", () => {
 
     expect(() => internal.assertSnapshotForAction(state, { action: "click", ref: "e5", snapshotId: "old-snapshot" } as BrowserAction)).toThrowError(/older browser snapshot/);
     expect(() => internal.assertSnapshotForAction(state, { action: "click", target: "ref:e5", snapshotId: "old-snapshot" } as BrowserAction)).toThrowError(/older browser snapshot/);
+    expect(() => internal.assertSnapshotForAction(state, { action: "click", selector: "e5", snapshotId: "old-snapshot" } as BrowserAction)).toThrowError(/older browser snapshot/);
     expect(() => internal.assertSnapshotForAction(state, { action: "click", index: 4, snapshotId: "old-snapshot" } as BrowserAction)).toThrowError(/older browser snapshot/);
     await service.close();
   });
@@ -2524,17 +2555,20 @@ describe("browser service", () => {
     page.url = () => "about:blank";
     let id = "first";
     const element = {
+      nodeType: 1,
       tagName: "BUTTON",
       innerText: "Go",
       textContent: "Go",
+      childNodes: [{ nodeType: 3, nodeValue: "Go" }],
       getAttribute: (name: string) => name === "id" ? id : null,
+      hasAttribute: () => false,
       closest: () => null,
     };
     const frame = {
       parentFrame: () => null,
       $eval: async (_selector: string, callback: (target: unknown) => unknown) => callback(element),
     };
-    const signature = (elementId: string): string => ["button", elementId, "", "", "", "", "", "", "", "Go", ""].join("\u001f");
+    const signature = (elementId: string): string => ["button", elementId.slice(0, 500), "", "", "", "", "", "", "", "Go", ""].join("\u001f");
     const internal = service as unknown as {
       stateFor(page: unknown): { snapshotId?: string; refs: Map<string, { selector: string; signature: string; snapshotId: string; frameId: string; index: number }> };
       selectorFor(state: unknown, target: string, requestedFrameId?: string, resolvedFrame?: unknown): Promise<string>;
@@ -2545,6 +2579,28 @@ describe("browser service", () => {
     id = "replacement";
 
     await expect(internal.selectorFor(state, "ref:e1", "main", frame)).rejects.toMatchObject({ code: "STALE_REFERENCE" });
+    id = "x".repeat(600);
+    state.refs.set("e2", { selector: "#target", signature: signature(id), snapshotId: "snapshot", frameId: "main", index: 1 });
+    await expect(internal.selectorFor(state, "ref:e2", "main", frame)).resolves.toBe("#target");
+    await service.close();
+  });
+
+  it("routes an unqualified snapshot ref to its recorded frame", async () => {
+    const service = new BrowserService(testConfig(), new SecurityPolicy(testConfig()), new Logger("error", {}, () => undefined));
+    const internal = service as unknown as {
+      frameIdForReference(state: unknown, action: BrowserAction): string | undefined;
+    };
+    const state = {
+      refs: new Map([
+        ["e1", { frameId: "child-frame" }],
+      ]),
+    };
+
+    expect(internal.frameIdForReference(state, { action: "click", ref: "e1" } as BrowserAction)).toBe("child-frame");
+    expect(internal.frameIdForReference(state, { action: "click", target: "ref:e1" } as BrowserAction)).toBe("child-frame");
+    expect(internal.frameIdForReference(state, { action: "click", selector: "e1" } as BrowserAction)).toBe("child-frame");
+    expect(internal.frameIdForReference(state, { action: "click", ref: "e1", frameId: "main" } as BrowserAction)).toBe("main");
+    expect(internal.frameIdForReference(state, { action: "click", target: "#button" } as BrowserAction)).toBeUndefined();
     await service.close();
   });
 
@@ -2631,13 +2687,14 @@ describe("browser service", () => {
   it("reports extraction truncation and scopes links to selector descendants", async () => {
     const service = new BrowserService(testConfig(), new SecurityPolicy(testConfig()), new Logger("error", {}, () => undefined));
     const anchor = { href: "https://example.test/child", textContent: "Child link", querySelectorAll: () => [] };
-    const container = { tagName: "DIV", textContent: "x".repeat(120), querySelectorAll: () => [anchor] };
+    const container = { tagName: "DIV", textContent: "x".repeat(120), outerHTML: "<div>content</div>", querySelectorAll: () => [anchor] };
+    const resolvedTargets: string[] = [];
     const frame = {
       parentFrame: () => null,
       $eval: async (_selector: string, callback: (element: unknown, limit: number) => unknown, limit?: number) => callback(container, limit ?? 100),
     };
     const page = { url: () => "about:blank" };
-    const state = { id: "page-1", page };
+    const state = { id: "page-1", page, refs: new Map() };
     const internal = service as unknown as {
       executeOnPage(action: BrowserAction, signal?: AbortSignal): Promise<unknown>;
       pageState(pageId?: string, signal?: AbortSignal): Promise<unknown>;
@@ -2650,12 +2707,18 @@ describe("browser service", () => {
     internal.assertCurrentPageAllowed = async () => undefined;
     internal.assertSnapshotForAction = () => undefined;
     internal.frameFor = async () => frame;
-    internal.selectorFor = async () => "#container";
+    internal.selectorFor = async (_state, target) => {
+      resolvedTargets.push(target);
+      return "#container";
+    };
 
     const result = await internal.executeOnPage({ action: "extract", selector: "#container", includeLinks: true, maxChars: 100 } as BrowserAction) as { text: string; truncated: boolean; links: Array<{ href: string }> };
     expect(result.truncated).toBe(true);
     expect(result.text).toContain("x".repeat(100));
     expect(result.links).toEqual([{ text: expect.stringContaining("Child link"), href: "https://example.test/child", untrustedUrl: expect.stringContaining("https://example.test/child") }]);
+    await internal.executeOnPage({ action: "extract", ref: "e5", maxChars: 100 } as BrowserAction);
+    await internal.executeOnPage({ action: "get_html", index: 0, maxChars: 100 } as BrowserAction);
+    expect(resolvedTargets).toEqual(["#container", "e5", "e1"]);
     await service.close();
   });
 
@@ -2918,6 +2981,97 @@ describe("browser service", () => {
     await service.close();
   });
 
+  it("bounds storage enumeration and preserves hostile or colliding keys", async () => {
+    const service = new BrowserService(testConfig(), new SecurityPolicy(testConfig()), new Logger("error", {}, () => undefined));
+    const firstKey = `${"a".repeat(1_000)}-first`;
+    const secondKey = `${"a".repeat(1_000)}-second`;
+    const rawKeys = [firstKey, secondKey, "__proto__"];
+    const rawValues = new Map([
+      [firstKey, "first-value"],
+      [secondKey, "second-value"],
+      ["__proto__", "prototype-value"],
+    ]);
+    const storage = {
+      length: 1_000_000,
+      key: vi.fn((index: number) => rawKeys[index] ?? null),
+      getItem: vi.fn((key: string) => rawValues.get(key) ?? null),
+    };
+    const page = {
+      url: () => "about:blank",
+      evaluate: async (callback: unknown, args: unknown) => {
+        const globalObject = globalThis as typeof globalThis & { window?: unknown };
+        const previousWindow = globalObject.window;
+        Object.defineProperty(globalObject, "window", {
+          configurable: true,
+          value: { localStorage: storage, sessionStorage: storage },
+        });
+        try {
+          return (callback as (value: unknown) => unknown)(args);
+        } finally {
+          if (previousWindow === undefined) {
+            Reflect.deleteProperty(globalObject, "window");
+          } else {
+            Object.defineProperty(globalObject, "window", { configurable: true, value: previousWindow });
+          }
+        }
+      },
+    };
+    const state = { id: "page-1", page };
+    const internal = service as unknown as {
+      executeOnPage(action: BrowserAction, signal?: AbortSignal): Promise<unknown>;
+      pageState(pageId?: string, signal?: AbortSignal): Promise<unknown>;
+      assertCurrentPageAllowed(page: unknown): Promise<void>;
+      assertSnapshotForAction(state: unknown, action: BrowserAction): void;
+      frameFor(state: unknown, frameId?: string): Promise<unknown>;
+    };
+    internal.pageState = async () => state;
+    internal.assertCurrentPageAllowed = async () => undefined;
+    internal.assertSnapshotForAction = () => undefined;
+    internal.frameFor = async () => ({});
+
+    const result = await internal.executeOnPage({ action: "get_storage", includeValues: true, maxChars: 100 } as BrowserAction) as { values: Record<string, string>; truncated: boolean };
+    expect(storage.key).toHaveBeenCalledTimes(200);
+    expect(result.truncated).toBe(true);
+    expect(Object.keys(result.values)).toHaveLength(3);
+    expect(Object.getPrototypeOf(result.values)).toBeNull();
+    expect(Object.values(result.values).some((value) => value.includes("first-value"))).toBe(true);
+    expect(Object.values(result.values).some((value) => value.includes("second-value"))).toBe(true);
+    expect(Object.values(result.values).some((value) => value.includes("prototype-value"))).toBe(true);
+    await service.close();
+  });
+
+  it("treats an empty storage key as a key rather than clear-all", async () => {
+    const service = new BrowserService(testConfig(), new SecurityPolicy(testConfig()), new Logger("error", {}, () => undefined));
+    const evaluateArgs: unknown[] = [];
+    const page = {
+      url: () => "about:blank",
+      evaluate: async (_callback: unknown, args: unknown) => {
+        evaluateArgs.push(args);
+        return undefined;
+      },
+    };
+    const state = { id: "page-1", page };
+    const internal = service as unknown as {
+      executeOnPage(action: BrowserAction, signal?: AbortSignal): Promise<unknown>;
+      pageState(pageId?: string, signal?: AbortSignal): Promise<unknown>;
+      assertCurrentPageAllowed(page: unknown): Promise<void>;
+      assertSnapshotForAction(state: unknown, action: BrowserAction): void;
+      frameFor(state: unknown, frameId?: string): Promise<unknown>;
+    };
+    internal.pageState = async () => state;
+    internal.assertCurrentPageAllowed = async () => undefined;
+    internal.assertSnapshotForAction = () => undefined;
+    internal.frameFor = async () => ({});
+
+    await internal.executeOnPage({ action: "set_storage", storageKey: "", storageValue: "value" } as BrowserAction);
+    await internal.executeOnPage({ action: "clear_storage", storageKey: "" } as BrowserAction);
+    expect(evaluateArgs).toHaveLength(2);
+    expect(evaluateArgs[0]).toMatchObject({ storageKey: "", storageValue: "value" });
+    expect(evaluateArgs[1]).toMatchObject({ storageKey: "" });
+    expect(evaluateArgs[1]).not.toHaveProperty("storageAll", true);
+    await service.close();
+  });
+
   it("forwards policy-checked cookie URL scope and SameSite without returning values", async () => {
     const baseConfig = testConfig();
     const config = testConfig({
@@ -2997,6 +3151,46 @@ describe("browser service", () => {
     await new Promise<void>((resolve) => setImmediate(resolve));
     expect(calls.some((call) => call.method === "Fetch.failRequest")).toBe(true);
     expect(calls.some((call) => call.method === "Fetch.continueRequest")).toBe(false);
+    await service.close();
+  });
+
+  it("closes a guarded target when a paused request is incomplete", async () => {
+    const config = testConfig({ browser: { ...testConfig().browser, mode: "connect", url: "http://127.0.0.1:9222" } });
+    const service = new BrowserService(config, new SecurityPolicy(config), new Logger("error", {}, () => undefined));
+    const session = new EventEmitter() as EventEmitter & { id(): string; send: ReturnType<typeof vi.fn> };
+    session.id = () => "malformed-guard-session";
+    session.send = vi.fn(async () => ({}));
+    const internal = service as unknown as { guardTargetSession(session: unknown): Promise<void> };
+    await internal.guardTargetSession(session);
+
+    session.emit("Fetch.requestPaused", { requestId: "request-without-url", request: {} });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(session.send).toHaveBeenCalledWith("Page.close");
+    expect(session.send).not.toHaveBeenCalledWith("Fetch.continueRequest", expect.anything());
+    expect(session.send).not.toHaveBeenCalledWith("Fetch.failRequest", expect.anything());
+    await service.close();
+  });
+
+  it("closes a guarded target when a paused request cannot be resolved", async () => {
+    const config = testConfig({ browser: { ...testConfig().browser, mode: "connect", url: "http://127.0.0.1:9222" } });
+    const policy = { assertNavigationAllowedAsync: async () => new URL("https://example.test/") } as unknown as SecurityPolicy;
+    const service = new BrowserService(config, policy, new Logger("error", {}, () => undefined));
+    const session = new EventEmitter() as EventEmitter & { id(): string; send: ReturnType<typeof vi.fn> };
+    session.id = () => "resolution-failure-guard-session";
+    session.send = vi.fn(async (method: string) => {
+      if (method === "Fetch.continueRequest") {
+        throw new Error("synthetic continue failure");
+      }
+      return {};
+    });
+    const internal = service as unknown as { guardTargetSession(session: unknown): Promise<void> };
+    await internal.guardTargetSession(session);
+
+    session.emit("Fetch.requestPaused", { requestId: "request-1", request: { url: "https://example.test/" } });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(session.send).toHaveBeenCalledWith("Page.close");
     await service.close();
   });
 
