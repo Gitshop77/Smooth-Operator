@@ -1,9 +1,15 @@
+import { mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type { ServerConfig } from "@/server/config";
 
 const TEST_DATA_DIR = join(tmpdir(), "smooth-operator-test");
+
+// SecurityPolicy canonicalizes every allowed root synchronously. Ensure the
+// shared fixture root exists before the first test constructs a policy; on a
+// fresh Windows runner, no earlier test is guaranteed to have created it.
+mkdirSync(TEST_DATA_DIR, { recursive: true });
 
 export function testConfig(overrides: Partial<ServerConfig> = {}): ServerConfig {
   const base: ServerConfig = {
