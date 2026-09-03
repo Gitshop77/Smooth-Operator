@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { AppError, safeErrorPayload, toolError, toolResult } from "@/server/errors";
-import { redactValue } from "@/server/logger";
+import { Logger, redactValue } from "@/server/logger";
 import { containsPromptInjection, normalizeUntrustedText, redactSecretPlaceholders, wrapUntrustedText } from "@/server/security";
 
 describe("security boundaries", () => {
@@ -78,6 +78,41 @@ describe("security boundaries", () => {
     const result = redactValue({ apiKey: "real-value", note: "Bearer abcdefghijklmnop" }) as Record<string, unknown>;
     expect(result.apiKey).toBe("[REDACTED]");
     expect(result.note).toContain("[REDACTED]");
+  });
+
+  it("keeps redaction safe for hostile getters and object enumeration", () => {
+    const getterValue: Record<string, unknown> = {};
+    Object.defineProperty(getterValue, "payload", {
+      enumerable: true,
+      get: () => {
+        throw new Error("getter failed");
+      },
+    });
+    expect(redactValue(getterValue)).toMatchObject({ payload: "[UNREADABLE_PROPERTY]" });
+
+    const hostileObject = new Proxy({}, {
+      ownKeys: () => {
+        throw new Error("enumeration failed");
+      },
+    });
+    expect(redactValue(hostileObject)).toBe("[UNREADABLE_OBJECT]");
+
+    const hostileArray = new Proxy(["safe"], {
+      get: (target, property, receiver) => {
+        if (property === "0") {
+          throw new Error("index failed");
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    expect(redactValue(hostileArray)).toEqual(["[UNREADABLE_PROPERTY]"]);
+  });
+
+  it("does not let a failing log sink escape", () => {
+    const logger = new Logger("info", {}, () => {
+      throw new Error("sink failed");
+    });
+    expect(() => logger.error("message")).not.toThrow();
   });
 
   it("redacts secret-like URL parameters and protects prototype keys", () => {

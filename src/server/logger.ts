@@ -25,6 +25,8 @@ const MAX_COLLECTION_ITEMS = 200;
 const MAX_OBJECT_KEY_CHARS = 200;
 const MAX_REDACTED_CHARS = 1_000_000;
 const MAX_DEPTH = 8;
+const UNREADABLE_OBJECT = "[UNREADABLE_OBJECT]";
+const UNREADABLE_PROPERTY = "[UNREADABLE_PROPERTY]";
 
 interface RedactionBudget {
   remaining: number;
@@ -94,19 +96,39 @@ function redactValueWithBudget(value: unknown, depth: number, budget: RedactionB
   if (typeof value === "bigint") {
     return redactString(`${value}n`, budget);
   }
-  if (Array.isArray(value)) {
-    if (seen.has(value)) {
+  let isArray = false;
+  try {
+    isArray = Array.isArray(value);
+  } catch {
+    return UNREADABLE_OBJECT;
+  }
+  if (isArray) {
+    const array = value as unknown[];
+    if (seen.has(array)) {
       return "[CIRCULAR]";
     }
-    seen.add(value);
+    seen.add(array);
     const result: unknown[] = [];
-    for (const item of value.slice(0, MAX_COLLECTION_ITEMS)) {
+    let length = 0;
+    try {
+      const rawLength = (array as unknown as { length?: unknown }).length;
+      length = typeof rawLength === "number" && Number.isSafeInteger(rawLength) && rawLength >= 0 ? rawLength : 0;
+    } catch {
+      seen.delete(array);
+      return UNREADABLE_OBJECT;
+    }
+    const itemCount = Math.min(length, MAX_COLLECTION_ITEMS);
+    for (let index = 0; index < itemCount; index += 1) {
       if (budget.remaining === 0) {
         break;
       }
-      result.push(redactValueWithBudget(item, depth + 1, budget, seen));
+      try {
+        result.push(redactValueWithBudget(array[index], depth + 1, budget, seen));
+      } catch {
+        result.push(UNREADABLE_PROPERTY);
+      }
     }
-    seen.delete(value);
+    seen.delete(array);
     return result;
   }
   if (value && typeof value === "object") {
@@ -119,23 +141,37 @@ function redactValueWithBudget(value: unknown, depth: number, budget: RedactionB
     const usedKeys = new Set<string>();
     let entryCount = 0;
     let truncated = false;
-    for (const key in value) {
-      if (!Object.hasOwn(value, key)) {
-        continue;
+    try {
+      // A bounded for-in walk avoids materializing an attacker-sized key
+      // array for ordinary objects while the own-property check preserves
+      // the prototype-safe projection. Proxy enumeration failures still
+      // fail closed through the surrounding catch.
+      for (const key in source) {
+        if (!Object.hasOwn(source, key)) {
+          continue;
+        }
+        if (entryCount >= MAX_COLLECTION_ITEMS) {
+          truncated = true;
+          break;
+        }
+        if (budget.remaining === 0) {
+          break;
+        }
+        const safeKey = uniqueObjectKey(key, usedKeys);
+        if (SECRET_KEY_PATTERN.test(key)) {
+          result[safeKey] = redactString("[REDACTED]", budget);
+        } else {
+          try {
+            result[safeKey] = redactValueWithBudget(source[key], depth + 1, budget, seen);
+          } catch {
+            result[safeKey] = UNREADABLE_PROPERTY;
+          }
+        }
+        entryCount += 1;
       }
-      if (entryCount >= MAX_COLLECTION_ITEMS) {
-        truncated = true;
-        break;
-      }
-      if (budget.remaining === 0) {
-        break;
-      }
-      const item = source[key];
-      const safeKey = uniqueObjectKey(key, usedKeys);
-      result[safeKey] = SECRET_KEY_PATTERN.test(key)
-        ? redactString("[REDACTED]", budget)
-        : redactValueWithBudget(item, depth + 1, budget, seen);
-      entryCount += 1;
+    } catch {
+      seen.delete(value);
+      return UNREADABLE_OBJECT;
     }
     if (truncated || budget.remaining === 0) {
       // Keep the metadata flag authoritative even when the input itself has
@@ -201,13 +237,18 @@ export class Logger {
       return;
     }
 
-    const line = redactValue({
-      timestamp: new Date().toISOString(),
-      level,
-      message,
-      ...this.context,
-      ...(fields ?? EMPTY_FIELDS),
-    });
-    this.sink(JSON.stringify(line));
+    try {
+      const line = redactValue({
+        timestamp: new Date().toISOString(),
+        level,
+        message,
+        ...this.context,
+        ...(fields ?? EMPTY_FIELDS),
+      });
+      this.sink(JSON.stringify(line));
+    } catch {
+      // Logging is best-effort. A closed or failing sink must not mask the
+      // protocol response or alter browser-control flow.
+    }
   }
 }
