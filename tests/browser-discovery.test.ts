@@ -109,7 +109,7 @@ describe("Chrome executable discovery", () => {
       [edge, { kind: "file", mode: 0o644, accessible: true }],
     ]);
 
-    expect(findChromiumExecutables(fileSystemWithEntries(entries))).toEqual([]);
+    expect(findChromiumExecutables(fileSystemWithEntries(entries), "darwin")).toEqual([]);
   });
 });
 
