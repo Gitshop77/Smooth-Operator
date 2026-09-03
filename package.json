@@ -28,6 +28,7 @@
     "lint": "eslint . --ignore-pattern scripts/benchmark-network-journal.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:unit": "vitest run --exclude tests/browser-live.test.ts",
     "benchmark:network": "tsx scripts/benchmark-network-journal.ts",
     "test:browser:live": "node scripts/test-browser-live.mjs",
     "test:watch": "vitest",
@@ -60,6 +61,10 @@
     "tsx": "^4.23.12",
     "typescript": "^6.0.3",
     "vitest": "^4.1.11"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true,
+    "fsevents@2.3.3": true
   },
   "engines": {
     "node": ">=22.23.2",

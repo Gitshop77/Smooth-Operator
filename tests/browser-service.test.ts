@@ -237,7 +237,11 @@ describe("browser service", () => {
     const launch = vi.fn(async () => browser);
 
     try {
-      for (const executablePath of [directory, nonExecutable]) {
+      // Windows determines executable readiness from regular-file semantics,
+      // so a non-.exe test fixture is still launchable there. The directory
+      // case is invalid on every supported platform.
+      const invalidPaths = process.platform === "win32" ? [directory] : [directory, nonExecutable];
+      for (const executablePath of invalidPaths) {
         const config = testConfig({ browser: { ...testConfig().browser, mode: "launch", executablePath } });
         const service = new BrowserService(config, new SecurityPolicy(config), new Logger("error", {}, () => undefined), { launch });
         try {

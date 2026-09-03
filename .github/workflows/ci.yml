@@ -69,7 +69,9 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - run: npm run typecheck
-      - run: npm test
+      # The full browser contract is covered by the dedicated Linux job above.
+      # Keep this platform lane focused on cross-platform unit coverage.
+      - run: npm run test:unit
 
   secret-scan:
     runs-on: ubuntu-latest
@@ -80,6 +82,8 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
           fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7
+      # gitleaks-action v3.0.0 — full commit SHA pin; runs on Node 24.
+      - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e
         env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITLEAKS_CONFIG: .github/gitleaks.toml

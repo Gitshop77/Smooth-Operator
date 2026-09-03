@@ -23,16 +23,22 @@ interface ChromeExecutableCandidate extends ChromeExecutable {}
  * Google Chrome channels first (widest compatibility), then other installed
  * Chromium browsers. Any CDP-compatible executable can also be set manually
  * via SMOOTH_OPERATOR_BROWSER_EXECUTABLE or browser.executablePath config. */
-export function findChromeExecutable(fs: FileSystem = nodeFs): ChromeExecutable | null {
+export function findChromeExecutable(
+  fs: FileSystem = nodeFs,
+  platformName: NodeJS.Platform = process.platform,
+): ChromeExecutable | null {
   // Candidate generation is cheap, but duplicate PATH entries and platform
   // aliases are common. Deduping before touching the filesystem keeps startup
   // discovery deterministic and avoids redundant readiness checks.
-  return dedupeCandidates(chromeExecutableCandidates()).find((candidate) => isExecutableReady(candidate.path, fs)) ?? null;
+  return dedupeCandidates(chromeExecutableCandidates(), platformName).find((candidate) => isExecutableReady(candidate.path, fs, platformName)) ?? null;
 }
 
 /** All installed Chromium-based browsers found on this machine. */
-export function findChromiumExecutables(fs: FileSystem = nodeFs): ChromeExecutable[] {
-  return dedupeCandidates(chromeExecutableCandidates()).filter((candidate) => isExecutableReady(candidate.path, fs));
+export function findChromiumExecutables(
+  fs: FileSystem = nodeFs,
+  platformName: NodeJS.Platform = process.platform,
+): ChromeExecutable[] {
+  return dedupeCandidates(chromeExecutableCandidates(), platformName).filter((candidate) => isExecutableReady(candidate.path, fs, platformName));
 }
 
 /**
@@ -81,14 +87,17 @@ export function chromeExecutableSearchPaths(): string[] {
   return dedupeCandidates(chromeExecutableCandidates()).map((candidate) => candidate.path);
 }
 
-function dedupeCandidates(candidates: readonly ChromeExecutableCandidate[]): ChromeExecutableCandidate[] {
+function dedupeCandidates(
+  candidates: readonly ChromeExecutableCandidate[],
+  platformName: NodeJS.Platform = process.platform,
+): ChromeExecutableCandidate[] {
   const seen = new Set<string>();
   const unique: ChromeExecutableCandidate[] = [];
   for (const candidate of candidates) {
     // Windows paths are case-insensitive. Lower-casing only for the key keeps
     // the original spelling available to callers while avoiding duplicate
     // probes when PATH or environment variables repeat an entry.
-    const key = process.platform === "win32" ? candidate.path.toLowerCase() : candidate.path;
+    const key = platformName === "win32" ? candidate.path.toLowerCase() : candidate.path;
     if (seen.has(key)) continue;
     seen.add(key);
     unique.push(candidate);
