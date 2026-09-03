@@ -85,6 +85,9 @@ describe("MCP contracts", () => {
     expect(StorageRequestSchema.safeParse({ operation: "clear", all: true }).success).toBe(true);
     expect(StorageRequestSchema.safeParse({ operation: "clear" }).success).toBe(false);
     expect(StorageRequestSchema.safeParse({ operation: "clear", key: "a", all: true }).success).toBe(false);
+    expect(StorageRequestSchema.safeParse({ operation: "set", key: "", value: "empty-key" }).success).toBe(true);
+    expect(StorageRequestSchema.safeParse({ operation: "clear", key: "" }).success).toBe(true);
+    expect(BrowserActionSchema.safeParse({ action: "get_storage", storageKey: "" }).success).toBe(true);
   });
 
   it("validates page-scoped resource blocking operations", () => {

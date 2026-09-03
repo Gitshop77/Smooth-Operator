@@ -4,6 +4,9 @@ const BoundedString = (max: number) => z.string().trim().min(1).max(max);
 // Keyboard input is the one bounded string that must preserve leading,
 // trailing, and whitespace-only values: a literal " " is a valid key event.
 const KeyboardString = (max: number) => z.string().min(1).max(max);
+// Web Storage keys are opaque application data. Preserve empty and
+// whitespace-only keys instead of trimming them into a different key.
+const StorageKey = (max: number) => z.string().max(max);
 export const MCP_PAGE_TEXT_MAX_CHARS = 8_000;
 // Keep the research input contract and its service/serialization budgets in
 // one place. These constants do not add fields to the public MCP schema.
@@ -196,7 +199,7 @@ const BrowserActionFieldsSchema = z.object({
   cookieHttpOnly: z.boolean().optional(),
   cookieSameSite: z.enum(["Strict", "Lax", "None"]).optional(),
   storageArea: z.enum(["local", "session"]).optional(),
-  storageKey: BoundedString(1_000).optional(),
+  storageKey: StorageKey(1_000).optional(),
   storageValue: z.string().max(20_000).optional(),
   storageAll: z.boolean().optional(),
   includeValues: z.boolean().optional(),
@@ -829,19 +832,19 @@ export const CookieRequestSchema = z.object({
 export const StorageRequestSchema = z.object({
   operation: z.enum(["get", "set", "clear"]),
   area: z.enum(["local", "session"]).default("local"),
-  key: BoundedString(1_000).optional(),
+  key: StorageKey(1_000).optional(),
   value: z.string().max(20_000).optional(),
   all: z.boolean().optional(),
   includeValues: z.boolean().optional(),
   ...PageInput,
 }).strict().superRefine((input, context) => {
-  if (input.operation === "set" && !input.key) {
+  if (input.operation === "set" && input.key === undefined) {
     context.addIssue({ code: "custom", message: "Storage set requires key." });
   }
-  if (input.operation === "clear" && !input.key && input.all !== true) {
+  if (input.operation === "clear" && input.key === undefined && input.all !== true) {
     context.addIssue({ code: "custom", message: "Storage clear requires key or all=true." });
   }
-  if (input.operation === "clear" && input.key && input.all === true) {
+  if (input.operation === "clear" && input.key !== undefined && input.all === true) {
     context.addIssue({ code: "custom", message: "Storage clear accepts key or all=true, not both." });
   }
 });

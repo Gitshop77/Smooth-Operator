@@ -35,7 +35,6 @@ const EXPECTED_READ_ONLY_TOOLS = new Set([
   "browser_computed_style",
   "browser_page_info",
   "browser_challenge",
-  "browser_solve_challenge",
   "browser_wait_for_human",
   "web_search",
   "server_health",
@@ -158,7 +157,7 @@ describe("native MCP registry", () => {
     expect(toolByName.get("browser_find_text")?.annotations?.openWorldHint).toBe(true);
     expect(toolByName.get("browser_type")?.annotations?.readOnlyHint).not.toBe(true);
     expect(toolByName.get("browser_type")?.annotations?.openWorldHint).toBe(true);
-    expect(toolByName.get("browser_solve_challenge")?.annotations?.readOnlyHint).toBe(true);
+    expect(toolByName.get("browser_solve_challenge")?.annotations?.readOnlyHint).toBe(false);
     expect(toolByName.get("browser_solve_challenge")?.annotations?.openWorldHint).toBe(true);
     expect(toolByName.get("web_search")?.annotations?.openWorldHint).toBe(true);
     for (const name of ["browser_network_log", "browser_console_log", "browser_cookies", "browser_storage", "browser_evaluate", "browser_batch", "browser_exec"]) {

@@ -470,7 +470,7 @@ function registerBrowserTools(server: McpServer, runtime: ServerRuntime): void {
       title: "Solve a web challenge",
       description: "Run one cycle of the internal connected-AI challenge loop. Collect fresh bounded visual/state evidence, use normal browser actions, and call again until the challenge is explicitly absent or the bounded attempt budget is exhausted. No external solver or token injection is used.",
       inputSchema: SolveChallengeRequestSchema,
-      annotations: BROWSER_READ_ONLY,
+      annotations: BROWSER_MUTATING,
     },
     async (input, ctx) => {
       const { include_screenshot, full_page, full, max_dim, ...fields } = input;
@@ -557,10 +557,14 @@ function registerAction(
   server.registerTool(
     name,
     { title, description, inputSchema, annotations },
-    async (rawInput, ctx) => {
+    async (rawInput, ctx) => callVisualTool(() => {
+      // Keep compatibility-field normalization inside the same error boundary
+      // as browser execution. A malformed adapter payload or future transform
+      // regression must become a stable MCP tool error, never an uncaught
+      // handler exception.
       const transformed = transform(rawInput as InputRecord);
-      return callVisualTool(() => runtime.run({ action, ...transformed } as BrowserAction, ctx.mcpReq.signal), runtime);
-    },
+      return runtime.run({ action, ...transformed } as BrowserAction, ctx.mcpReq.signal);
+    }, runtime),
   );
 }
 
@@ -598,7 +602,7 @@ function actionAnnotations(action: BrowserAction["action"]): ToolAnnotations {
     case "navigate":
       return BROWSER_MUTATING;
     case "solve_challenge":
-      return BROWSER_READ_ONLY;
+      return BROWSER_MUTATING;
     case "evaluate":
       return BROWSER_DESTRUCTIVE;
     case "close_tab":
