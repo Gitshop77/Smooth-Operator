@@ -50,6 +50,10 @@ const MAX_HTML_CHARS = 500_000;
 const MAX_LIST_CHARS = 100_000;
 const MAX_LIST_ITEMS = 200;
 const MAX_LIST_ITEM_CHARS = 4_000;
+// Title/text/HTML retain their established coverage. The remaining aggregate
+// budget is reserved evenly for both independently bounded marker lists;
+// separators account for the four joins in the compact haystack.
+const MAX_LIST_HAYSTACK_CHARS = Math.floor((MAX_EVIDENCE_CHARS - MAX_TITLE_CHARS - MAX_CONTEXT_CHARS - MAX_HTML_CHARS - 4) / 2);
 const WIDGET_ONLY_KINDS: ReadonlySet<ChallengeKind> = new Set([
   "cloudflare-turnstile",
   "hcaptcha",
@@ -91,33 +95,34 @@ const RULES: Array<{ kind: ChallengeKind; confidence: ChallengeMatch["confidence
   { kind: "auth-wall", confidence: "low", needles: ["sign in to continue", "log in to continue", "authentication required", "access denied"] },
 ];
 
-function normalizedEvidence(evidence: ChallengeEvidence): string {
-  let remaining = MAX_EVIDENCE_CHARS;
-  const bounded: string[] = [];
-  const append = (value: unknown, limit = remaining): void => {
-    if (remaining <= 0 || typeof value !== "string") {
-      return;
-    }
-    const part = value.slice(0, Math.min(remaining, limit));
-    bounded.push(part);
-    remaining -= part.length;
-  };
-  // Keep each evidence field represented. A hostile page title must not fill
-  // the aggregate budget and hide later body/widget signals.
-  append(evidence.title, MAX_TITLE_CHARS);
-  append(evidence.text, MAX_CONTEXT_CHARS);
-  append(evidence.html, MAX_HTML_CHARS);
-  for (const values of [evidence.frameSources, evidence.visibleMarkers]) {
-    let count = 0;
-    for (const value of values ?? []) {
-      if (count >= MAX_LIST_ITEMS || remaining <= 0) {
-        break;
-      }
-      append(value);
-      count += 1;
-    }
-  }
-  return bounded.join("\n").toLowerCase();
+interface NormalizedEvidence {
+  title: string;
+  text: string;
+  html: string;
+  frameHaystack: string;
+  visibleMarkerHaystack: string;
+  haystack: string;
+}
+
+function normalizedEvidence(evidence: ChallengeEvidence): NormalizedEvidence {
+  const title = boundedLower(evidence.title, MAX_TITLE_CHARS);
+  const text = boundedLower(evidence.text, MAX_CONTEXT_CHARS);
+  const html = boundedLower(evidence.html, MAX_HTML_CHARS);
+  // Apply item/count/aggregate limits before joining either list. The full
+  // bounded joins are retained for marker matching; the compact haystack uses
+  // a fixed slice for each list so every evidence category remains represented.
+  const frameSources = boundedList(evidence.frameSources);
+  const visibleMarkers = boundedList(evidence.visibleMarkers);
+  const frameHaystack = frameSources.join("\n");
+  const visibleMarkerHaystack = visibleMarkers.join("\n");
+  const haystack = [
+    title,
+    text,
+    html,
+    frameHaystack.slice(0, MAX_LIST_HAYSTACK_CHARS),
+    visibleMarkerHaystack.slice(0, MAX_LIST_HAYSTACK_CHARS),
+  ].join("\n");
+  return { title, text, html, frameHaystack, visibleMarkerHaystack, haystack };
 }
 
 function hasChallengeContext(haystack: string): boolean {
@@ -131,12 +136,9 @@ function hasAuthContext(haystack: string): boolean {
 export function classifyChallenge(
   evidence: ChallengeEvidence,
 ): ChallengeClassification {
-  const haystack = normalizedEvidence(evidence);
-  const html = boundedLower(evidence.html, MAX_HTML_CHARS);
-  const title = boundedLower(evidence.title, MAX_TITLE_CHARS);
-  const text = boundedLower(evidence.text, MAX_CONTEXT_CHARS);
-  const frameSources = boundedList(evidence.frameSources);
-  const visibleMarkers = boundedList(evidence.visibleMarkers);
+  const normalized = normalizedEvidence(evidence);
+  const { haystack, html, title, text, frameHaystack, visibleMarkerHaystack } = normalized;
+  const markerHaystack = `${frameHaystack}\n${visibleMarkerHaystack}`;
   const visibleContext = hasChallengeContext(`${title}\n${text}`);
   const hasPasswordField = /type\s*=\s*["']password["']|autocomplete\s*=\s*["'][^"']*(?:username|current-password)[^"']*["']/i.test(haystack);
   const explicitRateLimitText = /(?:too many requests|rate limit exceeded|temporarily blocked|slow down)/i.test(`${title}\n${text}`);
@@ -147,11 +149,10 @@ export function classifyChallenge(
   const visibleMarkerInMarkup = new Set<string>();
   for (const rule of RULES) {
     for (const needle of rule.needles) {
-      if (frameSources.some((source) => source.includes(needle))
-        || visibleMarkers.some((marker) => marker.includes(needle))) {
+      if (markerHaystack.includes(needle)) {
         markerInMarkup.add(needle);
       }
-      if (visibleMarkers.some((marker) => marker.includes(needle))) {
+      if (visibleMarkerHaystack.includes(needle)) {
         visibleMarkerInMarkup.add(needle);
       }
       let markerRegex = MARKER_REGEX_CACHE.get(needle);
@@ -167,7 +168,7 @@ export function classifyChallenge(
   }
   const matches: ChallengeMatch[] = [];
   for (const rule of RULES) {
-    const indicators = rule.needles.filter((needle) => haystack.includes(needle));
+    const indicators = rule.needles.filter((needle) => haystack.includes(needle) || markerHaystack.includes(needle));
     const widgetOnly = WIDGET_ONLY_KINDS.has(rule.kind);
     const genericChallenge = rule.kind === "generic-challenge";
     const authWall = rule.kind === "auth-wall";
@@ -209,20 +210,21 @@ function escapeRegExp(value: string): string {
 }
 
 function boundedLower(value: string | undefined, limit: number): string {
-  return typeof value === "string" ? value.slice(0, limit).toLowerCase() : "";
+  return typeof value === "string" ? value.slice(0, limit).toLowerCase().slice(0, limit) : "";
 }
 
 function boundedList(values: string[] | undefined): string[] {
   const bounded: string[] = [];
   let remaining = MAX_LIST_CHARS;
-  for (const value of values ?? []) {
+  for (const value of Array.isArray(values) ? values : []) {
     if (bounded.length >= MAX_LIST_ITEMS || remaining <= 0) {
       break;
     }
     if (typeof value !== "string") {
       continue;
     }
-    const item = value.slice(0, Math.min(MAX_LIST_ITEM_CHARS, remaining)).toLowerCase();
+    const itemLimit = Math.min(MAX_LIST_ITEM_CHARS, remaining);
+    const item = value.slice(0, itemLimit).toLowerCase().slice(0, itemLimit);
     bounded.push(item);
     remaining -= item.length;
   }

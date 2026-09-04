@@ -98,6 +98,38 @@ describe("classifyChallenge evidence", () => {
     const geetest = classifyChallenge({ visibleMarkers: ["DIV geetest-v4 geetest"] });
     expect(geetest.matches[0]?.kind).toBe("geetest-v4");
   });
+
+  it("keeps later widget markers visible after hostile first list entries", () => {
+    const result = classifyChallenge({
+      title: "Widget",
+      text: "Please verify you are human to continue.",
+      frameSources: ["x".repeat(10_000), "https://www.google.com/recaptcha/api2/anchor"],
+      visibleMarkers: ["x".repeat(10_000), "DIV cf-turnstile"],
+    });
+    expect(result.matches.map((match) => match.kind)).toEqual(expect.arrayContaining(["recaptcha", "cloudflare-turnstile"]));
+  });
+
+  it("ignores markers beyond item and aggregate list limits deterministically", () => {
+    const beyondItemLimit = Array.from({ length: 200 }, () => "ordinary");
+    beyondItemLimit.push("DIV recaptcha-enterprise");
+    expect(classifyChallenge({ visibleMarkers: beyondItemLimit }).matches).toEqual([]);
+
+    const beyondAggregateLimit = [
+      ...Array.from({ length: 25 }, () => "x".repeat(4_000)),
+      "DIV recaptcha-enterprise",
+    ];
+    expect(classifyChallenge({ visibleMarkers: beyondAggregateLimit }).matches).toEqual([]);
+  });
+
+  it("preserves case-insensitive marker behavior with Unicode evidence", () => {
+    const result = classifyChallenge({
+      title: "Überprüfung",
+      text: "PLEASE VERIFY YOU ARE HUMAN",
+      visibleMarkers: ["DIV G-RECAPTCHA Ü"],
+    });
+    expect(result.matches.map((match) => match.kind)).toContain("recaptcha");
+    expect(result.matches.find((match) => match.kind === "generic-challenge")?.indicators).toEqual(expect.arrayContaining(["verify you are human"]));
+  });
 });
 
 describe("extended RULES: new challenge kinds", () => {
