@@ -15,12 +15,19 @@ import { canonicalizeAllowedFileRoots } from "./policy";
 const TransportSchema = z.enum(["stdio", "http"]);
 const BrowserModeSchema = z.enum(["disabled", "connect", "launch", "managed"]);
 const BrowserIdleTimeoutSchema = z.number().int().min(0).max(86_400_000);
-const ConfigPathSchema = z.string().trim().min(1).max(4_096);
-const DomainPatternSchema = z.string().trim().min(1).max(253).refine(isValidDomainPattern, "Domain patterns must be exact hostnames or *.-prefixed suffixes.");
-const HostPatternSchema = z.string().trim().min(1).max(255).refine(isValidHostPattern, "Host allowlists must contain hostnames or bracketed IPv6 addresses without ports.");
+const MAX_CONFIG_LIST_ENTRIES = 128;
+export const MAX_CONFIG_DOMAIN_PATTERN_CHARS = 253;
+export const MAX_CONFIG_HOST_PATTERN_CHARS = 255;
+export const MAX_CONFIG_FILE_ROOT_CHARS = 4_096;
+// This permits the largest valid file-root list plus separators while still
+// rejecting an oversized environment value before splitting or normalizing it.
+export const MAX_CONFIG_LIST_RAW_CHARS = MAX_CONFIG_LIST_ENTRIES * (MAX_CONFIG_FILE_ROOT_CHARS + 1);
+const ConfigPathSchema = z.string().trim().min(1).max(MAX_CONFIG_FILE_ROOT_CHARS);
+const DomainPatternSchema = z.string().trim().min(1).max(MAX_CONFIG_DOMAIN_PATTERN_CHARS).refine(isValidDomainPattern, "Domain patterns must be exact hostnames or *.-prefixed suffixes.");
+const HostPatternSchema = z.string().trim().min(1).max(MAX_CONFIG_HOST_PATTERN_CHARS).refine(isValidHostPattern, "Host allowlists must contain hostnames or bracketed IPv6 addresses without ports.");
 const ViewportDimensionSchema = z.number().int().min(1).max(10_000);
 const BrowserViewportSchema = z.object({ width: ViewportDimensionSchema, height: ViewportDimensionSchema }).strict();
-const ConfigList = <T extends z.ZodType>(schema: T) => z.array(schema).max(128);
+const ConfigList = <T extends z.ZodType>(schema: T) => z.array(schema).max(MAX_CONFIG_LIST_ENTRIES);
 const MAX_CONFIG_FILE_BYTES = 2_000_000;
 
 const RawConfigSchema = z
@@ -178,13 +185,32 @@ function resolveBrowserViewport(width: number | undefined, height: number | unde
   return { width, height };
 }
 
-function parseList(value: string | undefined, fallback: string[] = []): string[] {
-  if (value === undefined || value.trim() === "") {
-    return normalizeList(fallback);
+function parseList(value: string | undefined, fallback: readonly string[] = [], maxItemChars = MAX_CONFIG_FILE_ROOT_CHARS): string[] {
+  const source = value === undefined ? undefined : value;
+  if (source !== undefined && source.length > MAX_CONFIG_LIST_RAW_CHARS) {
+    throw new AppError("CONFIG_INVALID", `Configured comma-separated lists must be ${MAX_CONFIG_LIST_RAW_CHARS} characters or shorter.`);
   }
-  const items = value.split(",").map((item) => item.trim());
+  if (source !== undefined && source.trim() !== "") {
+    // Count before split so an entry flood cannot force a large temporary
+    // array or bypass the work bound through duplicate values.
+    let entries = 1;
+    for (let index = 0; index < source.length; index += 1) {
+      if (source.charCodeAt(index) === 44) entries += 1;
+      if (entries > MAX_CONFIG_LIST_ENTRIES) {
+        throw new AppError("CONFIG_INVALID", `Configured comma-separated lists must contain at most ${MAX_CONFIG_LIST_ENTRIES} entries.`);
+      }
+    }
+  } else if (fallback.length > MAX_CONFIG_LIST_ENTRIES) {
+    throw new AppError("CONFIG_INVALID", `Configured comma-separated lists must contain at most ${MAX_CONFIG_LIST_ENTRIES} entries.`);
+  }
+  const items = source !== undefined && source.trim() !== ""
+    ? source.split(",").map((item) => item.trim())
+    : fallback.map((item) => item.trim());
   if (items.some((item) => item.length === 0)) {
     throw new AppError("CONFIG_INVALID", "Configured comma-separated lists must not contain empty entries.");
+  }
+  if (items.some((item) => item.length > maxItemChars)) {
+    throw new AppError("CONFIG_INVALID", `Configured comma-separated list entries must be ${maxItemChars} characters or shorter.`);
   }
   return normalizeList(items);
 }
@@ -546,7 +572,7 @@ export function loadServerConfig(args: string[] = [], environment: NodeJS.Proces
 
   const dataDir = expandPath(environment.SMOOTH_OPERATOR_DATA_DIR ?? fileConfig.dataDir ?? join(homeDirectory, ".smooth-operator"), homeDirectory);
   const defaultBrowserDataDir = join(dataDir, "browser");
-  const configuredRoots = parseList(environment.SMOOTH_OPERATOR_ALLOWED_FILE_ROOTS, nestedSecurity.allowedFileRoots ?? []);
+  const configuredRoots = parseList(environment.SMOOTH_OPERATOR_ALLOWED_FILE_ROOTS, nestedSecurity.allowedFileRoots ?? [], MAX_CONFIG_FILE_ROOT_CHARS);
   // Default to private data directory; explicit allowlist required for other roots.
   const allowedFileRoots = canonicalizeAllowedFileRoots((configuredRoots.length > 0 ? configuredRoots : [join(dataDir, "files"), join(dataDir, "downloads")]).map((path) => expandPath(path, homeDirectory)));
 
@@ -571,8 +597,8 @@ export function loadServerConfig(args: string[] = [], environment: NodeJS.Proces
       path: (environment.SMOOTH_OPERATOR_HTTP_PATH ?? nestedHttp.path ?? "/mcp").trim(),
       token: environment.SMOOTH_OPERATOR_HTTP_TOKEN ?? nestedHttp.token,
       allowRemote: parseBoolean(environment.SMOOTH_OPERATOR_ALLOW_REMOTE_HTTP, nestedHttp.allowRemote ?? false),
-      allowedHosts: normalizeHostList(parseList(environment.SMOOTH_OPERATOR_ALLOWED_HOSTS, nestedHttp.allowedHosts ?? ["localhost", "127.0.0.1", "[::1]"])),
-      allowedOrigins: normalizeHostList(parseList(environment.SMOOTH_OPERATOR_ALLOWED_ORIGINS, nestedHttp.allowedOrigins ?? ["localhost", "127.0.0.1", "[::1]"])),
+      allowedHosts: normalizeHostList(parseList(environment.SMOOTH_OPERATOR_ALLOWED_HOSTS, nestedHttp.allowedHosts ?? ["localhost", "127.0.0.1", "[::1]"], MAX_CONFIG_HOST_PATTERN_CHARS)),
+      allowedOrigins: normalizeHostList(parseList(environment.SMOOTH_OPERATOR_ALLOWED_ORIGINS, nestedHttp.allowedOrigins ?? ["localhost", "127.0.0.1", "[::1]"], MAX_CONFIG_HOST_PATTERN_CHARS)),
       maxBodyBytes: parseInteger(environment.SMOOTH_OPERATOR_HTTP_MAX_BODY_BYTES, nestedHttp.maxBodyBytes ?? 2_000_000),
     },
     browser: {
@@ -595,8 +621,8 @@ export function loadServerConfig(args: string[] = [], environment: NodeJS.Proces
       idleTimeoutMs: parseInteger(environment.SMOOTH_OPERATOR_BROWSER_IDLE_TIMEOUT_MS, nestedBrowser.idleTimeoutMs ?? 0),
     },
     security: {
-      allowedDomains: normalizeDomainList(parseList(environment.SMOOTH_OPERATOR_ALLOWED_DOMAINS, nestedSecurity.allowedDomains ?? [])),
-      blockedDomains: normalizeDomainList(parseList(environment.SMOOTH_OPERATOR_BLOCKED_DOMAINS, nestedSecurity.blockedDomains ?? [])),
+      allowedDomains: normalizeDomainList(parseList(environment.SMOOTH_OPERATOR_ALLOWED_DOMAINS, nestedSecurity.allowedDomains ?? [], MAX_CONFIG_DOMAIN_PATTERN_CHARS)),
+      blockedDomains: normalizeDomainList(parseList(environment.SMOOTH_OPERATOR_BLOCKED_DOMAINS, nestedSecurity.blockedDomains ?? [], MAX_CONFIG_DOMAIN_PATTERN_CHARS)),
       allowedFileRoots,
       allowPrivateNetwork: parseBoolean(environment.SMOOTH_OPERATOR_ALLOW_PRIVATE_NETWORK, nestedSecurity.allowPrivateNetwork ?? false),
       allowEval: parseBoolean(environment.SMOOTH_OPERATOR_ALLOW_EVAL, nestedSecurity.allowEval ?? true),

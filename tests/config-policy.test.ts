@@ -7,7 +7,13 @@ import { describe, expect, it, vi } from "vitest";
 const dnsLookup = vi.hoisted(() => vi.fn());
 vi.mock("node:dns/promises", () => ({ lookup: dnsLookup }));
 
-import { loadServerConfig } from "@/server/config";
+import {
+  loadServerConfig,
+  MAX_CONFIG_DOMAIN_PATTERN_CHARS,
+  MAX_CONFIG_FILE_ROOT_CHARS,
+  MAX_CONFIG_HOST_PATTERN_CHARS,
+  MAX_CONFIG_LIST_RAW_CHARS,
+} from "@/server/config";
 import { AppError } from "@/server/errors";
 import { describeAllowedFileRoots, SecurityPolicy } from "@/server/policy";
 import { ServerRuntime } from "@/server/runtime";
@@ -125,6 +131,91 @@ describe("configuration", () => {
     expect(() => loadTestConfig([], { SMOOTH_OPERATOR_ALLOWED_HOSTS: "localhost:3344" })).toThrowError(/Configuration failed validation/);
     expect(() => loadTestConfig([], { SMOOTH_OPERATOR_ALLOWED_ORIGINS: "https://localhost" })).toThrowError(/Configuration failed validation/);
     expect(() => loadTestConfig([], { SMOOTH_OPERATOR_ALLOWED_DOMAINS: "*.[::1]" })).toThrowError(/Configuration failed validation/);
+  });
+
+  it("bounds raw environment list entries before normalization or filesystem traversal", async () => {
+    const rawDomainEntries = Array.from({ length: 129 }, (_, index) => `entry-${index}.example`);
+    const duplicateEntries = Array.from({ length: 129 }, () => "duplicate.example");
+    const cases: Array<{ name: string; environment: NodeJS.ProcessEnv; expected: RegExp }> = [
+      {
+        name: "entry count",
+        environment: { SMOOTH_OPERATOR_ALLOWED_DOMAINS: rawDomainEntries.join(",") },
+        expected: /at most 128 entries/,
+      },
+      {
+        name: "duplicate entry count",
+        environment: { SMOOTH_OPERATOR_ALLOWED_DOMAINS: duplicateEntries.join(",") },
+        expected: /at most 128 entries/,
+      },
+      {
+        name: "domain item length",
+        environment: { SMOOTH_OPERATOR_ALLOWED_DOMAINS: "a".repeat(MAX_CONFIG_DOMAIN_PATTERN_CHARS + 1) },
+        expected: /entries must be 253 characters or shorter/,
+      },
+      {
+        name: "host item length",
+        environment: { SMOOTH_OPERATOR_ALLOWED_HOSTS: "a".repeat(MAX_CONFIG_HOST_PATTERN_CHARS + 1) },
+        expected: /entries must be 255 characters or shorter/,
+      },
+      {
+        name: "file-root item length",
+        environment: { SMOOTH_OPERATOR_ALLOWED_FILE_ROOTS: `/definitely/nonexistent/${"a".repeat(MAX_CONFIG_FILE_ROOT_CHARS + 1)}` },
+        expected: /entries must be 4096 characters or shorter/,
+      },
+      {
+        name: "raw list length",
+        environment: { SMOOTH_OPERATOR_ALLOWED_DOMAINS: "x".repeat(MAX_CONFIG_LIST_RAW_CHARS + 1) },
+        expected: /lists must be .* characters or shorter/,
+      },
+    ];
+    for (const testCase of cases) {
+      let caught: unknown;
+      try {
+        loadTestConfig([], testCase.environment);
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught, testCase.name).toMatchObject({ code: "CONFIG_INVALID" });
+      expect(caught, testCase.name).toHaveProperty("message", expect.stringMatching(testCase.expected));
+    }
+    // This path is intentionally nonexistent and would otherwise reach the
+    // filesystem canonicalizer; the bounded item check must win first.
+    expect(() => loadTestConfig([], { SMOOTH_OPERATOR_ALLOWED_FILE_ROOTS: `/definitely/nonexistent/${"a".repeat(MAX_CONFIG_FILE_ROOT_CHARS + 1)}` })).not.toThrow(/must be directories/);
+  });
+
+  it("rejects oversized fallback arrays before file-root canonicalization", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "smooth-operator-config-list-fallback-"));
+    const configPath = join(directory, "config.json");
+    try {
+      await writeFile(configPath, JSON.stringify({ security: { allowedFileRoots: Array.from({ length: 129 }, (_, index) => `/definitely/nonexistent/${index}`) } }));
+      await chmod(configPath, 0o600);
+      let caught: unknown;
+      try {
+        loadTestConfig(["--config", configPath], {});
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toMatchObject({ code: "CONFIG_INVALID" });
+      expect(caught).toHaveProperty("message", expect.stringMatching(/schema validation/));
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("trims and deduplicates normal list values without changing their field", async () => {
+    const root = await mkdtemp(join(tmpdir(), "smooth-operator-config-list-normal-"));
+    try {
+      const config = loadTestConfig([], {
+        SMOOTH_OPERATOR_ALLOWED_DOMAINS: " example.com, example.com ",
+        SMOOTH_OPERATOR_ALLOWED_HOSTS: " localhost, localhost ",
+        SMOOTH_OPERATOR_ALLOWED_FILE_ROOTS: ` ${root}, ${root} `,
+      });
+      expect(config.security.allowedDomains).toEqual(["example.com"]);
+      expect(config.http.allowedHosts).toEqual(["localhost"]);
+      expect(config.security.allowedFileRoots).toHaveLength(1);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it("rejects a filesystem root as a configured file root", () => {
