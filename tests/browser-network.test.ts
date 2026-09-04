@@ -154,6 +154,107 @@ describe("NetworkJournal", () => {
     expect(journal.query().retainedCount).toBe(2);
   });
 
+  it("scans high-cardinality pages without materializing non-page results", () => {
+    const journal = new NetworkJournal({ capacity: 4, maxPages: 3 });
+    for (const pageId of ["page-a", "page-b", "page-c"]) {
+      for (let index = 0; index < 10; index += 1) {
+        journal.recordRequest({
+          pageId,
+          requestId: `${pageId}-${index}`,
+          url: `https://example.test/${pageId}/${index}`,
+          method: "GET",
+          resourceType: "Document",
+        });
+      }
+    }
+
+    const paginated = journal.query({ limit: 2, offset: 1 });
+    expect(paginated.entries.map((entry) => entry.requestId)).toEqual(["page-a-7", "page-a-8"]);
+    expect(paginated).toMatchObject({
+      offset: 1,
+      limit: 2,
+      total: 12,
+      returnedCount: 2,
+      omittedCount: 10,
+      hasMore: true,
+      retainedCount: 12,
+      capacity: 4,
+      evictedCount: 18,
+      capacityReached: true,
+    });
+
+    const searched = journal.search("PAGE-B", { limit: 1, offset: 2 });
+    expect(searched.entries.map((entry) => entry.requestId)).toEqual(["page-b-8"]);
+    expect(searched).toMatchObject({
+      offset: 2,
+      limit: 1,
+      total: 4,
+      returnedCount: 1,
+      omittedCount: 3,
+      hasMore: true,
+      retainedCount: 12,
+      evictedCount: 18,
+      capacityReached: true,
+    });
+
+    const offsetPastEnd = journal.query({ offset: 99, limit: 2 });
+    expect(offsetPastEnd).toMatchObject({
+      entries: [],
+      total: 12,
+      returnedCount: 0,
+      omittedCount: 12,
+      hasMore: false,
+      retainedCount: 12,
+      evictedCount: 18,
+    });
+
+    const returned = paginated.entries[0];
+    if (!returned) throw new Error("Expected a paginated entry.");
+    returned.url = "https://mutated.invalid/";
+    expect(journal.query({ limit: 1, offset: 1 }).entries[0]?.url).toBe("https://example.test/page-a/7");
+
+    journal.recordRequest({ pageId: "page-d", requestId: "page-d-0", url: "https://example.test/page-d/0", method: "GET" });
+    expect(journal.query()).toMatchObject({ retainedCount: 9, evictedCount: 22, capacityReached: true });
+    expect(journal.query({ pageId: "page-b" })).toMatchObject({ retainedCount: 4, evictedCount: 6, capacityReached: true });
+  });
+
+  it("rebuilds case-insensitive projections after response updates without mutating inputs", () => {
+    const journal = new NetworkJournal({ capacity: 10 });
+    const request = {
+      pageId: "page-1",
+      requestId: "Request-Updated",
+      url: "https://example.test/before",
+      method: "post",
+      resourceType: "Document",
+    };
+    const response = {
+      pageId: "page-1",
+      requestId: "Request-Updated",
+      url: "https://example.test/AFTER",
+      status: 202,
+      resourceType: "FETCH",
+    };
+    const requestBefore = { ...request };
+    const responseBefore = { ...response };
+
+    journal.recordRequest(request);
+    journal.recordResponse(response);
+
+    expect(request).toEqual(requestBefore);
+    expect(response).toEqual(responseBefore);
+    const filtered = journal.query({
+      pageId: "page-1",
+      requestId: "UPDATED",
+      url: "after",
+      method: "POST",
+      resourceType: "fetch",
+      status: 202,
+    });
+    expect(filtered.entries).toHaveLength(1);
+    expect(filtered.entries[0]).toMatchObject({ requestId: "Request-Updated", url: "https://example.test/AFTER", resourceType: "FETCH", status: 202 });
+    expect(journal.search("updated", { pageId: "page-1", resourceType: "FETCH" }).entries).toHaveLength(1);
+  });
+
   it("rejects invalid journal configuration and page identifiers", () => {
     expect(() => new NetworkJournal({ capacity: 0 })).toThrow(/capacity/i);
     const journal = new NetworkJournal();

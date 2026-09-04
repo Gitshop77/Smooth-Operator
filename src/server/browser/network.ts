@@ -97,6 +97,9 @@ const MAX_RESOURCE_TYPE_CHARS = 64;
 interface StoredEntry {
   entry: NetworkJournalEntry;
   searchText: string;
+  requestIdLower: string;
+  urlLower: string;
+  resourceTypeLower?: string;
 }
 
 interface PageJournal {
@@ -157,11 +160,14 @@ export class NetworkJournal {
     const requestId = normalizeRequiredIdentifier(event?.requestId, "requestId", MAX_REQUEST_ID_CHARS);
     const existing = page.entries.get(requestId);
     const timestamp = normalizeTimestamp(event?.timestamp);
+    const resourceType = event.resourceType === undefined
+      ? undefined
+      : normalizeOptionalText(event.resourceType, MAX_RESOURCE_TYPE_CHARS);
     const entry: NetworkJournalEntry = existing
       ? {
         ...existing.entry,
         ...(event.url !== undefined ? { url: safeNetworkUrl(event.url) } : {}),
-        ...(event.resourceType !== undefined ? { resourceType: normalizeOptionalText(event.resourceType, MAX_RESOURCE_TYPE_CHARS) } : {}),
+        ...(event.resourceType !== undefined ? { resourceType } : {}),
         ...(isValidStatus(event.status) ? { status: event.status } : {}),
         responseTimestamp: timestamp,
       }
@@ -170,7 +176,7 @@ export class NetworkJournal {
         requestId,
         url: event.url === undefined ? "[URL_UNAVAILABLE]" : safeNetworkUrl(event.url),
         method: "UNKNOWN",
-        ...(normalizeOptionalText(event.resourceType, MAX_RESOURCE_TYPE_CHARS) ? { resourceType: normalizeOptionalText(event.resourceType, MAX_RESOURCE_TYPE_CHARS) } : {}),
+        ...(resourceType ? { resourceType } : {}),
         ...(isValidStatus(event.status) ? { status: event.status } : {}),
         requestTimestamp: timestamp,
         responseTimestamp: timestamp,
@@ -183,35 +189,7 @@ export class NetworkJournal {
   /** Query retained records using deterministic metadata filters and paging. */
   query(query: NetworkJournalQuery = {}): NetworkJournalPage {
     const normalized = normalizeQuery(query);
-    const selectedPages = normalized.pageId === undefined
-      ? [...this.pages.entries()]
-      : [[normalized.pageId, this.pages.get(normalized.pageId)] as const];
-    const retainedCount = selectedPages.reduce((total, [, page]) => total + (page?.entries.size ?? 0), 0);
-    const evictedCount = selectedPages.reduce((total, [, page]) => total + (page?.evictedCount ?? 0), 0) + (normalized.pageId === undefined ? this.evictedPageCount : 0);
-    const capacityReached = selectedPages.some(([, page]) => (page?.entries.size ?? 0) >= this.capacity || (page?.evictedCount ?? 0) > 0);
-    const matches: NetworkJournalEntry[] = [];
-    for (const [, page] of selectedPages) {
-      if (!page) continue;
-      for (const stored of page.entries.values()) {
-        if (matchesFilter(stored.entry, normalized)) {
-          matches.push(stored.entry);
-        }
-      }
-    }
-    const entries = matches.slice(normalized.offset, normalized.offset + normalized.limit).map(cloneEntry);
-    return {
-      entries,
-      offset: normalized.offset,
-      limit: normalized.limit,
-      total: matches.length,
-      returnedCount: entries.length,
-      omittedCount: Math.max(0, matches.length - entries.length),
-      hasMore: normalized.offset + entries.length < matches.length,
-      retainedCount,
-      capacity: this.capacity,
-      evictedCount,
-      capacityReached,
-    };
+    return this.scan(normalized, (stored) => matchesFilter(stored, normalized));
   }
 
   /** Search all safe metadata fields using one bounded case-insensitive scan. */
@@ -221,25 +199,16 @@ export class NetworkJournal {
       throw new RangeError("searchText must be a non-empty string.");
     }
     const normalized = normalizeQuery(options);
-    const selectedPages = normalized.pageId === undefined
-      ? [...this.pages.entries()]
-      : [[normalized.pageId, this.pages.get(normalized.pageId)] as const];
-    const matches: NetworkJournalEntry[] = [];
-    for (const [, page] of selectedPages) {
-      if (!page) continue;
-      for (const stored of page.entries.values()) {
-        if (stored.searchText.includes(query) && matchesFilter(stored.entry, normalized)) {
-          matches.push(stored.entry);
-        }
-      }
-    }
-    return this.pageFromMatches(matches, normalized, selectedPages);
+    return this.scan(normalized, (stored) => stored.searchText.includes(query) && matchesFilter(stored, normalized));
   }
 
   /** Remove all records, or only records associated with one page. */
   clear(pageId?: string): { clearedCount: number; retainedCount: number } {
     if (pageId === undefined) {
-      const clearedCount = [...this.pages.values()].reduce((total, page) => total + page.entries.size, 0);
+      let clearedCount = 0;
+      for (const page of this.pages.values()) {
+        clearedCount += page.entries.size;
+      }
       this.pages.clear();
       this.evictedPageCount = 0;
       return { clearedCount, retainedCount: 0 };
@@ -262,22 +231,47 @@ export class NetworkJournal {
     };
   }
 
-  private pageFromMatches(matches: NetworkJournalEntry[], query: NormalizedQuery, selectedPages: ReadonlyArray<readonly [string, PageJournal | undefined]>): NetworkJournalPage {
-    const entries = matches.slice(query.offset, query.offset + query.limit).map(cloneEntry);
-    const retainedCount = selectedPages.reduce((total, [, page]) => total + (page?.entries.size ?? 0), 0);
-    const evictedCount = selectedPages.reduce((total, [, page]) => total + (page?.evictedCount ?? 0), 0) + (query.pageId === undefined ? this.evictedPageCount : 0);
+  private scan(query: NormalizedQuery, matches: (stored: StoredEntry) => boolean): NetworkJournalPage {
+    const entries: NetworkJournalEntry[] = [];
+    const pageEnd = Math.min(Number.MAX_SAFE_INTEGER, query.offset + query.limit);
+    let total = 0;
+    let retainedCount = 0;
+    let evictedCount = query.pageId === undefined ? this.evictedPageCount : 0;
+    let capacityReached = false;
+    const visit = (page: PageJournal | undefined): void => {
+      if (!page) return;
+      retainedCount += page.entries.size;
+      evictedCount += page.evictedCount;
+      if (page.entries.size >= this.capacity || page.evictedCount > 0) {
+        capacityReached = true;
+      }
+      for (const stored of page.entries.values()) {
+        if (!matches(stored)) continue;
+        if (total >= query.offset && total < pageEnd) {
+          entries.push(cloneEntry(stored.entry));
+        }
+        total += 1;
+      }
+    };
+    if (query.pageId === undefined) {
+      for (const page of this.pages.values()) {
+        visit(page);
+      }
+    } else {
+      visit(this.pages.get(query.pageId));
+    }
     return {
       entries,
       offset: query.offset,
       limit: query.limit,
-      total: matches.length,
+      total,
       returnedCount: entries.length,
-      omittedCount: Math.max(0, matches.length - entries.length),
-      hasMore: query.offset + entries.length < matches.length,
+      omittedCount: Math.max(0, total - entries.length),
+      hasMore: query.offset + entries.length < total,
       retainedCount,
       capacity: this.capacity,
       evictedCount,
-      capacityReached: selectedPages.some(([, page]) => (page?.entries.size ?? 0) >= this.capacity || (page?.evictedCount ?? 0) > 0),
+      capacityReached,
     };
   }
 
@@ -304,8 +298,18 @@ export class NetworkJournal {
   }
 
   private stored(entry: NetworkJournalEntry): StoredEntry {
-    const searchParts = [entry.pageId, entry.requestId, entry.url, entry.method, entry.resourceType ?? "", entry.status === undefined ? "" : String(entry.status)];
-    return { entry, searchText: searchParts.join(" ").toLocaleLowerCase("en-US") };
+    const requestIdLower = entry.requestId.toLocaleLowerCase("en-US");
+    const urlLower = entry.url.toLocaleLowerCase("en-US");
+    const resourceTypeLower = entry.resourceType?.toLocaleLowerCase("en-US");
+    const searchParts = [
+      entry.pageId.toLocaleLowerCase("en-US"),
+      requestIdLower,
+      urlLower,
+      entry.method.toLocaleLowerCase("en-US"),
+      resourceTypeLower ?? "",
+      entry.status === undefined ? "" : String(entry.status),
+    ];
+    return { entry, requestIdLower, urlLower, resourceTypeLower, searchText: searchParts.join(" ") };
   }
 
   private enforcePageCapacity(page: PageJournal): void {
@@ -318,7 +322,11 @@ export class NetworkJournal {
   }
 
   private retainedCount(): number {
-    return [...this.pages.values()].reduce((total, page) => total + page.entries.size, 0);
+    let retainedCount = 0;
+    for (const page of this.pages.values()) {
+      retainedCount += page.entries.size;
+    }
+    return retainedCount;
   }
 }
 
@@ -333,25 +341,32 @@ function normalizeQuery(query: NetworkJournalQuery): NormalizedQuery {
   }
   const offset = boundedNonnegativeInteger(query.offset ?? 0, "offset");
   const limit = boundedPositiveInteger(query.limit ?? DEFAULT_LIMIT, MAX_LIMIT, "limit");
+  const requestId = query.requestId === undefined
+    ? undefined
+    : normalizeOptionalText(query.requestId, MAX_REQUEST_ID_CHARS)?.toLocaleLowerCase("en-US");
+  const resourceType = query.resourceType === undefined
+    ? undefined
+    : normalizeOptionalText(query.resourceType, MAX_RESOURCE_TYPE_CHARS)?.toLocaleLowerCase("en-US");
   return {
     ...(query.pageId === undefined ? {} : { pageId: normalizeRequiredIdentifier(query.pageId, "pageId", MAX_PAGE_ID_CHARS) }),
-    ...(query.requestId === undefined ? {} : { requestId: normalizeOptionalText(query.requestId, MAX_REQUEST_ID_CHARS) }),
+    ...(requestId === undefined ? {} : { requestId }),
     ...(query.url === undefined ? {} : { url: normalizeSearchText(query.url) }),
     ...(query.method === undefined ? {} : { method: normalizeMethod(query.method) }),
     ...(query.status === undefined ? {} : { status: normalizeStatus(query.status) }),
-    ...(query.resourceType === undefined ? {} : { resourceType: normalizeOptionalText(query.resourceType, MAX_RESOURCE_TYPE_CHARS) }),
+    ...(resourceType === undefined ? {} : { resourceType }),
     offset,
     limit,
   };
 }
 
-function matchesFilter(entry: NetworkJournalEntry, filter: NetworkJournalFilter): boolean {
+function matchesFilter(stored: StoredEntry, filter: NetworkJournalFilter): boolean {
+  const entry = stored.entry;
   if (filter.pageId !== undefined && entry.pageId !== filter.pageId) return false;
-  if (filter.requestId !== undefined && !entry.requestId.toLocaleLowerCase("en-US").includes(filter.requestId.toLocaleLowerCase("en-US"))) return false;
-  if (filter.url !== undefined && !entry.url.toLocaleLowerCase("en-US").includes(filter.url.toLocaleLowerCase("en-US"))) return false;
+  if (filter.requestId !== undefined && !stored.requestIdLower.includes(filter.requestId)) return false;
+  if (filter.url !== undefined && !stored.urlLower.includes(filter.url)) return false;
   if (filter.method !== undefined && entry.method !== filter.method) return false;
   if (filter.status !== undefined && entry.status !== filter.status) return false;
-  if (filter.resourceType !== undefined && entry.resourceType?.toLocaleLowerCase("en-US") !== filter.resourceType.toLocaleLowerCase("en-US")) return false;
+  if (filter.resourceType !== undefined && stored.resourceTypeLower !== filter.resourceType) return false;
   return true;
 }
 
