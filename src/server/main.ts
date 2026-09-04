@@ -69,6 +69,12 @@ const HTTP_NOT_FOUND_BODY = JSON.stringify({ error: "not_found" });
 const HTTP_SHUTTING_DOWN_BODY = JSON.stringify({ error: "server_shutting_down" });
 const HTTP_BUSY_BODY = JSON.stringify({ error: "server_busy" });
 const HTTP_UNAUTHORIZED_BODY = JSON.stringify({ error: "unauthorized" });
+const HTTP_JSON_HEADERS = {
+  "content-type": "application/json",
+  "cache-control": "no-store",
+  "x-content-type-options": "nosniff",
+} as const;
+const HTTP_CORS_ALLOW_HEADERS = "authorization, content-type, accept, mcp-protocol-version, mcp-session-id, last-event-id";
 const HTTP_UNSUPPORTED_MEDIA_BODY = JSON.stringify({
   jsonrpc: "2.0",
   error: { code: -32_000, message: "Unsupported Media Type: Content-Type must be application/json" },
@@ -224,8 +230,7 @@ async function serveHttp(runtime: ServerRuntime, shutdown: (reason: string) => P
     request.on("error", (error: unknown) => runtime.logger.error("MCP HTTP request error", safeErrorDiagnostic(error)));
     if (!accepting) {
       closeIncompleteRequestAfterResponse(request, response);
-      response.writeHead(503, { "content-type": "application/json", "retry-after": "1" });
-      response.end(HTTP_SHUTTING_DOWN_BODY);
+      writeNativeJsonResponse(response, 503, HTTP_SHUTTING_DOWN_BODY);
       return;
     }
     if (request.aborted) {
@@ -238,15 +243,14 @@ async function serveHttp(runtime: ServerRuntime, shutdown: (reason: string) => P
     const isHealthPath = requestPathMatches(request, healthPath);
     if (!requestPathMatches(request, config.http.path) && !isHealthPath) {
       closeIncompleteRequestAfterResponse(request, response);
-      response.writeHead(404, { "content-type": "application/json" });
-      response.end(HTTP_NOT_FOUND_BODY);
+      writeNativeJsonResponse(response, 404, HTTP_NOT_FOUND_BODY);
       return;
     }
     if (request.method === "OPTIONS") {
       closeIncompleteRequestAfterResponse(request, response);
       response.writeHead(204, {
         "access-control-allow-methods": "GET, POST, DELETE, OPTIONS",
-        "access-control-allow-headers": request.headers["access-control-request-headers"] ?? "authorization, content-type, accept, mcp-protocol-version, mcp-session-id, last-event-id",
+        "access-control-allow-headers": HTTP_CORS_ALLOW_HEADERS,
         "access-control-expose-headers": "Mcp-Session-Id, WWW-Authenticate",
         "access-control-max-age": "600",
       });
@@ -255,41 +259,40 @@ async function serveHttp(runtime: ServerRuntime, shutdown: (reason: string) => P
     }
     if (!authorized(request, expectedAuthDigest)) {
       closeIncompleteRequestAfterResponse(request, response);
-      response.writeHead(401, { "content-type": "application/json", "www-authenticate": "Bearer" });
-      response.end(HTTP_UNAUTHORIZED_BODY);
+      writeNativeJsonResponse(response, 401, HTTP_UNAUTHORIZED_BODY, { "www-authenticate": "Bearer" });
       return;
     }
     if (isHealthPath) {
       if (request.method !== "GET" && request.method !== "HEAD") {
         closeIncompleteRequestAfterResponse(request, response);
-        response.writeHead(405, { "content-type": "application/json", allow: "GET, HEAD, OPTIONS" });
-        response.end(JSON.stringify({ error: "method_not_allowed" }));
+        writeNativeJsonResponse(response, 405, JSON.stringify({ error: "method_not_allowed" }), { allow: "GET, HEAD, OPTIONS" });
         return;
       }
       const health = runtime.health();
       const ready = health.ready === true;
-      const payload = {
-        status: health.status,
-        ready,
-        server: health.server,
-        transport: health.transport,
-        checks: health.checks,
-      };
       closeIncompleteRequestAfterResponse(request, response);
-      response.writeHead(ready ? 200 : 503, {
-        "content-type": "application/json",
-        "cache-control": "no-store",
-        "x-content-type-options": "nosniff",
-      });
-      response.end(JSON.stringify(redactValue(payload)));
+      const status = ready ? 200 : 503;
+      if (request.method === "HEAD") {
+        // A HEAD health check has the same native status/headers without
+        // doing redaction or JSON serialization for a body that is discarded.
+        writeNativeJsonResponse(response, status, undefined, { "transfer-encoding": "chunked" });
+      } else {
+        const payload = {
+          status: health.status,
+          ready,
+          server: health.server,
+          transport: health.transport,
+          checks: health.checks,
+        };
+        writeNativeJsonResponse(response, status, JSON.stringify(redactValue(payload)), { "transfer-encoding": "chunked" });
+      }
       return;
     }
     let streamPool = isPotentialHttpStream(request) ? activeHttpStreams : activeHttpRequests;
     const poolLimit = streamPool === activeHttpStreams ? MAX_HTTP_STREAM_CONCURRENCY : MAX_HTTP_CONCURRENCY;
     if (streamPool.size >= poolLimit) {
       closeIncompleteRequestAfterResponse(request, response);
-      response.writeHead(503, { "content-type": "application/json", "retry-after": "1" });
-      response.end(HTTP_BUSY_BODY);
+      writeNativeJsonResponse(response, 503, HTTP_BUSY_BODY);
       return;
     }
     const slot: { pending?: Promise<void> } = {};
@@ -334,12 +337,8 @@ async function serveHttp(runtime: ServerRuntime, shutdown: (reason: string) => P
           response.setHeader("connection", "close");
           closeIncompleteRequestAfterResponse(request, response);
         }
-        response.writeHead(status, { "content-type": "application/json" });
-        if (response.writableEnded || response.destroyed) {
-          return;
-        }
         const code = status === 408 ? "request_timeout" : status === 413 ? "request_too_large" : status === 499 ? "request_aborted" : status === 503 ? "server_busy" : "internal_error";
-        response.end(JSON.stringify({ error: code }));
+        writeNativeJsonResponse(response, status, JSON.stringify({ error: code }));
       } catch (responseError) {
         runtime.logger.error("MCP HTTP error response failed", safeErrorDiagnostic(responseError));
       }
@@ -349,6 +348,7 @@ async function serveHttp(runtime: ServerRuntime, shutdown: (reason: string) => P
   });
   server.requestTimeout = HTTP_REQUEST_TIMEOUT_MS;
   server.headersTimeout = HTTP_HEADERS_TIMEOUT_MS;
+  server.maxRequestsPerSocket = 1_000;
 
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -450,9 +450,26 @@ function validateRequestOrigin(request: IncomingMessage, response: import("node:
 function rejectHttpHeader(request: IncomingMessage, response: import("node:http").ServerResponse, message: string): false {
   response.setHeader("connection", "close");
   closeIncompleteRequestAfterResponse(request, response);
-  response.writeHead(403, { "content-type": "application/json" });
-  response.end(JSON.stringify({ jsonrpc: "2.0", error: { code: -32_000, message }, id: null }));
+  writeNativeJsonResponse(response, 403, JSON.stringify({ jsonrpc: "2.0", error: { code: -32_000, message }, id: null }));
   return false;
+}
+
+function writeNativeJsonResponse(
+  response: import("node:http").ServerResponse,
+  status: number,
+  body?: string,
+  headers: Record<string, string> = {},
+): void {
+  response.writeHead(status, {
+    ...HTTP_JSON_HEADERS,
+    ...(status === 503 ? { "retry-after": "1" } : {}),
+    ...headers,
+  });
+  if (body !== undefined) {
+    response.end(body);
+  } else {
+    response.end();
+  }
 }
 
 function setCorsHeaders(request: IncomingMessage, response: import("node:http").ServerResponse): void {
@@ -493,8 +510,7 @@ async function dispatchHttpRequest(
   if (request.method?.toUpperCase() === "POST" && (typeof contentType !== "string" || !sdkIsJsonContentType(contentType))) {
     response.setHeader("connection", "close");
     closeIncompleteRequestAfterResponse(request, response);
-    response.writeHead(415, { "content-type": "application/json" });
-    response.end(HTTP_UNSUPPORTED_MEDIA_BODY);
+    writeNativeJsonResponse(response, 415, HTTP_UNSUPPORTED_MEDIA_BODY);
     return;
   }
   const contentLength = Number(request.headers["content-length"] ?? 0);

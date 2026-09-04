@@ -55,15 +55,28 @@ describe("HTTP transport", () => {
       signal: AbortSignal.timeout(5_000),
     });
     expect(health.status).toBe(200);
+    expect(health.headers.get("content-type")).toContain("application/json");
     expect(health.headers.get("cache-control")).toBe("no-store");
+    expect(health.headers.get("x-content-type-options")).toBe("nosniff");
     expect(await health.json()).toMatchObject({ status: "ok", ready: true, checks: { runtime: "ready", research: "ready" } });
 
     const unauthorizedHealth = await fetch(`${endpoint}/healthz`, { signal: AbortSignal.timeout(5_000) });
     expect(unauthorizedHealth.status).toBe(401);
+    expect(unauthorizedHealth.headers.get("content-type")).toContain("application/json");
+    expect(unauthorizedHealth.headers.get("cache-control")).toBe("no-store");
+    expect(unauthorizedHealth.headers.get("x-content-type-options")).toBe("nosniff");
     const healthPreflight = await fetch(`${endpoint}/healthz`, { method: "OPTIONS", headers: { Origin: "http://localhost" } });
     expect(healthPreflight.status).toBe(204);
     const healthPost = await fetch(`${endpoint}/healthz`, { method: "POST", headers: { Authorization: `Bearer ${token}`, "content-type": "application/json" }, body: "{}" });
     expect(healthPost.status).toBe(405);
+    expect(healthPost.headers.get("cache-control")).toBe("no-store");
+    expect(healthPost.headers.get("x-content-type-options")).toBe("nosniff");
+    const healthHead = await fetch(`${endpoint}/healthz`, { method: "HEAD", headers: { Authorization: `Bearer ${token}` } });
+    expect(healthHead.status).toBe(health.status);
+    for (const name of ["content-type", "cache-control", "x-content-type-options", "transfer-encoding"]) {
+      expect(healthHead.headers.get(name), `HEAD ${name}`).toBe(health.headers.get(name));
+    }
+    expect(await healthHead.text()).toBe("");
 
     const slowUnauthorized = await rawSlowBodyResponse(port, "/mcp", {
       Authorization: "Bearer wrong-token",
@@ -98,30 +111,45 @@ describe("HTTP transport", () => {
     });
     const initializeBody = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "1" } } });
 
-    expect((await request()).status).toBe(401);
-    expect((await request({ Authorization: `Bearer ${token}`, Origin: "https://evil.example" })).status).toBe(403);
+    const unauthorized = await request();
+    expect(unauthorized.status).toBe(401);
+    expect(unauthorized.headers.get("content-type")).toContain("application/json");
+    expect(unauthorized.headers.get("cache-control")).toBe("no-store");
+    expect(unauthorized.headers.get("x-content-type-options")).toBe("nosniff");
+    const rejectedOriginFetch = await request({ Authorization: `Bearer ${token}`, Origin: "https://evil.example" });
+    expect(rejectedOriginFetch.status).toBe(403);
+    expect(rejectedOriginFetch.headers.get("content-type")).toContain("application/json");
+    expect(rejectedOriginFetch.headers.get("cache-control")).toBe("no-store");
+    expect(rejectedOriginFetch.headers.get("x-content-type-options")).toBe("nosniff");
     const rejectedHost = await rawPostResponse(port, { Host: "user:secret@evil.example", Authorization: `Bearer ${token}` }, initializeBody);
     expect(rejectedHost.status).toBe(403);
     expect(rejectedHost.body).toContain("Host header is not allowed.");
     expect(rejectedHost.body).not.toContain("secret");
     expect(rejectedHost.body).not.toContain("evil.example");
+    expect(rejectedHost.headers["content-type"]).toContain("application/json");
+    expect(rejectedHost.headers["cache-control"]).toBe("no-store");
+    expect(rejectedHost.headers["x-content-type-options"]).toBe("nosniff");
     const rejectedOrigin = await rawPostResponse(port, { Origin: "https://user:secret@evil.example/path", Authorization: `Bearer ${token}` }, initializeBody);
     expect(rejectedOrigin.status).toBe(403);
     expect(rejectedOrigin.body).toContain("Origin header is not allowed.");
     expect(rejectedOrigin.body).not.toContain("secret");
     expect(rejectedOrigin.body).not.toContain("evil.example");
+    expect(rejectedOrigin.headers["content-type"]).toContain("application/json");
+    expect(rejectedOrigin.headers["cache-control"]).toBe("no-store");
+    expect(rejectedOrigin.headers["x-content-type-options"]).toBe("nosniff");
     const preflight = await fetch(endpoint, {
       method: "OPTIONS",
       headers: {
         Origin: "http://localhost",
         "Access-Control-Request-Method": "POST",
-        "Access-Control-Request-Headers": "authorization, content-type, mcp-protocol-version",
+        "Access-Control-Request-Headers": "x-malicious-header, authorization, x-secret-token",
       },
     });
     expect(preflight.status).toBe(204);
     expect(preflight.headers.get("access-control-allow-origin")).toBe("http://localhost");
     expect(preflight.headers.get("access-control-allow-methods")).toContain("POST");
-    expect(preflight.headers.get("access-control-allow-headers")).toContain("mcp-protocol-version");
+    expect(preflight.headers.get("access-control-allow-headers")).toBe("authorization, content-type, accept, mcp-protocol-version, mcp-session-id, last-event-id");
+    expect(preflight.headers.get("access-control-allow-headers")).not.toContain("x-malicious-header");
     expect(await rawPost(port, { Host: "evil.example", Authorization: `Bearer ${token}` }, initializeBody)).toBe(403);
     const wrongPath = await fetch(`http://127.0.0.1:${port}/not-mcp`, {
       method: "POST",
@@ -129,6 +157,9 @@ describe("HTTP transport", () => {
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "1" } } }),
     });
     expect(wrongPath.status).toBe(404);
+    expect(wrongPath.headers.get("content-type")).toContain("application/json");
+    expect(wrongPath.headers.get("cache-control")).toBe("no-store");
+    expect(wrongPath.headers.get("x-content-type-options")).toBe("nosniff");
     expect((await request({ Authorization: `Bearer ${token}` }, "2025-06-18")).status).toBe(200);
     const oversized = await fetch(endpoint, {
       method: "POST",
@@ -136,9 +167,29 @@ describe("HTTP transport", () => {
       body: "x".repeat(2_000),
     });
     expect(oversized.status).toBe(413);
+    expect(oversized.headers.get("content-type")).toContain("application/json");
+    expect(oversized.headers.get("cache-control")).toBe("no-store");
+    expect(oversized.headers.get("x-content-type-options")).toBe("nosniff");
     const unsupported = await rawPostResponse(port, { Authorization: `Bearer ${token}`, "content-type": "text/plain" }, initializeBody);
     expect(unsupported.status).toBe(415);
     expect(unsupported.body).toContain("Unsupported Media Type");
+    expect(unsupported.headers["content-type"]).toContain("application/json");
+    expect(unsupported.headers["cache-control"]).toBe("no-store");
+    expect(unsupported.headers["x-content-type-options"]).toBe("nosniff");
+    const heldRequests = await Promise.all(Array.from({ length: 32 }, () => openPendingPost(port, token)));
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      const busy = await rawPostResponse(port, { Authorization: `Bearer ${token}` }, initializeBody);
+      expect(busy.status).toBe(503);
+      expect(busy.body).toBe(JSON.stringify({ error: "server_busy" }));
+      expect(busy.headers["retry-after"]).toBe("1");
+      expect(busy.headers["content-type"]).toContain("application/json");
+      expect(busy.headers["cache-control"]).toBe("no-store");
+      expect(busy.headers["x-content-type-options"]).toBe("nosniff");
+    } finally {
+      for (const socket of heldRequests) socket.destroy();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
     const slowOversized = await rawSlowDeclaredOversizedPost(port, { Authorization: `Bearer ${token}` });
     expect(slowOversized.status).toBe(413);
     // The sender deliberately never finishes its declared body.  A response
@@ -264,7 +315,7 @@ async function rawPost(port: number, headers: Record<string, string>, body: stri
   return (await rawPostResponse(port, headers, body)).status;
 }
 
-async function rawPostResponse(port: number, headers: Record<string, string>, body: string): Promise<{ status: number; body: string }> {
+async function rawPostResponse(port: number, headers: Record<string, string>, body: string): Promise<{ status: number; body: string; headers: import("node:http").IncomingHttpHeaders }> {
   return new Promise((resolve, reject) => {
     const request = httpRequest({
       hostname: "127.0.0.1",
@@ -280,11 +331,32 @@ async function rawPostResponse(port: number, headers: Record<string, string>, bo
     }, (response) => {
       const chunks: Buffer[] = [];
       response.on("data", (chunk: Buffer | string) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
-      response.once("end", () => resolve({ status: response.statusCode ?? 0, body: Buffer.concat(chunks).toString("utf8") }));
+      response.once("end", () => resolve({ status: response.statusCode ?? 0, body: Buffer.concat(chunks).toString("utf8"), headers: response.headers }));
       response.once("error", reject);
     });
     request.once("error", reject);
     request.end(body);
+  });
+}
+
+async function openPendingPost(port: number, token: string): Promise<import("node:net").Socket> {
+  return new Promise((resolve, reject) => {
+    const socket = createConnection({ host: "127.0.0.1", port });
+    socket.once("connect", () => {
+      socket.once("error", () => undefined);
+      socket.write([
+        "POST /mcp HTTP/1.1",
+        `Host: 127.0.0.1:${port}`,
+        `Authorization: Bearer ${token}`,
+        "Content-Type: application/json",
+        "Content-Length: 100",
+        "Connection: keep-alive",
+        "",
+        "{",
+      ].join("\r\n"));
+      resolve(socket);
+    });
+    socket.once("error", reject);
   });
 }
 
