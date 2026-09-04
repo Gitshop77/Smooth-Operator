@@ -53,6 +53,97 @@ describe("native MCP registry", () => {
     expect(MCP_INSTRUCTIONS).toContain("internal connected-AI loop");
   });
 
+  it("gives weak agents actionable target guidance instead of a generic validation error", async () => {
+    const runtime = await ServerRuntime.create(testConfig());
+    const server = createMcpServer(runtime);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "weak-agent-validation-test", version: "1.0.0" });
+    try {
+      await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+      const click = await client.callTool({ name: "browser_click", arguments: {} });
+      const input = await client.callTool({ name: "browser_input", arguments: { text: "x" } });
+      expect(click.isError).toBe(true);
+      expect(input.isError).toBe(true);
+      expect(JSON.stringify(click)).toContain("target, ref, selector, or index");
+      expect(JSON.stringify(click)).toContain("coordinateX and coordinateY");
+      expect(JSON.stringify(input)).toContain("target, ref, selector, or index");
+      expect(JSON.stringify(click)).not.toBe("Invalid input");
+    } finally {
+      await client.close().catch(() => undefined);
+      await server.close().catch(() => undefined);
+      await runtime.close();
+    }
+  });
+
+  it("labels compatibility aliases and forwards all canonical element target forms", async () => {
+    const runtime = await ServerRuntime.create(testConfig());
+    const run = vi.spyOn(runtime, "run").mockResolvedValue({ ok: true });
+    const server = createMcpServer(runtime);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "target-form-forwarding-test", version: "1.0.0" });
+    try {
+      await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+      const tools = await client.listTools();
+      for (const alias of ["browser_list_tabs", "browser_get_state", "browser_type", "browser_extract_content", "browser_go_back", "browser_close_all", "browser_exec"]) {
+        const tool = tools.tools.find((candidate) => candidate.name === alias);
+        expect(tool?.title).toContain("Compatibility alias");
+        expect(tool?.description).toContain("Compatibility alias");
+      }
+      await client.callTool({ name: "browser_select", arguments: { ref: "e5", optionValue: "one" } });
+      await client.callTool({ name: "browser_upload", arguments: { index: 2, filePath: "/tmp/file.txt" } });
+      await client.callTool({ name: "browser_dropdown_options", arguments: { ref: "e5" } });
+      await client.callTool({ name: "browser_computed_style", arguments: { index: 2 } });
+      expect(run.mock.calls.map(([action]) => action)).toEqual([
+        { action: "select_dropdown", ref: "e5", optionValue: "one" },
+        { action: "upload_file", index: 2, filePath: "/tmp/file.txt" },
+        { action: "dropdown_options", ref: "e5" },
+        { action: "get_computed_style", index: 2 },
+      ]);
+    } finally {
+      await client.close().catch(() => undefined);
+      await server.close().catch(() => undefined);
+      await runtime.close();
+    }
+  });
+
+  it("keeps deterministic recovery suggestions in the MCP error envelope", async () => {
+    const runtime = await ServerRuntime.create(testConfig());
+    vi.spyOn(runtime, "run").mockRejectedValue(new AppError("STALE_REFERENCE", "Refresh this reference.", { retryable: true }));
+    const server = createMcpServer(runtime);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "recovery-envelope-test", version: "1.0.0" });
+    try {
+      await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+      const result = await client.callTool({ name: "browser_click", arguments: { ref: "e5" } });
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({ ok: false, error: { code: "STALE_REFERENCE", recovery: { tool: "browser_snapshot" } } });
+      expect(parseTextContent(result)).toEqual(result.structuredContent);
+    } finally {
+      await client.close().catch(() => undefined);
+      await server.close().catch(() => undefined);
+      await runtime.close();
+    }
+  });
+
+  it("advertises and forwards includeSnapshot for the observe-act-verify path", async () => {
+    const runtime = await ServerRuntime.create(testConfig());
+    const run = vi.spyOn(runtime, "run").mockResolvedValue({ ok: true });
+    const server = createMcpServer(runtime);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "include-snapshot-test", version: "1.0.0" });
+    try {
+      await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+      await client.callTool({ name: "browser_navigate", arguments: { url: "https://example.test", includeSnapshot: true } });
+      await client.callTool({ name: "browser_click", arguments: { index: 0, includeSnapshot: true } });
+      expect(run.mock.calls[0]?.[0]).toMatchObject({ action: "navigate", includeSnapshot: true });
+      expect(run.mock.calls[1]?.[0]).toMatchObject({ action: "click", index: 0, includeSnapshot: true });
+    } finally {
+      await client.close().catch(() => undefined);
+      await server.close().catch(() => undefined);
+      await runtime.close();
+    }
+  });
+
   it("completes a real MCP handshake and exposes only native server capabilities", async () => {
     const runtime = await ServerRuntime.create(testConfig());
     vi.spyOn(runtime, "webSearch").mockResolvedValue({ results: [] });
@@ -128,12 +219,13 @@ describe("native MCP registry", () => {
     expect(schemaText).not.toContain('"allowedDomains"');
     expect(schemaText).not.toContain('"use_vision"');
     expect(schemaText).not.toContain('"useVision"');
-    expect(hasRequiredBranch(toolByName.get("browser_click")?.inputSchema, "target")).toBe(true);
-    expect(hasRequiredBranch(toolByName.get("browser_click")?.inputSchema, "ref")).toBe(true);
-    expect(hasRequiredBranch(toolByName.get("browser_click")?.inputSchema, "coordinateX")).toBe(true);
-    expect(hasRequiredBranch(toolByName.get("browser_input")?.inputSchema, "selector")).toBe(true);
-    expect(hasRequiredBranch(toolByName.get("browser_switch_tab")?.inputSchema, "pageId")).toBe(true);
-    expect(hasRequiredBranch(toolByName.get("browser_switch_tab")?.inputSchema, "tab_id")).toBe(true);
+    expect(toolByName.get("browser_click")?.inputSchema).toMatchObject({ type: "object", additionalProperties: false });
+    expect(toolByName.get("browser_click")?.inputSchema).not.toHaveProperty("anyOf");
+    expect(toolByName.get("browser_click")?.inputSchema).toHaveProperty("properties.target");
+    expect(toolByName.get("browser_click")?.inputSchema).toHaveProperty("properties.coordinateX");
+    expect(toolByName.get("browser_input")?.inputSchema).toHaveProperty("properties.selector");
+    expect(toolByName.get("browser_switch_tab")?.inputSchema).toHaveProperty("properties.pageId");
+    expect(toolByName.get("browser_switch_tab")?.inputSchema).toHaveProperty("properties.tab_id");
     expect(JSON.stringify(toolByName.get("browser_press_and_hold")?.inputSchema)).toContain("durationMs");
     expect(toolByName.get("browser_press_and_hold")?.description).toContain("endCoordinateX");
     expect(toolByName.get("browser_press_and_hold")?.description).toContain("path");
@@ -536,6 +628,34 @@ describe("native MCP registry", () => {
     }
   });
 
+  it("forwards a bounded whole-batch deadline and publishes its bounds", async () => {
+    const runtime = await ServerRuntime.create(testConfig());
+    const runBatch = vi.spyOn(runtime, "runBatch").mockResolvedValue({ results: [] });
+    const server = createMcpServer(runtime);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "batch-deadline-forwarding-test", version: "1.0.0" });
+    try {
+      await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+      const tools = await client.listTools();
+      const batch = tools.tools.find((tool) => tool.name === "browser_batch");
+      const timeoutSchema = (batch?.inputSchema as { properties?: { timeoutMs?: { minimum?: number; maximum?: number } } }).properties?.timeoutMs;
+      expect(timeoutSchema).toMatchObject({ minimum: 100, maximum: 600_000 });
+      expect(batch?.description).toContain("120s default");
+      expect(batch?.description).toContain("600s max");
+
+      await client.callTool({ name: "browser_batch", arguments: { actions: [{ action: "wait", milliseconds: 0 }], timeoutMs: 1_234 } });
+      expect(runBatch).toHaveBeenCalledWith(
+        [{ action: "wait", milliseconds: 0 }],
+        { confirmDestructive: undefined, includeSnapshot: undefined, timeoutMs: 1_234 },
+        expect.any(AbortSignal),
+      );
+    } finally {
+      await client.close().catch(() => undefined);
+      await server.close().catch(() => undefined);
+      await runtime.close();
+    }
+  });
+
   it("forwards explicit tab targets for current-page observations", async () => {
     const runtime = await ServerRuntime.create(testConfig());
     const run = vi.spyOn(runtime, "run").mockResolvedValue({ ok: true });
@@ -769,23 +889,14 @@ describe("native MCP registry", () => {
   });
 });
 
-function isReadOnly(tool: { annotations?: { readOnlyHint?: boolean } } | undefined): boolean {
-  return tool?.annotations?.readOnlyHint === true;
+function parseTextContent(result: { content: Array<{ type: string; text?: string }> }): unknown {
+  const text = result.content.find((item) => item.type === "text")?.text;
+  if (text === undefined) {
+    throw new Error("MCP result did not include a text fallback.");
+  }
+  return JSON.parse(text) as unknown;
 }
 
-function hasRequiredBranch(schema: unknown, field: string): boolean {
-  if (!schema || typeof schema !== "object") {
-    return false;
-  }
-  const record = schema as Record<string, unknown>;
-  if (Array.isArray(record.required) && record.required.includes(field)) {
-    return true;
-  }
-  for (const key of ["anyOf", "oneOf", "allOf"]) {
-    const branches = record[key];
-    if (Array.isArray(branches) && branches.some((branch) => hasRequiredBranch(branch, field))) {
-      return true;
-    }
-  }
-  return false;
+function isReadOnly(tool: { annotations?: { readOnlyHint?: boolean } } | undefined): boolean {
+  return tool?.annotations?.readOnlyHint === true;
 }

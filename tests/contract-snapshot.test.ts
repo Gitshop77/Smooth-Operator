@@ -38,7 +38,14 @@ describe("public MCP contract snapshot", () => {
         generatedPrompts,
       };
       const fingerprint = createHash("sha256").update(JSON.stringify(manifest)).digest("hex");
-      expect(fingerprint).toBe("c003ecd57ce5ee4f8e8d0b40a9b22b0da16d26d3eb17db2d7923432b9b02dab2");
+      expect(fingerprint).toBe("dbdd31386d498b8c2fdf3c94543861f5f2d00e879acb175f2818ab34dd4dbf6f");
+
+      const metadata = manifest.tools.map(({ name, description, inputSchema }) => ({ name, description, inputSchema }));
+      const metadataBytes = new TextEncoder().encode(JSON.stringify(metadata)).byteLength;
+      expect(metadataBytes).toBeLessThanOrEqual(48_000);
+      const click = metadata.find((tool) => tool.name === "browser_click");
+      expect(new TextEncoder().encode(JSON.stringify(click)).byteLength).toBeLessThanOrEqual(3_000);
+      expect(new TextEncoder().encode(MCP_INSTRUCTIONS).byteLength).toBeLessThanOrEqual(2_300);
 
       const success = await client.callTool({ name: "server_health", arguments: {} });
       expect(success.isError).not.toBe(true);
