@@ -213,4 +213,19 @@ describe("MCP error boundary", () => {
     expect(new TextEncoder().encode(JSON.stringify(failed)).byteLength).toBeLessThan(30_000);
     expect(failed.content[0]?.type === "text" ? failed.content[0].text : "").not.toContain("token=secret");
   });
+
+  it("adds deterministic recovery guidance only for mapped errors", () => {
+    expect(safeErrorPayload(new AppError("STALE_REFERENCE", "The reference is stale.", { retryable: true }))).toMatchObject({
+      recovery: { tool: "browser_snapshot" },
+    });
+    expect(safeErrorPayload(new AppError("DIALOG_PENDING", "A dialog is pending.", { retryable: true }))).toMatchObject({
+      recovery: { tool: "browser_dialog", arguments: { operation: "get_text" } },
+    });
+    expect(safeErrorPayload(new AppError("BROWSER_RECOVERY_REQUIRED", "Recover browser.", { retryable: true }))).toMatchObject({
+      recovery: { tool: "browser_list_sessions", instruction: expect.stringContaining("session_id") },
+    });
+    expect(safeErrorPayload(new AppError("ACTION_FAILED", "No deterministic recovery.")).recovery).toBeUndefined();
+    expect(safeErrorPayload(new AppError("STALE_REFERENCE", "The reference is stale.")).recovery).toBeDefined();
+    expect(toolError(new AppError("FRAME_MISMATCH", "Frame changed.")).content[0]).toMatchObject({ type: "text" });
+  });
 });

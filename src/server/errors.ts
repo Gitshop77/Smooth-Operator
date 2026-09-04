@@ -3,6 +3,7 @@ import type { CallToolResult } from "@modelcontextprotocol/server";
 import { redactValue } from "./logger";
 
 type ErrorDetails = Record<string, unknown>;
+type ErrorRecovery = { tool: string; instruction: string; arguments?: Record<string, unknown> };
 const ERROR_CODE_MAX_CHARS = 200;
 const ERROR_MESSAGE_MAX_CHARS = 4_000;
 const ERROR_DETAILS_MAX_BYTES = 8_000;
@@ -69,16 +70,42 @@ export function safeErrorPayload(error: unknown): {
   message: string;
   retryable: boolean;
   details?: ErrorDetails;
+  recovery?: ErrorRecovery;
 } {
   const normalized = asAppError(error);
+  const code = safeErrorCode(normalized.code);
+  const recovery = recoveryForCode(code);
   const payload = {
-    code: safeErrorCode(normalized.code),
+    code,
     message: safeErrorMessage(normalized.message),
     retryable: normalized.retryable,
     ...(normalized.details ? { details: boundErrorDetails(normalized.details) } : {}),
+    ...(recovery ? { recovery } : {}),
   };
 
   return payload as typeof payload;
+}
+
+function recoveryForCode(code: string): ErrorRecovery | undefined {
+  switch (code) {
+    case "STALE_REFERENCE":
+    case "STALE_SNAPSHOT":
+      return { tool: "browser_snapshot", instruction: "Capture a fresh browser snapshot, then retry with its ref or index." };
+    case "STALE_PAGE_SLICE":
+      return { tool: "browser_extract", instruction: "Extract the current page again, then retry with its nextOffset and revision." };
+    case "FRAME_NOT_FOUND":
+    case "FRAME_MISMATCH":
+      return { tool: "browser_frames", instruction: "List current frames, then retry with a fresh frameId." };
+    case "ELEMENT_NOT_FOUND":
+    case "ELEMENT_NOT_VISIBLE":
+      return { tool: "browser_snapshot", instruction: "Capture a fresh browser snapshot and choose a current visible target." };
+    case "DIALOG_PENDING":
+      return { tool: "browser_dialog", instruction: "Read the pending dialog text before continuing.", arguments: { operation: "get_text" } };
+    case "BROWSER_RECOVERY_REQUIRED":
+      return { tool: "browser_list_sessions", instruction: "Use the returned session_id with browser_close_session before retrying." };
+    default:
+      return undefined;
+  }
 }
 
 export function toolError(error: unknown): CallToolResult {
