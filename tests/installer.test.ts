@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { ensureSecureDirectory, installHarness, parseJsonc, planHarnessInstall, type HarnessCommand } from "@/server/installer";
+import { ensureSecureDirectory, installHarness, parseJsonc, planHarnessInstall, writeSecureTempFile, type HarnessCommand } from "@/server/installer";
 
 const SOURCE_ENTRY: HarnessCommand = { command: "smooth-operator", args: [] };
 
@@ -17,6 +17,22 @@ function configOptions(path: string, serverEntry: HarnessCommand = SOURCE_ENTRY)
 }
 
 describe("harness installer", () => {
+  it("writes an owner-only temporary file and refuses to overwrite it", async () => {
+    const directory = await makeDirectory("smooth-operator-installer-temp-write-");
+    const path = join(directory, "config.tmp");
+    try {
+      await writeSecureTempFile(path, "durable config\n");
+      expect(await readFile(path, "utf8")).toBe("durable config\n");
+      if (process.platform !== "win32") {
+        expect((await stat(path)).mode & 0o777).toBe(0o600);
+      }
+      await expect(writeSecureTempFile(path, "replacement\n")).rejects.toMatchObject({ code: "INSTALL_CONFIG_FAILED" });
+      expect(await readFile(path, "utf8")).toBe("durable config\n");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("never treats a filesystem root as a configuration directory", async () => {
     await expect(ensureSecureDirectory("/")).rejects.toThrow(/filesystem roots/);
     await expect(installHarness("opencode", { environment: { OPENCODE_CONFIG_DIR: "/" }, serverEntry: SOURCE_ENTRY })).rejects.toThrow(/filesystem roots/);

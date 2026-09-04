@@ -1,5 +1,5 @@
 import { constants, accessSync, existsSync } from "node:fs";
-import { chmod, lstat, mkdir, open, rename, unlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, rename, unlink } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -293,14 +293,46 @@ async function installJsonConfig(target: ConfigTarget, plannedPath: string, opti
 
   const tempPath = `${path}.tmp-${process.pid}-${randomUUID()}`;
   try {
-    await writeFile(tempPath, serializedConfig, { mode: 0o600, flag: "wx" });
-    await chmod(tempPath, 0o600);
+    await writeSecureTempFile(tempPath, serializedConfig);
     await rejectSymlink(path, "configuration file");
     await rename(tempPath, path);
     return `Installed SmoothOperator in ${path}${backupPath ? ` (backup: ${backupPath})` : ""}. Restart the harness.`;
   } catch (error) {
     await unlink(tempPath).catch(() => undefined);
     throw new AppError("INSTALL_CONFIG_FAILED", `Could not write ${path}.`, { cause: error });
+  }
+}
+
+/**
+ * Write a temporary configuration durably before its atomic rename. The
+ * exclusive descriptor is kept open for every operation so a pathname swap
+ * cannot redirect the write, and it is always closed before this resolves.
+ */
+export async function writeSecureTempFile(path: string, contents: string | Uint8Array): Promise<void> {
+  let handle: FileHandle | undefined;
+  let opened = false;
+  let failure: unknown;
+  try {
+    handle = await open(path, "wx", 0o600);
+    opened = true;
+    await handle.writeFile(contents);
+    await handle.chmod(0o600);
+    await handle.sync();
+  } catch (error) {
+    failure = error;
+  }
+  if (handle) {
+    try {
+      await handle.close();
+    } catch (error) {
+      failure ??= error;
+    }
+  }
+  if (failure !== undefined) {
+    if (opened) {
+      await unlink(path).catch(() => undefined);
+    }
+    throw new AppError("INSTALL_CONFIG_FAILED", "Could not write the temporary configuration.", { cause: failure });
   }
 }
 
