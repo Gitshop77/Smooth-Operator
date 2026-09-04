@@ -5,7 +5,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import process from "node:process";
 
 import type { ServerConfig } from "./config";
-import { BROWSER_ACTION_PLAN_MAX_STEPS, BROWSER_BATCH_MAX_STEPS, MCP_PAGE_TEXT_MAX_CHARS, RESEARCH_MAX_CHARS, RESEARCH_MAX_RESULTS, RESEARCH_MIN_CHARS, RESEARCH_QUERY_MAX_CHARS, UPLOAD_MAX_BYTES, UPLOAD_MAX_FILES, UPLOAD_MAX_TOTAL_BYTES, type BrowserAction, type ResearchRequest } from "./contracts";
+import { BROWSER_ACTION_PLAN_MAX_STEPS, BROWSER_BATCH_DEFAULT_TIMEOUT_MS, BROWSER_BATCH_MAX_STEPS, BROWSER_BATCH_MAX_TIMEOUT_MS, MCP_PAGE_TEXT_MAX_CHARS, RESEARCH_MAX_CHARS, RESEARCH_MAX_RESULTS, RESEARCH_MIN_CHARS, RESEARCH_QUERY_MAX_CHARS, UPLOAD_MAX_BYTES, UPLOAD_MAX_FILES, UPLOAD_MAX_TOTAL_BYTES, type BrowserAction, type ResearchRequest } from "./contracts";
 import { BrowserService, type PageSnapshot } from "./browser/service";
 import { AppError, safeErrorDiagnostic } from "./errors";
 import { Logger } from "./logger";
@@ -167,7 +167,7 @@ export class ServerRuntime {
     return this.browser.execute(action, signal);
   }
 
-  async runBatch(actions: BrowserAction[], options: { confirmDestructive?: boolean; includeSnapshot?: boolean } = {}, signal?: AbortSignal): Promise<unknown> {
+  async runBatch(actions: BrowserAction[], options: { confirmDestructive?: boolean; includeSnapshot?: boolean; timeoutMs?: number } = {}, signal?: AbortSignal): Promise<unknown> {
     await this.ensureBrowserProfileLease(signal);
     this.assertOpen();
     return this.browser.executeBatch(actions, options, signal);
@@ -302,6 +302,7 @@ export class ServerRuntime {
         pageTextChars: MCP_PAGE_TEXT_MAX_CHARS,
         browserActionPlanSteps: BROWSER_ACTION_PLAN_MAX_STEPS,
         browserBatchSteps: BROWSER_BATCH_MAX_STEPS,
+        browserBatchTimeoutMs: { default: BROWSER_BATCH_DEFAULT_TIMEOUT_MS, max: BROWSER_BATCH_MAX_TIMEOUT_MS },
         research: {
           queryChars: RESEARCH_QUERY_MAX_CHARS,
           minTextChars: RESEARCH_MIN_CHARS,

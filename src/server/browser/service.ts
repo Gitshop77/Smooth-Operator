@@ -18,7 +18,7 @@ function loadPuppeteer(): Promise<PuppeteerModule> {
 
 import type { ServerConfig } from "../config";
 import { AppError, asAppError, requireField, safeErrorDiagnostic } from "../errors";
-import { BROWSER_ACTION_PLAN_MAX_STEPS, BrowserActionPlanSchema, isDestructiveBatchAction, MCP_PAGE_TEXT_MAX_CHARS, RESOURCE_BLOCKING_TYPES, UPLOAD_MAX_BYTES, UPLOAD_MAX_FILES, UPLOAD_MAX_TOTAL_BYTES, type BrowserAction } from "../contracts";
+import { BROWSER_ACTION_PLAN_MAX_STEPS, BROWSER_BATCH_DEFAULT_TIMEOUT_MS, BROWSER_BATCH_MAX_TIMEOUT_MS, BrowserActionPlanSchema, isDestructiveBatchAction, MCP_PAGE_TEXT_MAX_CHARS, RESOURCE_BLOCKING_TYPES, UPLOAD_MAX_BYTES, UPLOAD_MAX_FILES, UPLOAD_MAX_TOTAL_BYTES, type BrowserAction } from "../contracts";
 import { Logger, redactValue } from "../logger";
 import { SecurityPolicy } from "../policy";
 import { prepareUntrustedText, redactSecretPlaceholders, wrapUntrustedText } from "../security";
@@ -278,6 +278,20 @@ interface BenchmarkCounters {
   cdpCommands: number;
 }
 
+interface BatchProgress {
+  failedIndex: number;
+  failedAction: string;
+  completedActions: number;
+  completedResults: unknown[];
+}
+
+interface BatchExecutionOptions {
+  confirmDestructive?: boolean;
+  includeSnapshot?: boolean;
+  timeoutMs?: number;
+  progress?: BatchProgress;
+}
+
 export interface BrowserServiceDependencies {
   launch?: (options: PuppeteerLaunchOptions) => Promise<Browser>;
   connect?: (options: PuppeteerConnectOptions) => Promise<Browser>;
@@ -301,7 +315,7 @@ const MAX_LOG_ENTRIES = 500;
 // Keep a finite admission bound for hostile/unbounded clients, while leaving
 // enough headroom for legitimate concurrent read bursts. The read lane still
 // limits actual Chromium work separately.
-const MAX_QUEUED_OPERATIONS = 1_024;
+const MAX_QUEUED_OPERATIONS = 64;
 const MAX_PARALLEL_READ_OPERATIONS = 8;
 // Popup observation is bounded by the enclosing action signal. This short
 // post-click grace period catches targetcreated/page events that are delivered
@@ -1300,15 +1314,23 @@ export class BrowserService {
   }
 
   /** Execute already-normalized actions while holding one browser-operation lock. */
-  async executeBatch(actions: BrowserAction[], options: { confirmDestructive?: boolean; includeSnapshot?: boolean } = {}, signal?: AbortSignal): Promise<unknown> {
+  async executeBatch(actions: BrowserAction[], options: { confirmDestructive?: boolean; includeSnapshot?: boolean; timeoutMs?: number } = {}, signal?: AbortSignal): Promise<unknown> {
     if (this.benchmarkCounters) {
       this.benchmarkCounters.browserOperations += actions.length;
     }
     if (this.recoveryRequired) {
       throw new AppError("BROWSER_RECOVERY_REQUIRED", "Browser recovery is required before browser work can continue. Call browser_close_session and retry.", { retryable: true, details: { hint: "Call browser_close_session and retry after cleanup succeeds." } });
     }
-    const budgetMs = actions.reduce((total, action) => total + this.actionBudgetMs(action), 0) || this.config.browser.actionTimeoutMs;
-    return this.withOperationLock(signal, (operationSignal) => this.executeBatchUnlocked(actions, options, operationSignal), budgetMs, budgetMs);
+    const actionBudget = actions.reduce((total, action) => total + this.actionBudgetMs(action), 0) || this.config.browser.actionTimeoutMs;
+    const requestedBudget = typeof options.timeoutMs === "number" && Number.isFinite(options.timeoutMs)
+      ? options.timeoutMs
+      : BROWSER_BATCH_DEFAULT_TIMEOUT_MS;
+    const budgetMs = Math.max(1, Math.min(actionBudget, BROWSER_BATCH_MAX_TIMEOUT_MS, Math.floor(requestedBudget)));
+    // Queue admission remains bounded by one configured action timeout. A
+    // long whole-batch deadline must not make callers wait minutes for a turn.
+    const progress: BatchProgress = { failedIndex: 0, failedAction: actions[0]?.action ?? "unknown", completedActions: 0, completedResults: [] };
+    const executionOptions: BatchExecutionOptions = { ...options, progress };
+    return this.withOperationLock(signal, (operationSignal) => this.executeBatchUnlocked(actions, executionOptions, operationSignal), this.config.browser.actionTimeoutMs, budgetMs, "exclusive", true, () => progress);
   }
 
   private actionBudgetMs(action: BrowserAction): number {
@@ -3497,10 +3519,15 @@ export class BrowserService {
     return this.executeBatchUnlocked(validation.data, { confirmDestructive }, signal);
   }
 
-  private async executeBatchUnlocked(actions: BrowserAction[], options: { confirmDestructive?: boolean; includeSnapshot?: boolean }, signal?: AbortSignal): Promise<unknown> {
+  private async executeBatchUnlocked(actions: BrowserAction[], options: BatchExecutionOptions, signal?: AbortSignal): Promise<unknown> {
     const results: unknown[] = [];
     for (const [index, candidate] of actions.entries()) {
       const action = candidate;
+      if (options.progress) {
+        options.progress.failedIndex = index;
+        options.progress.failedAction = action.action;
+        options.progress.completedActions = results.length;
+      }
       if (action.action === "run_script") {
         throw new AppError("SCRIPT_INVALID", "Nested run_script actions are not allowed.");
       }
@@ -3523,6 +3550,9 @@ export class BrowserService {
           this.invalidateActionSnapshot(action, result);
         }
         results.push(result);
+        if (options.progress) {
+          options.progress.completedResults = results;
+        }
       } catch (error) {
         if (DOM_MUTATING_ACTIONS.has(action.action)) {
           this.invalidateActionSnapshot(action, undefined);
@@ -3537,6 +3567,11 @@ export class BrowserService {
     }
     const output: Record<string, unknown> = { results };
     if (options.includeSnapshot) {
+      if (options.progress) {
+        options.progress.failedIndex = actions.length;
+        options.progress.failedAction = "snapshot";
+        options.progress.completedActions = results.length;
+      }
       try {
         output.snapshot = await this.snapshotUnlocked({ pageId: this.currentPageId, maxChars: 8_000, signal });
       } catch (error) {
@@ -7296,7 +7331,7 @@ export class BrowserService {
     return recovery;
   }
 
-  private async withOperationLock<T>(signal: AbortSignal | undefined, operation: (operationSignal: AbortSignal) => Promise<T>, queueTimeoutMs = this.config.browser.actionTimeoutMs, operationTimeoutMs?: number, mode: "exclusive" | "read" = "exclusive", touchActivity = true): Promise<T> {
+  private async withOperationLock<T>(signal: AbortSignal | undefined, operation: (operationSignal: AbortSignal) => Promise<T>, queueTimeoutMs = this.config.browser.actionTimeoutMs, operationTimeoutMs?: number, mode: "exclusive" | "read" = "exclusive", touchActivity = true, operationTimeoutDetails?: () => object): Promise<T> {
     if (this.queuedOperations >= MAX_QUEUED_OPERATIONS) {
       throw new AppError("BROWSER_QUEUE_FULL", "The browser action queue is full; wait for an active operation to finish and retry.", { retryable: true, details: { hint: "Wait for the active browser operation to finish, then retry." } });
     }
@@ -7399,7 +7434,12 @@ export class BrowserService {
       } catch (error) {
         const normalized = normalizeBrowserOperationError(error, operationSignal);
         if (operationTimedOut && !queueSignal?.aborted) {
-          throw new AppError("BROWSER_TIMEOUT", `The browser operation exceeded its ${Math.max(1, Math.floor(operationTimeoutMs ?? 0))}ms action deadline.`, { retryable: true, details: { phase: "action", timeoutMs: Math.max(1, Math.floor(operationTimeoutMs ?? 0)) }, cause: error });
+          const normalizedError = asAppError(normalized);
+          throw new AppError("BROWSER_TIMEOUT", `The browser operation exceeded its ${Math.max(1, Math.floor(operationTimeoutMs ?? 0))}ms action deadline.`, {
+            retryable: true,
+            details: { ...normalizedError.details, ...operationTimeoutDetails?.(), phase: "action", timeoutMs: Math.max(1, Math.floor(operationTimeoutMs ?? 0)) },
+            cause: error,
+          });
         }
         throw normalized;
       } finally {

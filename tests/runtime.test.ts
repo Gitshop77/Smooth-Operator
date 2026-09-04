@@ -50,7 +50,7 @@ describe("runtime lifecycle", () => {
       expect(runtime.publicCapabilities()).toMatchObject({
         defaults: { browserMode: "managed", headedBrowser: true, pageEvaluation: true, stealth: true, behavioralTiming: false },
         features: { localBrowserTools: "available", pageEvaluation: false, stealth: false, behavioralTiming: false },
-        limits: { pageTextChars: 8_000, browserActionPlanSteps: 100, browserBatchSteps: 50, research: { queryChars: 4_000, minTextChars: 500, maxTextChars: 4_000, maxResults: 10 }, upload: { maxFiles: 20, maxBytesPerFile: 50 * 1024 * 1024, maxTotalBytes: 100 * 1024 * 1024 } },
+        limits: { pageTextChars: 8_000, browserActionPlanSteps: 100, browserBatchSteps: 50, browserBatchTimeoutMs: { default: 120_000, max: 600_000 }, research: { queryChars: 4_000, minTextChars: 500, maxTextChars: 4_000, maxResults: 10 }, upload: { maxFiles: 20, maxBytesPerFile: 50 * 1024 * 1024, maxTotalBytes: 100 * 1024 * 1024 } },
         challenges: { classification: "bounded-evidence", connectedAiLoop: true, humanHandoff: true, successRequiresAbsentClassification: true, defaultMaxAttempts: 32, maxAttempts: 100 },
       });
     } finally {

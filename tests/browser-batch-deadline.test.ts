@@ -88,6 +88,59 @@ describe("batch action deadlines", () => {
     }
   });
 
+  it("enforces the whole-batch timeout independently of step budgets", async () => {
+    vi.useFakeTimers();
+    const { service, internal } = fixture(1_000);
+    let release!: () => void;
+    const stalled = new Promise<void>((resolve) => { release = resolve; });
+    internal.executeUnlocked = async (action) => {
+      if (action.action === "evaluate") {
+        await stalled;
+      }
+      return { done: action.action };
+    };
+    try {
+      const batch = service.executeBatch([
+        { action: "wait", milliseconds: 0 },
+        { action: "evaluate", code: "await never()" },
+      ], { confirmDestructive: true, timeoutMs: 100 }).catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(100);
+      await vi.advanceTimersByTimeAsync(250);
+      await expect(batch).resolves.toMatchObject({
+        code: "BROWSER_TIMEOUT",
+        details: {
+          timeoutMs: 100,
+          failedIndex: 1,
+          failedAction: "evaluate",
+          completedActions: 1,
+          completedResults: [{ done: "wait" }],
+        },
+      });
+    } finally {
+      release();
+      await service.close();
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps queue admission on the single-action timeout for long batches", async () => {
+    vi.useFakeTimers();
+    const { service, internal } = fixture(100);
+    internal.executeUnlocked = async () => new Promise(() => undefined);
+    try {
+      const active = service.execute({ action: "wait", timeoutMs: 600_000 }).catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(0);
+      const queued = service.executeBatch([{ action: "wait" }], { timeoutMs: 600_000 }).catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(100);
+      await expect(queued).resolves.toMatchObject({ code: "BROWSER_QUEUE_TIMEOUT", details: { timeoutMs: 100 } });
+      void active;
+    } finally {
+      await service.close();
+      vi.useRealTimers();
+    }
+  });
+
   it("cancels a batch without advancing to its next mutation", async () => {
     vi.useFakeTimers();
     const { service, internal } = fixture();
