@@ -27,9 +27,19 @@ Or straight from GitHub:
 npm install -g github:Gitshop77/Smooth-Operator && smooth-operator install opencode
 ~~~
 
-The wizard asks exactly 3 focused questions: browser profile ownership, browser display, and the Chromium executable. Run `smooth-operator install` with no harness to pick one interactively (TTY only; piped/CI runs print usage and exit). `--yes` applies the recommended defaults, so give it a target: `smooth-operator install opencode --yes`. Personal Chrome mode launches a dedicated debugging profile on `9222` and derives `browserUrl` automatically. Managed mode owns one private persistent profile; connected mode launches and attaches to a dedicated debugging profile and does not claim ownership of an operator's daily browser.
+The wizard asks exactly three focused questions: browser profile ownership,
+browser display, and the Chromium executable. Run `smooth-operator install`
+without a harness to choose one interactively (TTY only; piped and CI runs
+print usage and exit). `--yes` applies the recommended defaults, so give it a
+target: `smooth-operator install opencode --yes`. Personal Chrome mode launches
+a dedicated debugging profile on port `9222` and derives `browserUrl`
+automatically. Managed mode owns one private persistent profile; connected mode
+launches and attaches to a dedicated debugging profile and does not claim
+ownership of an operator's daily browser.
 
-Requires Node 22.23.2+ and an installed Chromium-based browser. Profile at `~/.smooth-operator/browser` — sign in once.
+SmoothOperator requires Node.js 22.23.2 or newer and an installed
+Chromium-based browser. The default managed profile is
+`~/.smooth-operator/browser`; sign in once and reuse that private profile.
 
 Verify: `smooth-operator --help` and `server_health` / `browser_doctor` appear after restart. `server_health` reports `ok` when the runtime is ready, `degraded` when browser recovery is required or its managed profile lease is not held, and `shutting_down` during teardown; an idle lazy browser is healthy.
 
@@ -60,7 +70,11 @@ Talk to your harness normally. The preferred loop is `browser_navigate`/`browser
 
 Prefer canonical tools such as `browser_tabs`, `browser_snapshot`, `browser_input`, `browser_back`, `browser_close`, and `browser_extract`. Browser-use compatibility aliases remain available and are labeled as aliases in `tools/list`. Deterministic stale-reference, frame, dialog, element, and browser-recovery errors include a compact recovery tool suggestion.
 
-For a challenge, `browser_solve_challenge` returns fresh bounded visual/state evidence and an attempt budget; the connected AI keeps using ordinary browser actions and calls it again until the final classification is clear or the budget is exhausted. Human handoff remains available only as an explicit final option.
+For a challenge, `browser_solve_challenge` returns fresh bounded visual and
+state evidence with an attempt budget. The connected AI uses ordinary browser
+actions and calls it again until a fresh classification reports the challenge
+absent or the automation budget is exhausted. Human handoff remains available
+only as an explicit final option.
 
 Browser identity remains native, page JavaScript is available by default, and
 behavioral timing is off for fast deterministic input. Set the explicit
@@ -90,30 +104,3 @@ evaluation remains an explicit page capability.
 For HTTP deployments, the configured MCP path also has a bounded readiness
 endpoint at `<path>/healthz` (normally `/mcp/healthz`), subject to the same
 HTTP authentication policy as the MCP endpoint.
-
-## Benchmarks
-
-Compared with [Browser Use MCP](https://github.com/browser-use/browser-use) · [![Browser Use GitHub stars](https://img.shields.io/github/stars/browser-use/browser-use?style=social)](https://github.com/browser-use/browser-use) 
-
-Tested: 26 August 2026
-
-| Benchmark | Metric | SmoothOperator | Browser Use MCP |
-| --- | --- | ---: | ---: |
-| Live Web (8 sites, 32 episodes) | URL success | **32/32** | 23/32 |
-| Live Web | Page-text quality | **26/32** | 21/32 |
-| Live Web | Combined success | **26/32** | 18/32 |
-| Live Web | Task latency mean / p95 | **1,358 / 2,957 ms** | 4,604 / 30,780 ms |
-| Live Web | Navigation p95 | **2,130 ms** | 4,320 ms |
-| Live Web | Click p95 | 920 ms | **142 ms** |
-| Live Web | MCP call p95 | **943 ms** | 2,095 ms |
-| Live Web | Trace errors | **0** | 10 |
-| MiniWoB++ 0.14.3 (125 tasks) | Reward = 1 | **124/125** | 89/125 |
-| MiniWoB++ | Attempts | **125** | 125 |
-| MiniWoB++ | MCP errors | **0** | 29 |
-| MiniWoB++ | Transport errors | **0** | **0** |
-| MiniWoB++ | Timeouts | **0** | **0** |
-| Browser Use benchmark | Muse Spark 1.2 · score | **64% · 100 tasks** | 12% · 60 tasks |
-
-*Task counts and scoring rules differ; comparison is directional.*
-
-[View the Browser Use benchmark](https://github.com/browser-use/benchmark)
