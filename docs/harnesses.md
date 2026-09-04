@@ -2,7 +2,7 @@
 
 ## Interactive wizard (directly to your harness)
 
-`smooth-operator install <harness>` is interactive by default — it asks exactly 3
+`smooth-operator install <harness>` is interactive by default — it asks exactly three
 curated questions (profile ownership, headed/headless display, and browser
 executable) with recommended defaults in brackets.
 Omitting `<harness>` is allowed too: on a TTY the installer prompts for the
@@ -21,7 +21,9 @@ When you pick “connected browser” (mode `connect`), the wizard finds Chromiu
 `discovery.ts`, launches a dedicated debugging profile under
 `~/.smooth-operator/personal-chrome` with port `9222`, and probes the loopback
 endpoint until a valid DevTools version response is live (33 attempts within a
-default 10-second deadline). On success it writes
+default 10-second deadline). If launch or readiness fails, the helper terminates
+the child process on a best-effort basis instead of leaving it detached. On
+success it writes
 `SMOOTH_OPERATOR_BROWSER_MODE=connect` and
 `SMOOTH_OPERATOR_BROWSER_URL=http://127.0.0.1:9222` for you. This does not
 attach to or take ownership of an operator's daily browser profile. No manual
@@ -159,7 +161,8 @@ legacy shape, `enabled` defaults to `true`; `enabled: false` is likewise an
 explicit conflict. If it has malformed `mcp` or malformed `mcp.servers`,
 installation fails closed rather than replacing user data.
 Comments and trailing commas are accepted as JSONC; a successful update writes
-normalized JSON and creates a unique owner-only backup first.
+normalized JSON through an owner-only temporary file, flushes it before atomic
+replacement, and creates a unique owner-only backup first.
 
 After editing, run `opencode mcp list` or restart OpenCode. OpenCode also
 supports adding the server interactively with `opencode mcp add`; that is the
@@ -239,7 +242,8 @@ Official reference: <https://code.visualstudio.com/docs/copilot/chat/mcp-servers
 ## Cursor, Windsurf, and Claude Desktop
 
 These clients use JSON configuration files, so the installer performs a
-careful merge and writes atomically.
+careful merge and writes through a flushed owner-only temporary file before
+atomic replacement.
 
 | Target | Default path |
 | --- | --- |

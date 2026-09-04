@@ -54,6 +54,8 @@ handler source, form values, password content, and arbitrary data attributes.
 ## Connected-AI challenge loop
 
 `browser_challenge` is an evidence-only detector and is available by default.
+Title, text, HTML, frame-source, and visible-marker inputs have independent
+limits so one oversized evidence category cannot hide later challenge markers.
 `browser_solve_challenge` is an internal connected-AI loop: each call is one
 bounded verification cycle. It collects a fresh challenge classification and
 bounded visual/state evidence, including `attemptsRemaining`; the connected AI

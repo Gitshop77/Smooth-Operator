@@ -24,7 +24,7 @@ git clone https://github.com/Gitshop77/Smooth-Operator.git && cd Smooth-Operator
 
 The npm registry name is `smooth-operator-mcp` (plain `smooth-operator` is an unrelated library).
 
-Wizard (default): exactly 3 prompts — browser profile ownership, browser display, and the Chromium executable. Choices are normalized and validated before persistence. Personal-Chrome mode launches `chrome --remote-debugging-port=9222 --user-data-dir=~/.smooth-operator/personal-chrome`, probes `http://127.0.0.1:9222/json/version` immediately and then every 300ms with bounded response reads (64 KiB maximum; 33 attempts within a default 10-second deadline), and derives `browserUrl`; the URL is not a prompt. `--yes` uses defaults: managed, headed, page eval on, native-identity compatibility, and deterministic input. Persists to `~/.smooth-operator/config.json` (0600, owner-only, bounded, symlink-safe, and backed up). Bare `smooth-operator install` prompts for the harness on a TTY (piped/CI prints usage); managed mode owns one private persistent profile, while connected mode launches and attaches to a dedicated debugging profile rather than an operator's daily browser.
+Wizard (default): exactly three prompts — browser profile ownership, browser display, and the Chromium executable. Choices are normalized and validated before persistence. Personal-Chrome mode launches `chrome --remote-debugging-port=9222 --user-data-dir=~/.smooth-operator/personal-chrome`, probes `http://127.0.0.1:9222/json/version` immediately and then every 300ms with bounded response reads (64 KiB maximum; 33 attempts within a default 10-second deadline), and derives `browserUrl`; the URL is not a prompt. Failed helper launches are terminated on a best-effort basis. `--yes` uses defaults: managed, headed, page eval on, native-identity compatibility, and deterministic input. Configuration writes use owner-only temporary files, flush before atomic replacement, and create a backup when replacing an existing file. Bare `smooth-operator install` prompts for the harness on a TTY (piped/CI prints usage); managed mode owns one private persistent profile, while connected mode launches and attaches to a dedicated debugging profile rather than an operator's daily browser.
 
 ## Browser
 
@@ -51,7 +51,7 @@ challenge handling remains evidence-first and is documented in
 SMOOTH_OPERATOR_TRANSPORT=http SMOOTH_OPERATOR_HTTP_TOKEN="$(openssl rand -hex 32)" npm start
 ~~~
 
-Default `127.0.0.1:3344`. Remote needs `SMOOTH_OPERATOR_ALLOW_REMOTE_HTTP=true` + 32-character token. Host/Origin values are parsed and allowlisted, bodies are capped at 2M, and malformed/partial responses close safely.
+Default `127.0.0.1:3344`. Remote needs `SMOOTH_OPERATOR_ALLOW_REMOTE_HTTP=true` and a 32-character token. Host and Origin values are parsed and allowlisted, bodies are capped at 2 MB, CORS request headers use a fixed allowlist, and malformed or partial responses close safely.
 The sibling `<SMOOTH_OPERATOR_HTTP_PATH>/healthz` endpoint follows the same
 Host, Origin, and bearer policy and reports current readiness without page data.
 
@@ -61,7 +61,7 @@ Host, Origin, and bearer policy and reports current readiness without page data.
 - **Navigation/interaction:** `browser_navigate`, `browser_back`, `browser_go_back`, `browser_forward`, `browser_reload`, `browser_switch_tab`, `browser_close_tab`, `browser_click`, `browser_input`, `browser_select`, `browser_scroll`, `browser_scroll_to_bottom`, `browser_key`, `browser_wait`, `browser_wait_for_element`, `browser_wait_for_text`, `browser_wait_for_url`, `browser_wait_for_network_idle`, `browser_hover`, `browser_move`, `browser_press_and_hold`, `browser_type`, `browser_close`, `browser_close_all`
 - **Local defaults:** all browser tools/features are available by default, including `browser_evaluate`, `browser_resource_blocking`, and safe element inspection; `browser_exec` accepts validated JSON actions only, and `browser_wait_for_human` remains an optional handoff. Remote HTTP, private-network access, and file roots retain explicit policy gates.
 
-All browser operations use bounded, cancellable queue/action deadlines. After an uncooperative timeout, the old browser lifecycle is retired before the queue advances. Snapshot refs are page/frame/revision-bound and must be refreshed after navigation or DOM-changing actions. Text, HTML, accessibility, links, and search outputs are bounded before serialization; truncated responses expose flags and omission counts. `web_search` accepts up to 10 results, uses a bounded aggregate text budget, normalizes queries, retries transient retrieval failures, and reports anti-bot blocks without bypassing them. Network journal search is bounded, metadata-only, and redacts secret query values.
+All browser operations use bounded, cancellable queue and action deadlines. One absolute queue deadline covers every admission stage. After an uncooperative timeout, the old browser lifecycle is retired before the queue advances. Snapshot refs are page/frame/revision-bound and must be refreshed after navigation or DOM-changing actions. Text, HTML, accessibility, links, and search outputs are bounded before serialization; truncated responses expose flags and omission counts. `web_search` accepts up to 10 results, uses an allocation-bounded response reader and aggregate text budget, normalizes queries, retries transient retrieval failures, and reports anti-bot blocks without bypassing them. Network-journal queries scan once, retain only the requested page, and redact secret query values.
 
 Resources: `smooth-operator://server/capabilities`, `.../browser/tabs`, `.../browser/page/current`, `.../browser/page/{pageId}`, `.../browser/downloads`, `.../browser/logs/network`, `.../browser/logs/console`
 
@@ -69,7 +69,7 @@ Prompts: `agent-chrome-setup`, `browser-workflow`, `extract-page`, `research-que
 
 ## Config
 
-Env or `--config` JSON (`chmod 600`, no symlinks).
+Environment variables or `--config` JSON (`chmod 600`, no symlinks). Comma-separated configuration lists reject more than 128 entries before normalization or filesystem work.
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -157,7 +157,8 @@ No model service.
 - Config files and backups are bounded, owner-only, regular, and symlink-safe.
 - Bounded, normalized, redacted, untrusted wrappers; result omission is explicit rather than silent.
 - Constant-time bearer check, JSON stderr, no secrets.
-- Challenges are classified from bounded evidence. `browser_solve_challenge` is
+- Challenges are classified from independently bounded title, text, HTML,
+  frame, and visible-marker evidence. `browser_solve_challenge` is
   an internal connected-AI observe/act/verify loop, and it reports success only
   when a fresh final classification is explicitly absent. `pierce/` is used
   only for open shadow roots.

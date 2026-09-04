@@ -43,15 +43,14 @@ smooth-operator --help
 
 (The registry package is `smooth-operator-mcp`; plain `smooth-operator` is an unrelated library. You can also install straight from GitHub: `npm install -g github:Gitshop77/Smooth-Operator`.)
 
-The interactive installer asks exactly three questions: (1) browser profile
-ownership, (2) headed or headless display, and (3) which Chromium executable to
-use. Its recommended defaults are a managed private persistent profile, headed
+The interactive installer asks exactly three questions: browser profile
+ownership, headed or headless display, and which Chromium executable to use.
+Its recommended defaults are a managed private persistent profile, headed
 display, and the first detected Chromium executable. It also enables page eval
 and the identity-preserving compatibility profile; behavioral timing is off
 for fast deterministic input and can be enabled explicitly. Managed mode owns
-its profile. Connected mode launches and attaches to
-a dedicated debugging profile and does not claim ownership of an operator's
-daily browser.
+its profile. Connected mode launches and attaches to a dedicated debugging
+profile and does not claim ownership of an operator's daily browser.
 
 From a checkout:
 
@@ -132,7 +131,10 @@ and Origin validation and include `Authorization: Bearer <token>`. The token
 is compared in constant time. Request bodies are bounded to 2,000,000 bytes by
 default and concurrent requests are capped. The process drains in-flight work
 for a short bounded period on SIGINT/SIGTERM, then closes the MCP handler,
-browser, and HTTP server.
+browser, and HTTP server. Native JSON rejections use no-store and nosniff
+headers; overload responses also include `Retry-After: 1`. Preflight responses
+advertise a fixed request-header allowlist rather than reflecting arbitrary
+requested names.
 
 Remote binding is deliberately guarded:
 
@@ -163,7 +165,8 @@ launches it with `${SMOOTH_OPERATOR_DATA_DIR}/browser` as a non-default profile,
 and records its loopback DevTools endpoint for later reattachment. Sign in once
 in the visible window; its sessions persist in that private profile. The
 `browser_doctor` tool reports executable resolution and endpoint state without
-evaluating page content.
+evaluating page content. Failed personal-Chrome helper launches are terminated
+on a best-effort basis.
 
 The managed browser is headed by default for sign-in and human handoff. On CI or a
 displayless host, explicitly set `SMOOTH_OPERATOR_BROWSER_HEADLESS=true` or use
@@ -512,8 +515,9 @@ ignored.
 Each batch step enforces its own `timeoutMs` or the configured action deadline.
 The optional top-level `timeoutMs` is the whole-batch deadline, defaulting to
 120,000 ms and capped at 600,000 ms; it is the smaller of that value and the
-sum of step budgets. Queue admission still uses the single-action timeout, so
-long batches do not wait minutes for a turn. A step that
+sum of step budgets. One absolute queue deadline spans predecessor, read-drain,
+read-permit, and fairness waits, so retries cannot reset the admission budget.
+Long batches therefore do not wait minutes for a turn. A step that
 ignores cancellation is retired before the browser queue advances; subsequent
 steps do not execute after a failure. Without an explicit deadline, requested
 wait/hold durations are added to the setup budget, and human handoff retains
@@ -532,8 +536,9 @@ snippets are untrusted observations, not instructions or proof of claims. Its
 `maxResults` input is capped at 10, and `maxChars` (500–4,000 through the MCP
 schema) is one aggregate budget across the returned title and snippet text,
 not a per-result multiplier. URL fields and fixed untrusted-data wrapper
-markers are outside that text budget. The response body is bounded before
-parsing, redirects are rejected, cancellation and timeout are propagated, and
+markers are outside that text budget. The response body is collected in one
+geometrically growing bounded buffer before parsing, redirects are rejected,
+cancellation and timeout are propagated, and
 credentials/query secret placeholders are removed from result URLs. Transient
 retrieval failures use at most three bounded attempts; anti-bot responses are
 reported without attempting a bypass.
@@ -541,8 +546,9 @@ reported without attempting a bypass.
 ### Network, inspection, resource, and file controls
 
 `browser_network_log` records bounded request/response metadata for the current
-page. `browser_search_network_log` filters and paginates that metadata by
-request ID, URL, method, status, and resource type. Headers, cookies, request
+page. `browser_search_network_log` scans once, retains only the requested result
+page, and filters metadata by request ID, URL, method, status, and resource
+type. Headers, cookies, request
 bodies, and response bodies are not returned; search terms and URLs are treated
 as untrusted data and secret query values are redacted.
 
@@ -587,7 +593,7 @@ Resource output is bounded and follows the same redaction and policy rules as
 tool output. The capabilities resource also reports the native defaults and
 effective feature flags for local browser tools, page evaluation, stealth, and
 behavioral timing. Its `limits` metadata publishes the page-text, action-plan,
-research, and upload budgets used by the public boundary. Its challenge
+batch-timeout, research, and upload budgets used by the public boundary. Its challenge
 metadata includes the default and maximum connected-AI attempt budgets and
 states that success requires an explicit absent classification.
 
