@@ -7339,6 +7339,7 @@ export class BrowserService {
     const readMode = mode === "read";
     const requestSessionGeneration = this.sessionGeneration;
     const requestStartedAt = Date.now();
+    const queueDeadline = requestStartedAt + Math.max(1, Math.floor(queueTimeoutMs));
     const previous = this.operationTail;
     const readDrain = this.readDrainPromise;
     let release!: () => void;
@@ -7355,11 +7356,18 @@ export class BrowserService {
       if (readMode) {
         while (true) {
           const readTurn = this.operationTail;
-          await waitForTurn(readTurn, queueSignal, queueTimeoutMs);
+          await waitForTurn(readTurn, queueSignal, remainingQueueBudget(queueDeadline, queueTimeoutMs, queueSignal), queueTimeoutMs);
+          ensureQueueBudget(queueDeadline, queueTimeoutMs, queueSignal);
           if (readTurn !== this.operationTail) {
             continue;
           }
-          await this.acquireReadPermit(queueSignal, queueTimeoutMs);
+          await this.acquireReadPermit(queueSignal, remainingQueueBudget(queueDeadline, queueTimeoutMs, queueSignal), queueTimeoutMs);
+          try {
+            ensureQueueBudget(queueDeadline, queueTimeoutMs, queueSignal);
+          } catch (error) {
+            this.endReadOperation();
+            throw error;
+          }
           // A writer may publish a queue node while this read waits for a
           // permit. Do not let that reader overtake the writer; hand the
           // permit back and re-enter behind the writer instead.
@@ -7370,8 +7378,9 @@ export class BrowserService {
           break;
         }
       } else {
-        await waitForTurn(previous, queueSignal, queueTimeoutMs);
-        await waitForTurn(readDrain, queueSignal, queueTimeoutMs);
+        await waitForTurn(previous, queueSignal, remainingQueueBudget(queueDeadline, queueTimeoutMs, queueSignal), queueTimeoutMs);
+        await waitForTurn(readDrain, queueSignal, remainingQueueBudget(queueDeadline, queueTimeoutMs, queueSignal), queueTimeoutMs);
+        ensureQueueBudget(queueDeadline, queueTimeoutMs, queueSignal);
       }
       acquired = true;
       throwIfAborted(queueSignal);
@@ -7497,7 +7506,7 @@ export class BrowserService {
     }
   }
 
-  private async acquireReadPermit(signal: AbortSignal | undefined, timeoutMs: number): Promise<void> {
+  private async acquireReadPermit(signal: AbortSignal | undefined, timeoutMs: number, queueTimeoutMs: number): Promise<void> {
     if (this.activeReadOperations < MAX_PARALLEL_READ_OPERATIONS && this.readPermitWaiters.length === 0) {
       this.beginReadOperation();
       return;
@@ -7522,7 +7531,7 @@ export class BrowserService {
         callback();
       };
       const onAbort = (): void => finish(() => reject(new AppError("CANCELLED", "The browser action was cancelled.")));
-      const timer = setTimeout(() => finish(() => reject(new AppError("BROWSER_QUEUE_TIMEOUT", `The browser operation waited more than ${timeoutMs}ms for a read permit.`, { retryable: true, details: { phase: "queue", timeoutMs } }))), Math.max(1, Math.floor(timeoutMs)));
+      const timer = setTimeout(() => finish(() => reject(queueTimeoutError(queueTimeoutMs))), Math.max(1, Math.floor(timeoutMs)));
       this.readPermitWaiters.push(waiter);
       if (signal?.aborted) {
         onAbort();
@@ -8129,7 +8138,27 @@ function combineSignals(...signals: Array<AbortSignal | undefined>): AbortSignal
   return AbortSignal.any(active);
 }
 
-async function waitForTurn(previous: Promise<void>, signal: AbortSignal | undefined, timeoutMs: number): Promise<void> {
+function queueTimeoutError(timeoutMs: number): AppError {
+  return new AppError("BROWSER_QUEUE_TIMEOUT", `The browser operation waited more than ${timeoutMs}ms in the browser action queue.`, { retryable: true, details: { phase: "queue", timeoutMs } });
+}
+
+function remainingQueueBudget(deadline: number, timeoutMs: number, signal?: AbortSignal): number {
+  throwIfAborted(signal);
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) {
+    throw queueTimeoutError(timeoutMs);
+  }
+  return remaining;
+}
+
+function ensureQueueBudget(deadline: number, timeoutMs: number, signal?: AbortSignal): void {
+  throwIfAborted(signal);
+  if (deadline - Date.now() <= 0) {
+    throw queueTimeoutError(timeoutMs);
+  }
+}
+
+async function waitForTurn(previous: Promise<void>, signal: AbortSignal | undefined, timeoutMs: number, queueTimeoutMs: number): Promise<void> {
   if (signal?.aborted) {
     throw new AppError("CANCELLED", "The browser action was cancelled.");
   }
@@ -8141,7 +8170,7 @@ async function waitForTurn(previous: Promise<void>, signal: AbortSignal | undefi
       }
       settled = true;
       signal?.removeEventListener("abort", onAbort);
-      reject(new AppError("BROWSER_QUEUE_TIMEOUT", `The browser operation waited more than ${timeoutMs}ms for its turn.`, { retryable: true, details: { phase: "queue", timeoutMs } }));
+      reject(queueTimeoutError(queueTimeoutMs));
     }, Math.max(1, Math.floor(timeoutMs)));
     const settle = (callback: () => void): void => {
       if (settled) {

@@ -746,6 +746,150 @@ describe("browser service", () => {
     }
   });
 
+  it("uses one total deadline across a predecessor and read-drain wait", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-30T00:00:00.000Z"));
+    const service = new BrowserService(testConfig(), new SecurityPolicy(testConfig()), new Logger("error", {}, () => undefined));
+    const predecessor = new Promise<void>((resolve) => { setTimeout(resolve, 40); });
+    let releaseDrain!: () => void;
+    const readDrain = new Promise<void>((resolve) => { releaseDrain = resolve; });
+    const internal = service as unknown as {
+      withOperationLock<T>(signal: AbortSignal | undefined, operation: (signal: AbortSignal) => Promise<T>, queueTimeoutMs?: number): Promise<T>;
+      operationTail: Promise<void>;
+      readDrainPromise: Promise<void>;
+    };
+    internal.operationTail = predecessor;
+    internal.readDrainPromise = readDrain;
+    const queuedStartedAt = Date.now();
+    const queued = internal.withOperationLock(undefined, async () => "must-not-run", 100);
+    void queued.catch(() => undefined);
+    try {
+      await vi.advanceTimersByTimeAsync(40);
+      expect(Date.now() - queuedStartedAt).toBe(40);
+      await vi.advanceTimersByTimeAsync(59);
+      expect(Date.now() - queuedStartedAt).toBe(99);
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(queued).rejects.toMatchObject({
+        code: "BROWSER_QUEUE_TIMEOUT",
+        retryable: true,
+        details: { phase: "queue", timeoutMs: 100 },
+      });
+      expect(Date.now() - queuedStartedAt).toBe(100);
+    } finally {
+      releaseDrain();
+      await vi.advanceTimersByTimeAsync(0);
+      await service.close();
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not reset a reader deadline when a writer wins the fairness check", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-30T00:00:00.000Z"));
+    const service = new BrowserService(testConfig(), new SecurityPolicy(testConfig()), new Logger("error", {}, () => undefined));
+    const releases: Array<() => void> = [];
+    let started = 0;
+    let resolveStarted!: () => void;
+    const readsStarted = new Promise<void>((resolve) => { resolveStarted = resolve; });
+    const internal = service as unknown as {
+      withOperationLock<T>(signal: AbortSignal | undefined, operation: (signal: AbortSignal) => Promise<T>, queueTimeoutMs?: number, operationTimeoutMs?: number, mode?: "exclusive" | "read"): Promise<T>;
+      activeReadOperations: number;
+      readPermitWaiters: unknown[];
+    };
+    const reads = Array.from({ length: 8 }, (_, index) => internal.withOperationLock(undefined, async () => {
+      started += 1;
+      if (started === 8) resolveStarted();
+      await new Promise<void>((resolve) => { releases[index] = resolve; });
+      return index;
+    }, 500, undefined, "read"));
+    const releaseAll = (): void => {
+      for (const release of releases) {
+        release?.();
+      }
+    };
+    try {
+      await readsStarted;
+      const readerStartedAt = Date.now();
+      const reader = internal.withOperationLock(undefined, async () => "must-not-run", 100, undefined, "read");
+      void reader.catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(internal.readPermitWaiters).toHaveLength(1);
+
+      const writer = internal.withOperationLock(undefined, async () => "writer", 500);
+      await vi.advanceTimersByTimeAsync(0);
+      releases[0]?.();
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(99);
+      expect(Date.now() - readerStartedAt).toBe(99);
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(reader).rejects.toMatchObject({
+        code: "BROWSER_QUEUE_TIMEOUT",
+        retryable: true,
+        details: { phase: "queue", timeoutMs: 100 },
+      });
+      expect(Date.now() - readerStartedAt).toBe(100);
+      expect(internal.readPermitWaiters).toHaveLength(0);
+      expect(internal.activeReadOperations).toBe(7);
+
+      releaseAll();
+      await vi.advanceTimersByTimeAsync(0);
+      await expect(Promise.all(reads)).resolves.toHaveLength(8);
+      await expect(writer).resolves.toBe("writer");
+      expect(internal.activeReadOperations).toBe(0);
+      expect(internal.readPermitWaiters).toHaveLength(0);
+    } finally {
+      releaseAll();
+      await vi.advanceTimersByTimeAsync(0);
+      await service.close();
+      vi.useRealTimers();
+    }
+  });
+
+  it("cancels and removes a reader waiting for a permit without leaking counts", async () => {
+    vi.useFakeTimers();
+    const service = new BrowserService(testConfig(), new SecurityPolicy(testConfig()), new Logger("error", {}, () => undefined));
+    const releases: Array<() => void> = [];
+    let started = 0;
+    let resolveStarted!: () => void;
+    const readsStarted = new Promise<void>((resolve) => { resolveStarted = resolve; });
+    const internal = service as unknown as {
+      withOperationLock<T>(signal: AbortSignal | undefined, operation: (signal: AbortSignal) => Promise<T>, queueTimeoutMs?: number, operationTimeoutMs?: number, mode?: "exclusive" | "read"): Promise<T>;
+      activeReadOperations: number;
+      readPermitWaiters: unknown[];
+    };
+    const reads = Array.from({ length: 8 }, (_, index) => internal.withOperationLock(undefined, async () => {
+      started += 1;
+      if (started === 8) resolveStarted();
+      await new Promise<void>((resolve) => { releases[index] = resolve; });
+      return index;
+    }, 500, undefined, "read"));
+    const releaseAll = (): void => {
+      for (const release of releases) {
+        release?.();
+      }
+    };
+    try {
+      await readsStarted;
+      const controller = new AbortController();
+      const reader = internal.withOperationLock(controller.signal, async () => "must-not-run", 100, undefined, "read");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(internal.readPermitWaiters).toHaveLength(1);
+      controller.abort();
+      await expect(reader).rejects.toMatchObject({ code: "CANCELLED", retryable: false });
+      expect(internal.readPermitWaiters).toHaveLength(0);
+      expect(internal.activeReadOperations).toBe(8);
+      releaseAll();
+      await vi.advanceTimersByTimeAsync(0);
+      await expect(Promise.all(reads)).resolves.toHaveLength(8);
+      expect(internal.activeReadOperations).toBe(0);
+    } finally {
+      releaseAll();
+      await vi.advanceTimersByTimeAsync(0);
+      await service.close();
+      vi.useRealTimers();
+    }
+  });
+
   it("normalizes raw browser timeout and cancellation failures at the lock boundary", async () => {
     const service = new BrowserService(testConfig(), new SecurityPolicy(testConfig()), new Logger("error", {}, () => undefined));
     const internal = service as unknown as {
