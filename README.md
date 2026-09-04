@@ -56,7 +56,11 @@ Ask: *“Scrape pricing into a table”*, *“Fill this form with ~/resume.pdf�
 
 ## How to use
 
-Talk to your harness normally. It can call `browser_navigate` → `browser_snapshot` → `browser_click` and the rest of the MCP surface as needed. For a challenge, `browser_solve_challenge` returns fresh bounded visual/state evidence and an attempt budget; the connected AI keeps using ordinary browser actions and calls it again until the final classification is clear or the budget is exhausted. Human handoff remains available only as an explicit final option.
+Talk to your harness normally. The preferred loop is `browser_navigate`/`browser_snapshot` → one mutation → verify. Element actions accept exactly one current `target`, `ref` (`e5`/`ref:e5`), CSS `selector`, or zero-based `index`; refresh these after navigation or DOM changes. Set `includeSnapshot: true` on a mutation to combine the mutation and its trailing verification snapshot. `browser_batch` is useful for short independent sequences; its `timeoutMs` is a whole-batch deadline (120 seconds by default, 600 seconds maximum).
+
+Prefer canonical tools such as `browser_tabs`, `browser_snapshot`, `browser_input`, `browser_back`, `browser_close`, and `browser_extract`. Browser-use compatibility aliases remain available and are labeled as aliases in `tools/list`. Deterministic stale-reference, frame, dialog, element, and browser-recovery errors include a compact recovery tool suggestion.
+
+For a challenge, `browser_solve_challenge` returns fresh bounded visual/state evidence and an attempt budget; the connected AI keeps using ordinary browser actions and calls it again until the final classification is clear or the budget is exhausted. Human handoff remains available only as an explicit final option.
 
 Browser identity remains native, page JavaScript is available by default, and
 behavioral timing is off for fast deterministic input. Set the explicit

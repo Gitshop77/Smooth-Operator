@@ -448,8 +448,10 @@ acquire a profile lease; the next browser operation retries acquisition.
 `SMOOTH_OPERATOR_ALLOW_EVAL=false` when it is not wanted). `browser_exec`
 accepts only a JSON array of validated browser actions; it is not a shell,
 Python, or arbitrary code runner. Its explicit `evaluate` action still follows
-the page-evaluation policy. Destructive batch actions require explicit
-confirmation. There is no generic arbitrary CDP command or host-code execution
+the page-evaluation policy, and its optional `timeoutMs` is the same whole-batch
+deadline as `browser_batch` (120,000 ms default, 600,000 ms maximum).
+Destructive batch actions require explicit confirmation. There is no generic
+arbitrary CDP command or host-code execution
 tool. `browser_wait_for_human` pauses for an operator to complete a
 visible sign-in or challenge. `browser_solve_challenge` is an internal
 connected-AI observe/act/verify loop: it returns bounded evidence and is
@@ -466,6 +468,16 @@ revision. A snapshot failure is reported as `snapshot: null` with a bounded
 `snapshotError`; the completed mutation remains a success. `browser_batch`
 accepts the same option at the top level and captures only one snapshot after
 the final action.
+
+Element-targeting tools accept exactly one of `target`, `ref` (`e5` or
+`ref:e5`), CSS `selector`, or zero-based `index`, plus the operation fields.
+`browser_select` additionally requires exactly one of `optionValue` or
+`optionValues`; `browser_upload` requires exactly one target form and exactly
+one of `filePath` or `filePaths`. Snapshot refs and indexes are invalidated by
+navigation and DOM-changing actions, so refresh the snapshot before reuse.
+Prefer canonical tools (`browser_tabs`, `browser_snapshot`, `browser_input`,
+`browser_back`, `browser_close`, `browser_extract`); browser-use compatibility
+aliases are retained and labeled in `tools/list`.
 
 The current-page observation tools `browser_interactive`, `browser_frames`,
 `browser_page_info`, and `browser_challenge` accept an optional `pageId`; omit
@@ -498,11 +510,18 @@ that the selected action cannot consume is rejected instead of being silently
 ignored.
 
 Each batch step enforces its own `timeoutMs` or the configured action deadline.
-The total batch budget includes the individual step budgets. A step that
+The optional top-level `timeoutMs` is the whole-batch deadline, defaulting to
+120,000 ms and capped at 600,000 ms; it is the smaller of that value and the
+sum of step budgets. Queue admission still uses the single-action timeout, so
+long batches do not wait minutes for a turn. A step that
 ignores cancellation is retired before the browser queue advances; subsequent
 steps do not execute after a failure. Without an explicit deadline, requested
 wait/hold durations are added to the setup budget, and human handoff retains
 its documented 120-second default.
+
+Mapped deterministic errors include a bounded `recovery` object with the next
+tool and short instruction. For browser recovery, list sessions and use the
+returned `session_id` with `browser_close_session` before retrying.
 
 If browser teardown times out or fails, later browser work returns the
 retryable `BROWSER_RECOVERY_REQUIRED` error. Call `browser_close_session` to
@@ -539,8 +558,9 @@ allowlisted attributes, selected computed styles, pseudo-element summaries,
 animation metadata, and shallow child structure. Script text, event-handler
 source, form values, and arbitrary data attributes are omitted.
 
-`browser_upload` accepts the existing single `filePath` or a `filePaths` array
-of up to 20 paths, but not both. Every source must pass the allowed-root,
+`browser_upload` accepts `target`, `ref`, `selector`, or `index`, plus the
+existing single `filePath` or a `filePaths` array of up to 20 paths, but not
+both. Every source must pass the allowed-root,
 no-follow, and file-identity checks. Each file is at most 50 MiB and the
 aggregate is at most 100 MiB; multiple paths require a target input with the
 `multiple` attribute. Sources are staged sequentially and every staging path is
