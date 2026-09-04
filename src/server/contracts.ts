@@ -10,6 +10,8 @@ const StorageKey = (max: number) => z.string().max(max);
 export const MCP_PAGE_TEXT_MAX_CHARS = 8_000;
 export const BROWSER_ACTION_PLAN_MAX_STEPS = 100;
 export const BROWSER_BATCH_MAX_STEPS = 50;
+export const BROWSER_BATCH_DEFAULT_TIMEOUT_MS = 120_000;
+export const BROWSER_BATCH_MAX_TIMEOUT_MS = 600_000;
 export const UPLOAD_MAX_FILES = 20;
 export const UPLOAD_MAX_BYTES = 50 * 1024 * 1024;
 export const UPLOAD_MAX_TOTAL_BYTES = 100 * 1024 * 1024;
@@ -272,6 +274,10 @@ export const BrowserActionSchema = BrowserActionFieldsSchema.extend({ action: Ac
   }
   if (input.coordinateY !== undefined && input.coordinate_y !== undefined) {
     context.addIssue({ code: "custom", message: "Provide coordinateY or coordinate_y, not both." });
+  }
+  if ((input.coordinateX !== undefined || input.coordinateY !== undefined)
+    && (input.coordinate_x !== undefined || input.coordinate_y !== undefined)) {
+    context.addIssue({ code: "custom", message: "Use either coordinateX/coordinateY or coordinate_x/coordinate_y, not mixed forms." });
   }
   if ((input.coordinateX === undefined) !== (input.coordinateY === undefined)) {
     context.addIssue({ code: "custom", message: "coordinateX and coordinateY must be provided together." });
@@ -668,22 +674,7 @@ const ClickFieldsSchema = z.object({
   ...PageInput,
 }).strict();
 
-const ClickTargetFormSchema = z.union([
-  ClickFieldsSchema.extend({ target: BoundedString(2_000) }),
-  ClickFieldsSchema.extend({ ref: z.string().trim().min(1).max(200).regex(/^(?:ref:)?e[1-9]\d*$/, "ref must be an element reference such as e5.") }),
-  ClickFieldsSchema.extend({ selector: BoundedString(2_000) }),
-  ClickFieldsSchema.extend({ index: z.number().int().min(0).max(1_000) }),
-  ClickFieldsSchema.extend({
-    coordinateX: z.number().finite().min(0).max(100_000),
-    coordinateY: z.number().finite().min(0).max(100_000),
-  }),
-  ClickFieldsSchema.extend({
-    coordinate_x: z.number().finite().min(0).max(100_000),
-    coordinate_y: z.number().finite().min(0).max(100_000),
-  }),
-]);
-
-export const ClickRequestSchema = ClickTargetFormSchema.superRefine((input, context) => {
+export const ClickRequestSchema = ClickFieldsSchema.superRefine((input, context) => {
   const targetForms = [input.target !== undefined, input.ref !== undefined, input.selector !== undefined, input.index !== undefined].filter(Boolean).length;
   if (targetForms > 1) {
     context.addIssue({ code: "custom", message: "Provide exactly one of target, ref, selector, or index." });
@@ -692,7 +683,7 @@ export const ClickRequestSchema = ClickTargetFormSchema.superRefine((input, cont
   const hasX = input.coordinateX !== undefined || input.coordinate_x !== undefined;
   const hasY = input.coordinateY !== undefined || input.coordinate_y !== undefined;
   if (!hasTarget && !(hasX && hasY)) {
-    context.addIssue({ code: "custom", message: "Provide target/index or both coordinateX and coordinateY." });
+    context.addIssue({ code: "custom", message: "Provide exactly one of target, ref, selector, or index, or both coordinateX and coordinateY." });
   }
   if (hasX !== hasY) {
     context.addIssue({ code: "custom", message: "coordinateX and coordinateY must be provided together." });
@@ -709,6 +700,10 @@ export const ClickRequestSchema = ClickTargetFormSchema.superRefine((input, cont
   if (input.coordinateY !== undefined && input.coordinate_y !== undefined) {
     context.addIssue({ code: "custom", message: "Provide coordinateY or coordinate_y, not both." });
   }
+  if ((input.coordinateX !== undefined || input.coordinateY !== undefined)
+    && (input.coordinate_x !== undefined || input.coordinate_y !== undefined)) {
+    context.addIssue({ code: "custom", message: "Use either coordinateX/coordinateY or coordinate_x/coordinate_y, not mixed forms." });
+  }
 });
 
 const InputFieldsSchema = z.object({
@@ -723,14 +718,7 @@ const InputFieldsSchema = z.object({
   ...PageInput,
 }).strict();
 
-const InputTargetFormSchema = z.union([
-  InputFieldsSchema.extend({ target: BoundedString(2_000) }),
-  InputFieldsSchema.extend({ ref: z.string().trim().min(1).max(200).regex(/^(?:ref:)?e[1-9]\d*$/, "ref must be an element reference such as e5.") }),
-  InputFieldsSchema.extend({ selector: BoundedString(2_000) }),
-  InputFieldsSchema.extend({ index: z.number().int().min(0).max(1_000) }),
-]);
-
-export const InputRequestSchema = InputTargetFormSchema.superRefine((input, context) => {
+export const InputRequestSchema = InputFieldsSchema.superRefine((input, context) => {
   const targetForms = [input.target !== undefined, input.ref !== undefined, input.selector !== undefined, input.index !== undefined].filter(Boolean).length;
   if (targetForms > 1) {
     context.addIssue({ code: "custom", message: "Provide exactly one of target, ref, selector, or index." });
@@ -743,21 +731,38 @@ export const InputRequestSchema = InputTargetFormSchema.superRefine((input, cont
   }
 });
 
-const TargetFieldsSchema = z.object({ target: BoundedString(2_000).optional(), index: z.number().int().min(0).max(1_000).optional(), ...PageInput }).strict();
-const TargetFormSchema = z.union([
-  TargetFieldsSchema.extend({ target: BoundedString(2_000) }),
-  TargetFieldsSchema.extend({ index: z.number().int().min(0).max(1_000) }),
-]);
+const TargetFieldsSchema = z.object({
+  target: BoundedString(2_000).optional(),
+  ref: z.string().trim().min(1).max(200).regex(/^(?:ref:)?e[1-9]\d*$/, "ref must be an element reference such as e5.").optional(),
+  selector: BoundedString(2_000).optional(),
+  index: z.number().int().min(0).max(1_000).optional(),
+  ...PageInput,
+}).strict();
 
-export const TargetRequestSchema = TargetFormSchema.superRefine((input, context) => {
-  if (input.target !== undefined && input.index !== undefined) {
-    context.addIssue({ code: "custom", message: "Provide target or index, not both." });
-  }
-  if (input.target === undefined && input.index === undefined) {
-    context.addIssue({ code: "custom", message: "Provide target or index." });
+export const TargetRequestSchema = TargetFieldsSchema.superRefine((input, context) => {
+  const targetCount = [input.target, input.ref, input.selector, input.index].filter((value) => value !== undefined).length;
+  if (targetCount !== 1) {
+    context.addIssue({ code: "custom", message: "Provide exactly one of target, ref, selector, or index." });
   }
 });
 export const SelectorRequestSchema = z.object({ selector: BoundedString(2_000), ...PageInput }).strict();
+export const SelectRequestSchema = z.object({
+  target: BoundedString(2_000).optional(),
+  ref: z.string().trim().min(1).max(200).regex(/^(?:ref:)?e[1-9]\d*$/, "ref must be an element reference such as e5.").optional(),
+  selector: BoundedString(2_000).optional(),
+  index: z.number().int().min(0).max(1_000).optional(),
+  optionValue: BoundedString(2_000).optional(),
+  optionValues: z.array(BoundedString(2_000)).min(1).max(200).optional(),
+  ...PageInput,
+}).strict().superRefine((input, context) => {
+  const targetCount = [input.target, input.ref, input.selector, input.index].filter((value) => value !== undefined).length;
+  if (targetCount !== 1) {
+    context.addIssue({ code: "custom", message: "Provide exactly one of target, ref, selector, or index." });
+  }
+  if ((input.optionValue === undefined) === (input.optionValues === undefined)) {
+    context.addIssue({ code: "custom", message: "Provide exactly one of optionValue or optionValues." });
+  }
+});
 const InspectElementTargetFieldsSchema = z.object({
   target: BoundedString(2_000).optional(),
   ref: z.string().trim().min(1).max(200).regex(/^(?:ref:)?e[1-9]\d*$/, "ref must be an element reference such as e5.").optional(),
@@ -828,7 +833,19 @@ export const ScreenshotRequestSchema = z.object({ fullPage: z.boolean().optional
   }
 });
 export const PdfRequestSchema = z.object({ outputPath: BoundedString(4_000), ...PageInput }).strict();
-export const UploadRequestSchema = z.object({ selector: BoundedString(2_000), filePath: BoundedString(4_000).optional(), filePaths: z.array(BoundedString(4_000)).min(1).max(UPLOAD_MAX_FILES).optional(), ...PageInput }).strict().superRefine((input, context) => {
+export const UploadRequestSchema = z.object({
+  target: BoundedString(2_000).optional(),
+  ref: z.string().trim().min(1).max(200).regex(/^(?:ref:)?e[1-9]\d*$/, "ref must be an element reference such as e5.").optional(),
+  selector: BoundedString(2_000).optional(),
+  index: z.number().int().min(0).max(1_000).optional(),
+  filePath: BoundedString(4_000).optional(),
+  filePaths: z.array(BoundedString(4_000)).min(1).max(UPLOAD_MAX_FILES).optional(),
+  ...PageInput,
+}).strict().superRefine((input, context) => {
+  const targetCount = [input.target, input.ref, input.selector, input.index].filter((value) => value !== undefined).length;
+  if (targetCount !== 1) {
+    context.addIssue({ code: "custom", message: "Provide exactly one of target, ref, selector, or index." });
+  }
   const hasFilePath = input.filePath !== undefined;
   const hasFilePaths = input.filePaths !== undefined;
   if (hasFilePath && hasFilePaths) {
@@ -945,6 +962,8 @@ export const BatchRequestSchema = z.object({
   actions: z.array(BrowserActionInputSchema).min(1).max(BROWSER_BATCH_MAX_STEPS).superRefine(validateActionPlan),
   confirmDestructive: z.boolean().optional(),
   includeSnapshot: z.boolean().optional(),
+  // Whole-batch deadline; individual action timeoutMs values remain per-step.
+  timeoutMs: z.number().int().min(100).max(BROWSER_BATCH_MAX_TIMEOUT_MS).optional(),
 }).strict().superRefine((input, context) => {
   if (!input.confirmDestructive && input.actions.some((action) => isDestructiveBatchAction(action.action))) {
     context.addIssue({ code: "custom", message: "This batch contains destructive actions. Set confirmDestructive=true to execute them." });
