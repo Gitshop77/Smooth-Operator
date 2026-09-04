@@ -1,12 +1,12 @@
 import { dirname, isAbsolute, join, parse, resolve, win32 } from "node:path";
 import { accessSync, constants, statSync } from "node:fs";
-import { chmod, lstat, rename, unlink, writeFile, type FileHandle } from "node:fs/promises";
+import { lstat, rename, unlink, type FileHandle } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isIP } from "node:net";
 import { domainToASCII } from "node:url";
 
 import { AppError } from "./errors";
-import { createConfigBackup, ensureSecureDirectory, parseJsonc, readSecureConfigFile } from "./installer";
+import { createConfigBackup, ensureSecureDirectory, parseJsonc, readSecureConfigFile, writeSecureTempFile } from "./installer";
 import { createUi } from "./ui";
 import { SERVER_VERSION } from "./version";
 
@@ -668,8 +668,7 @@ export async function persistWizardConfig(rawChoices: WizardChoices, homeDir: st
   const { randomUUID } = await import("node:crypto");
   const tmpPath = `${configPath}.tmp-${process.pid}-${randomUUID()}`;
   try {
-    await writeFile(tmpPath, serializedConfig, { mode: 0o600, flag: "wx" });
-    await chmod(tmpPath, 0o600);
+    await writeSecureTempFile(tmpPath, serializedConfig);
   } catch (error) {
     await unlink(tmpPath).catch(() => undefined);
     throw new AppError("INSTALL_CONFIG_FAILED", "Could not write the temporary server configuration.", { cause: error });
@@ -722,35 +721,78 @@ export async function launchPersonalChrome(opts: PersonalChromeOptions): Promise
     "--no-default-browser-check",
     ...(opts.headless ? ["--headless=new"] : []),
   ];
-  const child = spawnFn(executable, args, { detached: true, stdio: "ignore", windowsHide: true });
-  child.unref();
+  type LaunchChild = {
+    on?: (event: string, listener: (error: unknown) => void) => unknown;
+    kill?: (signal?: NodeJS.Signals | number) => boolean;
+    unref?: () => void;
+  };
+  let child: LaunchChild;
+  try {
+    child = spawnFn(executable, args, { detached: true, stdio: "ignore", windowsHide: true }) as LaunchChild;
+  } catch (error) {
+    throw new AppError("BROWSER_LAUNCH_FAILED", "Could not launch Chrome.", { cause: error });
+  }
+  let spawnFailed = false;
+  let spawnError: unknown;
+  const onSpawnError = (error: unknown): void => {
+    spawnFailed = true;
+    spawnError = error;
+  };
+  let succeeded = false;
   const probe = opts.probe;
   const attempts = opts.probeAttempts ?? DEFAULT_PROBE_ATTEMPTS;
   const deadline = opts.probeAttempts === undefined ? Date.now() + DEFAULT_PROBE_DEADLINE_MS : undefined;
   let attemptsMade = 0;
-  for (let attempt = 0; attempt < attempts; attempt += 1) {
-    if (deadline !== undefined && Date.now() >= deadline) {
-      break;
-    }
-    // Probe immediately after spawning. Chrome often has its DevTools endpoint
-    // ready before the first tick. Later probes retain a short interval, while
-    // the default deadline prevents a slow endpoint from stretching startup.
-    if (attempt > 0) {
-      const remaining = deadline === undefined ? PROBE_INTERVAL_MS : deadline - Date.now();
+  try {
+    // Attach before unref/probing: real ChildProcess instances emit spawn
+    // failures asynchronously, and an unhandled error would crash the wizard.
+    child.on?.("error", onSpawnError);
+    child.unref?.();
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      if (deadline !== undefined && Date.now() >= deadline) {
+        break;
+      }
+      // Probe immediately after spawning. Chrome often has its DevTools endpoint
+      // ready before the first tick. Later probes retain a short interval, while
+      // the default deadline prevents a slow endpoint from stretching startup.
+      if (attempt > 0) {
+        const remaining = deadline === undefined ? PROBE_INTERVAL_MS : deadline - Date.now();
+        if (remaining <= 0) break;
+        await new Promise((resolveTimeout) => setTimeout(resolveTimeout, Math.min(PROBE_INTERVAL_MS, remaining)));
+      }
+      const remaining = deadline === undefined ? PROBE_TIMEOUT_MS : Math.min(PROBE_TIMEOUT_MS, deadline - Date.now());
       if (remaining <= 0) break;
-      await new Promise((resolveTimeout) => setTimeout(resolveTimeout, Math.min(PROBE_INTERVAL_MS, remaining)));
+      attemptsMade += 1;
+      try {
+        const res = await boundedProbe(probe, `http://127.0.0.1:${port}/json/version`, remaining);
+        if (spawnFailed) {
+          throw new AppError("BROWSER_LAUNCH_FAILED", "Could not launch Chrome.", { cause: spawnError });
+        }
+        if (res.state === "live") {
+          succeeded = true;
+          return { url: `http://127.0.0.1:${port}` };
+        }
+      } catch {
+        if (spawnFailed) {
+          throw new AppError("BROWSER_LAUNCH_FAILED", "Could not launch Chrome.", { cause: spawnError });
+        }
+        // Endpoint not ready yet; keep probing until attempts are exhausted.
+      }
     }
-    const remaining = deadline === undefined ? PROBE_TIMEOUT_MS : Math.min(PROBE_TIMEOUT_MS, deadline - Date.now());
-    if (remaining <= 0) break;
-    attemptsMade += 1;
-    try {
-      const res = await boundedProbe(probe, `http://127.0.0.1:${port}/json/version`, remaining);
-      if (res.state === "live") return { url: `http://127.0.0.1:${port}` };
-    } catch {
-      // Endpoint not ready yet; keep probing until attempts are exhausted.
+    if (spawnFailed) {
+      throw new AppError("BROWSER_LAUNCH_FAILED", "Could not launch Chrome.", { cause: spawnError });
     }
+    throw new AppError("BROWSER_CONNECT_TIMEOUT", `Chrome DevTools endpoint on port ${port} did not become ready after ${attemptsMade} probes. Close Chrome or choose another port.`);
+  } catch (error) {
+    if (!succeeded) {
+      try {
+        child.kill?.("SIGTERM");
+      } catch {
+        // Best-effort cleanup must not replace the stable launch/probe error.
+      }
+    }
+    throw error;
   }
-  throw new AppError("BROWSER_CONNECT_TIMEOUT", `Chrome DevTools endpoint on port ${port} did not become ready after ${attemptsMade} probes. Close Chrome or choose another port.`);
 }
 
 async function boundedProbe(probe: ProbeFunction, url: string, timeoutMs: number): Promise<ProbeResult> {
