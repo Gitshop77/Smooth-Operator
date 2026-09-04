@@ -694,8 +694,9 @@ async function readBoundedResponseText(response: Response, maxBytes: number, sig
     return "";
   }
   const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
+  const initialSize = Math.min(64 * 1024, maxBytes + 1);
+  let buffer = new Uint8Array(Math.max(1, initialSize));
+  let offset = 0;
   let cancelReader = false;
   try {
     while (true) {
@@ -709,14 +710,27 @@ async function readBoundedResponseText(response: Response, maxBytes: number, sig
           details: { classification: "invalid_response" },
         });
       }
-      total += result.value.byteLength;
-      if (total > maxBytes) {
+      const chunk = result.value;
+      // Check the complete chunk before copying so an overflowing response
+      // cannot partially populate a retained buffer.
+      if (chunk.byteLength > maxBytes - offset) {
         cancelReader = true;
         throw new AppError("RESEARCH_RESPONSE_TOO_LARGE", "The search response exceeded the safety limit.", {
           details: { classification: "response_too_large", maxBytes },
         });
       }
-      chunks.push(result.value);
+      const required = offset + chunk.byteLength;
+      if (required > buffer.byteLength) {
+        let nextLength = buffer.byteLength;
+        while (nextLength < required) {
+          nextLength = Math.min(maxBytes + 1, Math.max(nextLength * 2, required));
+        }
+        const expanded = new Uint8Array(nextLength);
+        expanded.set(buffer.subarray(0, offset));
+        buffer = expanded;
+      }
+      buffer.set(chunk, offset);
+      offset = required;
     }
   } catch (error) {
     cancelReader = true;
@@ -732,11 +746,5 @@ async function readBoundedResponseText(response: Response, maxBytes: number, sig
       // still has a pending read when its lock is released.
     }
   }
-  const bytes = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return new TextDecoder().decode(bytes);
+  return new TextDecoder().decode(buffer.subarray(0, offset));
 }

@@ -13,6 +13,24 @@ function researchPolicy(): SecurityPolicy {
   return policy;
 }
 
+function streamingResponse(chunks: readonly Uint8Array[], onCancel?: () => void): Response {
+  let index = 0;
+  const body = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      const chunk = chunks[index++];
+      if (chunk === undefined) {
+        controller.close();
+      } else {
+        controller.enqueue(chunk);
+      }
+    },
+    cancel() {
+      onCancel?.();
+    },
+  });
+  return new Response(body, { status: 200 });
+}
+
 describe("research service", () => {
   it("normalizes query whitespace and control characters before policy and fetch", async () => {
     const fetchMock = vi.fn(async (_url: string) => new Response("", { status: 200 }));
@@ -134,6 +152,100 @@ describe("research service", () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response("x".repeat(2_000_001), { status: 200 })));
     const service = new ResearchService(researchPolicy(), new Logger("error", {}, () => undefined));
     await expect(service.research("oversized")).rejects.toThrow(/safety limit/);
+    vi.unstubAllGlobals();
+  });
+
+  it("reads many tiny response chunks without retaining a chunk array", async () => {
+    const bytes = new TextEncoder().encode("x".repeat(100_000));
+    const chunks = Array.from(bytes, (value) => new Uint8Array([value]));
+    vi.stubGlobal("fetch", vi.fn(async () => streamingResponse(chunks)));
+    const service = new ResearchService(researchPolicy(), new Logger("error", {}, () => undefined));
+    await expect(service.research("tiny-chunks")).resolves.toMatchObject({ results: [] });
+    vi.unstubAllGlobals();
+  });
+
+  it("grows response storage geometrically across chunk boundaries", async () => {
+    const fixture = '<a class="result__a" href="https://example.com/grown">Grown</a><div class="result__snippet">ok</div>';
+    const encoded = new TextEncoder().encode(fixture);
+    const chunks = [
+      encoded.slice(0, 65_536),
+      encoded.slice(65_536, 131_072),
+      encoded.slice(131_072),
+    ];
+    // Pad the first two chunks to exercise the initial allocation and growth
+    // path while retaining a valid result fixture at the end.
+    const padded = [
+      new Uint8Array([...new Uint8Array(65_536 - chunks[0].byteLength), ...chunks[0]]),
+      new Uint8Array(65_536),
+      chunks[1],
+      chunks[2],
+    ];
+    vi.stubGlobal("fetch", vi.fn(async () => streamingResponse(padded)));
+    const service = new ResearchService(researchPolicy(), new Logger("error", {}, () => undefined));
+    await expect(service.research("grown", { maxResults: 1 })).resolves.toMatchObject({
+      results: [{ url: "https://example.com/grown" }],
+    });
+    vi.unstubAllGlobals();
+  });
+
+  it("accepts exactly the response byte limit", async () => {
+    const exact = new Uint8Array(2_000_000).fill(120);
+    const chunks = Array.from({ length: Math.ceil(exact.byteLength / 65_536) }, (_, index) => exact.slice(index * 65_536, (index + 1) * 65_536));
+    vi.stubGlobal("fetch", vi.fn(async () => streamingResponse(chunks)));
+    const service = new ResearchService(researchPolicy(), new Logger("error", {}, () => undefined));
+    await expect(service.research("exact-limit")).resolves.toMatchObject({ results: [] });
+    vi.unstubAllGlobals();
+  });
+
+  it("cancels a response immediately when one byte exceeds the limit", async () => {
+    let cancelled = false;
+    const exact = new Uint8Array(2_000_000).fill(120);
+    let index = 0;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (index < 2) {
+          controller.enqueue(index++ === 0 ? exact : new Uint8Array([120]));
+          return;
+        }
+        // Keep the source pending so reader.cancel() cannot be masked by a
+        // producer that closes immediately after the overflowing chunk.
+        return new Promise<void>(() => undefined);
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(body, { status: 200 })));
+    const service = new ResearchService(researchPolicy(), new Logger("error", {}, () => undefined));
+    await expect(service.research("one-byte-overflow")).rejects.toMatchObject({ code: "RESEARCH_RESPONSE_TOO_LARGE" });
+    await vi.waitFor(() => expect(cancelled).toBe(true));
+    vi.unstubAllGlobals();
+  });
+
+  it("cancels and releases a reader when abort arrives during a pending read", async () => {
+    let resolveReadStarted: (() => void) | undefined;
+    const readStarted = new Promise<void>((resolve) => { resolveReadStarted = resolve; });
+    const cancel = vi.fn(() => Promise.resolve());
+    const releaseLock = vi.fn();
+    const body = {
+      getReader: () => ({
+        read: () => {
+          resolveReadStarted?.();
+          return new Promise<{ done: false; value: Uint8Array }>(() => undefined);
+        },
+        cancel,
+        releaseLock,
+      }),
+    };
+    vi.stubGlobal("fetch", vi.fn(async () => ({ status: 200, ok: true, headers: new Headers(), body }) as unknown as Response));
+    const service = new ResearchService(researchPolicy(), new Logger("error", {}, () => undefined));
+    const controller = new AbortController();
+    const pending = service.research("pending-read", {}, controller.signal);
+    await readStarted;
+    controller.abort();
+    await expect(pending).rejects.toMatchObject({ code: "CANCELLED" });
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(releaseLock).toHaveBeenCalledTimes(1);
     vi.unstubAllGlobals();
   });
 
