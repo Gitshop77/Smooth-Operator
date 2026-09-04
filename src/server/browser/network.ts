@@ -195,9 +195,6 @@ export class NetworkJournal {
   /** Search all safe metadata fields using one bounded case-insensitive scan. */
   search(searchText: string, options: NetworkJournalSearchOptions = {}): NetworkJournalPage {
     const query = normalizeSearchText(searchText);
-    if (!query) {
-      throw new RangeError("searchText must be a non-empty string.");
-    }
     const normalized = normalizeQuery(options);
     return this.scan(normalized, (stored) => stored.searchText.includes(query) && matchesFilter(stored, normalized));
   }

@@ -465,11 +465,7 @@ function writeNativeJsonResponse(
     ...(status === 503 ? { "retry-after": "1" } : {}),
     ...headers,
   });
-  if (body !== undefined) {
-    response.end(body);
-  } else {
-    response.end();
-  }
+  response.end(body);
 }
 
 function setCorsHeaders(request: IncomingMessage, response: import("node:http").ServerResponse): void {

@@ -142,9 +142,7 @@ export function classifyChallenge(
   const visibleContext = hasChallengeContext(`${title}\n${text}`);
   const hasPasswordField = /type\s*=\s*["']password["']|autocomplete\s*=\s*["'][^"']*(?:username|current-password)[^"']*["']/i.test(haystack);
   const explicitRateLimitText = /(?:too many requests|rate limit exceeded|temporarily blocked|slow down)/i.test(`${title}\n${text}`);
-  // Compute marker evidence once per challenge snapshot. The previous loop
-  // rebuilt the same regular expressions for every rule and repeatedly scanned
-  // the same frame/visible-marker arrays.
+  // Reuse bounded marker text and cached regular expressions for every rule.
   const markerInMarkup = new Set<string>();
   const visibleMarkerInMarkup = new Set<string>();
   for (const rule of RULES) {

@@ -186,7 +186,7 @@ function resolveBrowserViewport(width: number | undefined, height: number | unde
 }
 
 function parseList(value: string | undefined, fallback: readonly string[] = [], maxItemChars = MAX_CONFIG_FILE_ROOT_CHARS): string[] {
-  const source = value === undefined ? undefined : value;
+  const source = value;
   if (source !== undefined && source.length > MAX_CONFIG_LIST_RAW_CHARS) {
     throw new AppError("CONFIG_INVALID", `Configured comma-separated lists must be ${MAX_CONFIG_LIST_RAW_CHARS} characters or shorter.`);
   }

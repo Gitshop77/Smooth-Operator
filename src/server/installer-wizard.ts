@@ -738,7 +738,6 @@ export async function launchPersonalChrome(opts: PersonalChromeOptions): Promise
     spawnFailed = true;
     spawnError = error;
   };
-  let succeeded = false;
   const probe = opts.probe;
   const attempts = opts.probeAttempts ?? DEFAULT_PROBE_ATTEMPTS;
   const deadline = opts.probeAttempts === undefined ? Date.now() + DEFAULT_PROBE_DEADLINE_MS : undefined;
@@ -769,7 +768,6 @@ export async function launchPersonalChrome(opts: PersonalChromeOptions): Promise
           throw new AppError("BROWSER_LAUNCH_FAILED", "Could not launch Chrome.", { cause: spawnError });
         }
         if (res.state === "live") {
-          succeeded = true;
           return { url: `http://127.0.0.1:${port}` };
         }
       } catch {
@@ -784,12 +782,10 @@ export async function launchPersonalChrome(opts: PersonalChromeOptions): Promise
     }
     throw new AppError("BROWSER_CONNECT_TIMEOUT", `Chrome DevTools endpoint on port ${port} did not become ready after ${attemptsMade} probes. Close Chrome or choose another port.`);
   } catch (error) {
-    if (!succeeded) {
-      try {
-        child.kill?.("SIGTERM");
-      } catch {
-        // Best-effort cleanup must not replace the stable launch/probe error.
-      }
+    try {
+      child.kill?.("SIGTERM");
+    } catch {
+      // Best-effort cleanup must not replace the stable launch/probe error.
     }
     throw error;
   }
