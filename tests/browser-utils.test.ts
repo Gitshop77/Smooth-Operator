@@ -31,5 +31,19 @@ describe("browser pure helpers", () => {
   it("fails closed on oversized URL and glob inputs", () => {
     expect(sanitizeUrl(`https://example.com/${"a".repeat(20_000)}`)).toBe("[URL_TOO_LONG]");
     expect(globMatches("https://example.com/ok", "*".repeat(20_000))).toBe(false);
+    expect(globMatches("a".repeat(20_000), "*")).toBe(false);
+    expect(sanitizeUrl("not a url")).toBe("[INVALID_URL]");
+  });
+
+  it("redacts sensitive hashes, truncates long paths, and reuses compiled globs", () => {
+    expect(sanitizeUrl("https://example.com/ok#access_token=secret")).toContain("#[redacted]");
+    const longPath = sanitizeUrl(`https://example.com/${"p".repeat(3_000)}`);
+    expect(longPath).toContain("[truncated]");
+    expect(globMatches("https://example.test/a", "https://example.test/*")).toBe(true);
+    expect(globMatches("https://example.test/a", "https://example.test/*")).toBe(true);
+    for (let index = 0; index < 130; index += 1) {
+      expect(globMatches(`https://example.test/item-${index}`, `https://example.test/item-${index}`)).toBe(true);
+    }
+    expect(globMatches("https://example.test/a", "https://example.test/*")).toBe(true);
   });
 });

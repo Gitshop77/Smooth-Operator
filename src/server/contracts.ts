@@ -130,20 +130,13 @@ const BrowserActionFieldsSchema = z.object({
   value: z.string().max(20_000).optional(),
   url: BoundedString(8_000).optional(),
   newTab: z.boolean().optional(),
-  new_tab: z.boolean().optional(),
   coordinateX: z.number().finite().min(0).max(100_000).optional(),
   coordinateY: z.number().finite().min(0).max(100_000).optional(),
-  coordinate_x: z.number().finite().min(0).max(100_000).optional(),
-  coordinate_y: z.number().finite().min(0).max(100_000).optional(),
   startCoordinateX: z.number().finite().min(0).max(100_000).optional(),
   startCoordinateY: z.number().finite().min(0).max(100_000).optional(),
-  start_coordinate_x: z.number().finite().min(0).max(100_000).optional(),
-  start_coordinate_y: z.number().finite().min(0).max(100_000).optional(),
   path: PointerPathSchema,
   endCoordinateX: z.number().finite().min(0).max(100_000).optional(),
   endCoordinateY: z.number().finite().min(0).max(100_000).optional(),
-  end_coordinate_x: z.number().finite().min(0).max(100_000).optional(),
-  end_coordinate_y: z.number().finite().min(0).max(100_000).optional(),
   key: KeyboardString(100).optional(),
   keys: z.array(KeyboardString(100)).min(1).max(32).optional(),
   direction: z.enum(["up", "down", "left", "right"]).optional(),
@@ -160,7 +153,6 @@ const BrowserActionFieldsSchema = z.object({
   outputPath: BoundedString(4_000).optional(),
   code: z.string().trim().min(1).max(40_000).optional(),
   script: z.string().trim().min(1).max(40_000).optional(),
-  expression: z.string().trim().min(1).max(40_000).optional(),
   query: BoundedString(4_000).optional(),
   requestId: BoundedString(256).optional(),
   method: BoundedString(32).optional(),
@@ -180,13 +172,8 @@ const BrowserActionFieldsSchema = z.object({
   format: z.enum(["png", "jpeg"]).optional(),
   quality: z.number().int().min(30).max(100).optional(),
   includeScreenshot: z.boolean().optional(),
-  include_screenshot: z.boolean().optional(),
   fullPage: z.boolean().optional(),
-  full_page: z.boolean().optional(),
-  full: z.boolean().optional(),
   maxDimension: z.number().int().min(100).max(20_000).optional(),
-  max_dim: z.number().int().min(100).max(20_000).optional(),
-  max_bytes: z.number().int().min(100_000).max(20_000_000).optional(),
   button: z.enum(["left", "middle", "right"]).optional(),
   pointerType: z.enum(["mouse", "touch"]).optional(),
   clickCount: z.number().int().min(1).max(3).optional(),
@@ -224,13 +211,10 @@ const ACTION_FIELD_SCOPES: Readonly<Record<string, ReadonlySet<ActionName>>> = {
   query: scopedActions("wait_for_text", "find_text", "search_page", "extract", "search_network_log"),
   value: scopedActions("input", "select_dropdown", "wait_for_url", "alert_send_keys", "set_cookie", "set_storage"),
   url: scopedActions("navigate", "wait_for_url", "search_network_log", "get_cookies", "set_cookie", "delete_cookies"),
-  newTab: scopedActions("navigate", "click"), new_tab: scopedActions("navigate", "click"),
+  newTab: scopedActions("navigate", "click"),
   coordinateX: scopedActions("click", "move"), coordinateY: scopedActions("click", "move"),
-  coordinate_x: scopedActions("click", "move"), coordinate_y: scopedActions("click", "move"),
   startCoordinateX: scopedActions("press_and_hold"), startCoordinateY: scopedActions("press_and_hold"),
-  start_coordinate_x: scopedActions("press_and_hold"), start_coordinate_y: scopedActions("press_and_hold"),
   endCoordinateX: scopedActions("press_and_hold"), endCoordinateY: scopedActions("press_and_hold"),
-  end_coordinate_x: scopedActions("press_and_hold"), end_coordinate_y: scopedActions("press_and_hold"),
   path: scopedActions("press_and_hold"), durationMs: scopedActions("press_and_hold"),
   button: scopedActions("click", "press_and_hold"), pointerType: scopedActions("click"), clickCount: scopedActions("click"),
   key: scopedActions("send_keys"), keys: scopedActions("send_keys"),
@@ -240,7 +224,7 @@ const ACTION_FIELD_SCOPES: Readonly<Record<string, ReadonlySet<ActionName>>> = {
   maxScrolls: scopedActions("scroll_to_bottom"), restoreTop: scopedActions("scroll_to_bottom"),
   state: scopedActions("wait_for_element"), waitUntil: scopedActions("navigate", "click", "go_back", "go_forward", "reload"),
   filePath: scopedActions("upload_file", "save_as_pdf"), filePaths: scopedActions("upload_file"), outputPath: scopedActions("save_as_pdf"),
-  code: scopedActions("evaluate", "run_script"), script: scopedActions("run_script"), expression: scopedActions("evaluate"),
+  code: scopedActions("evaluate", "run_script"), script: scopedActions("run_script"),
   requestId: scopedActions("search_network_log"), method: scopedActions("search_network_log"),
   status: scopedActions("search_network_log"), resourceType: scopedActions("search_network_log"), limit: scopedActions("search_network_log"),
   operation: scopedActions("resource_blocking"), resourceTypes: scopedActions("resource_blocking"),
@@ -249,10 +233,10 @@ const ACTION_FIELD_SCOPES: Readonly<Record<string, ReadonlySet<ActionName>>> = {
   maxChars: scopedActions("extract", "get_html", "page_next", "accessibility_snapshot", "solve_challenge", "get_storage"),
   maxNodes: scopedActions("accessibility_snapshot"), interestingOnly: scopedActions("accessibility_snapshot"),
   maxDepth: scopedActions("inspect_element"), maxChildren: scopedActions("inspect_element"),
-  maxBytes: scopedActions("screenshot"), max_bytes: scopedActions("screenshot"), format: scopedActions("screenshot"), quality: scopedActions("screenshot"),
-  includeScreenshot: scopedActions("solve_challenge"), include_screenshot: scopedActions("solve_challenge"),
-  fullPage: scopedActions("screenshot", "solve_challenge"), full_page: scopedActions("screenshot", "solve_challenge"), full: scopedActions("screenshot", "solve_challenge"),
-  maxDimension: scopedActions("screenshot", "solve_challenge"), max_dim: scopedActions("screenshot", "solve_challenge"),
+  maxBytes: scopedActions("screenshot"), format: scopedActions("screenshot"), quality: scopedActions("screenshot"),
+  includeScreenshot: scopedActions("solve_challenge"),
+  fullPage: scopedActions("screenshot", "solve_challenge"),
+  maxDimension: scopedActions("screenshot", "solve_challenge"),
   clear: scopedActions("input"), append: scopedActions("input"), verify: scopedActions("input"),
   pollMs: scopedActions("wait_for_human"), maxAttempts: scopedActions("solve_challenge"),
   optionValue: scopedActions("select_dropdown"), optionValues: scopedActions("select_dropdown"),
@@ -269,73 +253,17 @@ export const BrowserActionSchema = BrowserActionFieldsSchema.extend({ action: Ac
   if (targetForms > 1) {
     context.addIssue({ code: "custom", message: "Provide exactly one of target, ref, selector, or index." });
   }
-  if (input.coordinateX !== undefined && input.coordinate_x !== undefined) {
-    context.addIssue({ code: "custom", message: "Provide coordinateX or coordinate_x, not both." });
-  }
-  if (input.coordinateY !== undefined && input.coordinate_y !== undefined) {
-    context.addIssue({ code: "custom", message: "Provide coordinateY or coordinate_y, not both." });
-  }
-  if ((input.coordinateX !== undefined || input.coordinateY !== undefined)
-    && (input.coordinate_x !== undefined || input.coordinate_y !== undefined)) {
-    context.addIssue({ code: "custom", message: "Use either coordinateX/coordinateY or coordinate_x/coordinate_y, not mixed forms." });
-  }
   if ((input.coordinateX === undefined) !== (input.coordinateY === undefined)) {
     context.addIssue({ code: "custom", message: "coordinateX and coordinateY must be provided together." });
-  }
-  if ((input.coordinate_x === undefined) !== (input.coordinate_y === undefined)) {
-    context.addIssue({ code: "custom", message: "coordinate_x and coordinate_y must be provided together." });
-  }
-  if (input.endCoordinateX !== undefined && input.end_coordinate_x !== undefined) {
-    context.addIssue({ code: "custom", message: "Provide endCoordinateX or end_coordinate_x, not both." });
-  }
-  if (input.endCoordinateY !== undefined && input.end_coordinate_y !== undefined) {
-    context.addIssue({ code: "custom", message: "Provide endCoordinateY or end_coordinate_y, not both." });
   }
   if ((input.endCoordinateX === undefined) !== (input.endCoordinateY === undefined)) {
     context.addIssue({ code: "custom", message: "endCoordinateX and endCoordinateY must be provided together." });
   }
-  if ((input.end_coordinate_x === undefined) !== (input.end_coordinate_y === undefined)) {
-    context.addIssue({ code: "custom", message: "end_coordinate_x and end_coordinate_y must be provided together." });
-  }
-  if (input.startCoordinateX !== undefined && input.start_coordinate_x !== undefined) {
-    context.addIssue({ code: "custom", message: "Provide startCoordinateX or start_coordinate_x, not both." });
-  }
-  if (input.startCoordinateY !== undefined && input.start_coordinate_y !== undefined) {
-    context.addIssue({ code: "custom", message: "Provide startCoordinateY or start_coordinate_y, not both." });
-  }
   if ((input.startCoordinateX === undefined) !== (input.startCoordinateY === undefined)) {
     context.addIssue({ code: "custom", message: "startCoordinateX and startCoordinateY must be provided together." });
   }
-  if ((input.start_coordinate_x === undefined) !== (input.start_coordinate_y === undefined)) {
-    context.addIssue({ code: "custom", message: "start_coordinate_x and start_coordinate_y must be provided together." });
-  }
-  const hasEndX = input.endCoordinateX !== undefined || input.end_coordinate_x !== undefined;
-  const hasEndY = input.endCoordinateY !== undefined || input.end_coordinate_y !== undefined;
-  if (hasEndX !== hasEndY) {
-    context.addIssue({ code: "custom", message: "endCoordinateX and endCoordinateY must be provided together." });
-  }
-  const hasStartX = input.startCoordinateX !== undefined || input.start_coordinate_x !== undefined;
-  const hasStartY = input.startCoordinateY !== undefined || input.start_coordinate_y !== undefined;
-  if (hasStartX !== hasStartY) {
-    context.addIssue({ code: "custom", message: "startCoordinateX and startCoordinateY must be provided together." });
-  }
-  if (input.path !== undefined && (hasStartX || hasEndX)) {
+  if (input.path !== undefined && (input.startCoordinateX !== undefined || input.endCoordinateX !== undefined)) {
     context.addIssue({ code: "custom", message: "Provide path or start/end coordinates, not both." });
-  }
-  if (input.newTab !== undefined && input.new_tab !== undefined) {
-    context.addIssue({ code: "custom", message: "Provide newTab or new_tab, not both." });
-  }
-  if (input.includeScreenshot !== undefined && input.include_screenshot !== undefined) {
-    context.addIssue({ code: "custom", message: "Provide includeScreenshot or include_screenshot, not both." });
-  }
-  if ([input.fullPage, input.full_page, input.full].filter((value) => value !== undefined).length > 1) {
-    context.addIssue({ code: "custom", message: "Provide only one of fullPage, full_page, or full." });
-  }
-  if (input.maxDimension !== undefined && input.max_dim !== undefined) {
-    context.addIssue({ code: "custom", message: "Provide maxDimension or max_dim, not both." });
-  }
-  if (input.maxBytes !== undefined && input.max_bytes !== undefined) {
-    context.addIssue({ code: "custom", message: "Provide maxBytes or max_bytes, not both." });
   }
   if (input.clear === true && input.append === true) {
     context.addIssue({ code: "custom", message: "Input clear and append cannot both be true." });
@@ -348,12 +276,6 @@ export const BrowserActionSchema = BrowserActionFieldsSchema.extend({ action: Ac
   }
   if (input.url !== undefined && input.value !== undefined && input.action === "wait_for_url") {
     context.addIssue({ code: "custom", message: "Provide url or value, not both." });
-  }
-  if (input.code !== undefined && input.expression !== undefined && input.action === "evaluate") {
-    context.addIssue({ code: "custom", message: "Provide code or expression, not both." });
-  }
-  if (input.code === undefined && input.expression === undefined && input.action === "evaluate") {
-    context.addIssue({ code: "custom", message: "Provide code or expression." });
   }
   if (input.script !== undefined && input.code !== undefined && input.action === "run_script") {
     context.addIssue({ code: "custom", message: "Provide script or code, not both." });
@@ -422,8 +344,8 @@ export const BrowserActionSchema = BrowserActionFieldsSchema.extend({ action: Ac
   }
   if (input.action === "click") {
     const hasTarget = targetForms > 0;
-    const hasX = input.coordinateX !== undefined || input.coordinate_x !== undefined;
-    const hasY = input.coordinateY !== undefined || input.coordinate_y !== undefined;
+    const hasX = input.coordinateX !== undefined;
+    const hasY = input.coordinateY !== undefined;
     if (!hasTarget && !(hasX && hasY)) {
       context.addIssue({ code: "custom", message: "Provide target/index or both coordinateX and coordinateY." });
     }
@@ -435,9 +357,7 @@ export const BrowserActionSchema = BrowserActionFieldsSchema.extend({ action: Ac
     }
   }
   if (input.action === "move") {
-    const hasX = input.coordinateX !== undefined || input.coordinate_x !== undefined;
-    const hasY = input.coordinateY !== undefined || input.coordinate_y !== undefined;
-    if (!hasX || !hasY) {
+    if (input.coordinateX === undefined || input.coordinateY === undefined) {
       context.addIssue({ code: "custom", message: "Move requires coordinateX and coordinateY." });
     }
     if (targetForms > 0) {
@@ -496,7 +416,7 @@ export const BrowserActionSchema = BrowserActionFieldsSchema.extend({ action: Ac
       requireOne([input.outputPath, input.filePath], "PDF export requires outputPath.");
       break;
     case "evaluate":
-      requireOne([input.code, input.expression], "Evaluate requires code.");
+      requireOne([input.code], "Evaluate requires code.");
       break;
     case "run_script":
       requireOne([input.script, input.code], "run_script requires a JSON action array.");
@@ -603,10 +523,23 @@ function normalizeBrowserActionInput(value: unknown): { value: unknown; issues: 
     output.action = ACTION_ALIASES[rawAction];
   }
   moveActionField(output, "pageId", "tab_id", issues);
+  moveActionField(output, "coordinateX", "coordinate_x", issues);
+  moveActionField(output, "coordinateY", "coordinate_y", issues);
+  moveActionField(output, "startCoordinateX", "start_coordinate_x", issues);
+  moveActionField(output, "startCoordinateY", "start_coordinate_y", issues);
+  moveActionField(output, "endCoordinateX", "end_coordinate_x", issues);
+  moveActionField(output, "endCoordinateY", "end_coordinate_y", issues);
+  moveActionField(output, "newTab", "new_tab", issues);
+  moveActionField(output, "fullPage", "full_page", issues);
+  moveActionField(output, "fullPage", "full", issues);
+  moveActionField(output, "maxDimension", "max_dim", issues);
+  moveActionField(output, "maxBytes", "max_bytes", issues);
+  moveActionField(output, "includeScreenshot", "include_screenshot", issues);
+  moveActionField(output, "code", "expression", issues);
   return { value: output, issues };
 }
 
-/** Input schema shared by browser_batch and browser_exec. Its output is always canonical. */
+/** Input schema for browser_batch. Its output is always canonical. */
 export const BrowserActionInputSchema = z.preprocess((value, context) => {
   const normalized = normalizeBrowserActionInput(value);
   for (const issue of normalized.issues) {
@@ -622,38 +555,19 @@ export const SnapshotRequestSchema = z.object({
   frameId: BoundedString(200).optional(),
   includeFrames: z.enum(["none", "metadata"]).optional(),
   includeScreenshot: z.boolean().optional(),
-  include_screenshot: z.boolean().optional(),
   fullPage: z.boolean().optional(),
-  full_page: z.boolean().optional(),
-  full: z.boolean().optional(),
   maxDimension: z.number().int().min(100).max(20_000).optional(),
-  max_dim: z.number().int().min(100).max(20_000).optional(),
   maxChars: z.number().int().min(1_000).max(8_000).optional(),
-}).strict().superRefine((input, context) => {
-  if (input.includeScreenshot !== undefined && input.include_screenshot !== undefined) {
-    context.addIssue({ code: "custom", message: "Provide includeScreenshot or include_screenshot, not both." });
-  }
-  if ([input.fullPage, input.full_page, input.full].filter((value) => value !== undefined).length > 1) {
-    context.addIssue({ code: "custom", message: "Provide only one of fullPage, full_page, or full." });
-  }
-  if (input.maxDimension !== undefined && input.max_dim !== undefined) {
-    context.addIssue({ code: "custom", message: "Provide maxDimension or max_dim, not both." });
-  }
-});
+}).strict();
 
 export const NavigateRequestSchema = z.object({
   url: HttpUrl(8_000),
   pageId: BoundedString(200).optional(),
   includeSnapshot: z.boolean().optional(),
   newTab: z.boolean().optional(),
-  new_tab: z.boolean().optional(),
   waitUntil: z.enum(["load", "domcontentloaded", "networkidle0", "networkidle2"]).optional(),
   timeoutMs: z.number().int().min(100).max(120_000).optional(),
-}).strict().superRefine((input, context) => {
-  if (input.newTab !== undefined && input.new_tab !== undefined) {
-    context.addIssue({ code: "custom", message: "Provide newTab or new_tab, not both." });
-  }
-});
+}).strict();
 
 const ClickFieldsSchema = z.object({
   target: BoundedString(2_000).optional(),
@@ -662,15 +576,12 @@ const ClickFieldsSchema = z.object({
   index: z.number().int().min(0).max(1_000).optional(),
   coordinateX: z.number().finite().min(0).max(100_000).optional(),
   coordinateY: z.number().finite().min(0).max(100_000).optional(),
-  coordinate_x: z.number().finite().min(0).max(100_000).optional(),
-  coordinate_y: z.number().finite().min(0).max(100_000).optional(),
   button: z.enum(["left", "middle", "right"]).optional(),
   pointerType: z.enum(["mouse", "touch"]).optional(),
   clickCount: z.number().int().min(1).max(3).optional(),
   waitUntil: z.enum(["load", "domcontentloaded", "networkidle0", "networkidle2"]).optional(),
   timeoutMs: z.number().int().min(100).max(120_000).optional(),
   newTab: z.boolean().optional(),
-  new_tab: z.boolean().optional(),
   ...PageInput,
 }).strict();
 
@@ -680,8 +591,8 @@ export const ClickRequestSchema = ClickFieldsSchema.superRefine((input, context)
     context.addIssue({ code: "custom", message: "Provide exactly one of target, ref, selector, or index." });
   }
   const hasTarget = targetForms > 0;
-  const hasX = input.coordinateX !== undefined || input.coordinate_x !== undefined;
-  const hasY = input.coordinateY !== undefined || input.coordinate_y !== undefined;
+  const hasX = input.coordinateX !== undefined;
+  const hasY = input.coordinateY !== undefined;
   if (!hasTarget && !(hasX && hasY)) {
     context.addIssue({ code: "custom", message: "Provide exactly one of target, ref, selector, or index, or both coordinateX and coordinateY." });
   }
@@ -690,19 +601,6 @@ export const ClickRequestSchema = ClickFieldsSchema.superRefine((input, context)
   }
   if (hasTarget && hasX) {
     context.addIssue({ code: "custom", message: "Provide either target/index or coordinates, not both." });
-  }
-  if (input.newTab !== undefined && input.new_tab !== undefined) {
-    context.addIssue({ code: "custom", message: "Provide newTab or new_tab, not both." });
-  }
-  if (input.coordinateX !== undefined && input.coordinate_x !== undefined) {
-    context.addIssue({ code: "custom", message: "Provide coordinateX or coordinate_x, not both." });
-  }
-  if (input.coordinateY !== undefined && input.coordinate_y !== undefined) {
-    context.addIssue({ code: "custom", message: "Provide coordinateY or coordinate_y, not both." });
-  }
-  if ((input.coordinateX !== undefined || input.coordinateY !== undefined)
-    && (input.coordinate_x !== undefined || input.coordinate_y !== undefined)) {
-    context.addIssue({ code: "custom", message: "Use either coordinateX/coordinateY or coordinate_x/coordinate_y, not mixed forms." });
   }
 });
 
@@ -779,59 +677,58 @@ export const InspectElementRequestSchema = InspectElementTargetFieldsSchema.supe
   }
 });
 export const WaitRequestSchema = z.object({ milliseconds: z.number().int().min(0).max(120_000).default(500), ...PageInput }).strict();
+export const WaitForElementRequestSchema = z.object({
+  selector: BoundedString(2_000),
+  state: z.enum(["visible", "hidden", "attached", "detached"]).optional(),
+  timeoutMs: z.number().int().min(100).max(120_000).optional(),
+  ...PageInput,
+}).strict();
 export const WaitForTextRequestSchema = z.object({ text: BoundedString(20_000), timeoutMs: z.number().int().min(100).max(120_000).optional(), ...PageInput }).strict();
 export const WaitForUrlRequestSchema = z.object({ url: BoundedString(8_000), timeoutMs: z.number().int().min(100).max(120_000).optional(), ...PageInput }).strict();
-export const WaitForHumanRequestSchema = z.object({ timeoutMs: z.number().int().min(500).max(600_000).optional(), pollMs: z.number().int().min(250).max(10_000).optional(), ...PageInput }).strict();
-/**
- * Request a connected-AI challenge loop. The page id is optional because the
- * browser session may already have an active page; screenshot and evidence
- * bounds mirror the native snapshot/screenshot contracts.
- *
- * Aliases are retained for browser-use clients that use snake_case names. The
- * MCP handler normalizes them before dispatching the canonical action.
- */
+export const NetworkIdleRequestSchema = z.object({
+  timeoutMs: z.number().int().min(100).max(120_000).optional(),
+  pageId: BoundedString(200).optional(),
+}).strict();
+export const WaitForHumanRequestSchema = z.object({
+  timeoutMs: z.number().int().min(500).max(600_000).optional(),
+  pollMs: z.number().int().min(250).max(10_000).optional(),
+  pageId: BoundedString(200).optional(),
+}).strict();
 export const SolveChallengeRequestSchema = z.object({
   pageId: BoundedString(200).optional(),
   includeScreenshot: z.boolean().optional(),
-  include_screenshot: z.boolean().optional(),
   fullPage: z.boolean().optional(),
-  full_page: z.boolean().optional(),
-  full: z.boolean().optional(),
   maxDimension: z.number().int().min(1).max(20_000).optional(),
-  max_dim: z.number().int().min(1).max(20_000).optional(),
   maxChars: z.number().int().min(1_000).max(MCP_PAGE_TEXT_MAX_CHARS).optional(),
   maxAttempts: z.number().int().min(1).max(100).optional(),
-}).strict().superRefine((input, context) => {
-  if (input.includeScreenshot !== undefined && input.include_screenshot !== undefined) {
-    context.addIssue({ code: "custom", message: "Provide includeScreenshot or include_screenshot, not both." });
-  }
-  if ([input.fullPage, input.full_page, input.full].filter((value) => value !== undefined).length > 1) {
-    context.addIssue({ code: "custom", message: "Provide only one of fullPage, full_page, or full." });
-  }
-  if (input.maxDimension !== undefined && input.max_dim !== undefined) {
-    context.addIssue({ code: "custom", message: "Provide maxDimension or max_dim, not both." });
-  }
-});
+}).strict();
 export const KeyRequestSchema = z.object({ keys: z.array(KeyboardString(100)).min(1).max(32), ...PageInput }).strict();
-export const ScrollRequestSchema = z.object({ selector: BoundedString(2_000).optional(), direction: z.enum(["up", "down", "left", "right"]).default("down"), amount: z.number().finite().min(1).max(100_000).default(600), ...PageInput }).strict();
-export const ScrollToBottomRequestSchema = z.object({ maxScrolls: z.number().int().min(1).max(50).optional(), timeoutMs: z.number().int().min(100).max(120_000).optional(), restoreTop: z.boolean().optional(), ...PageInput }).strict();
+export const ScrollRequestSchema = z.object({
+  selector: BoundedString(2_000).optional(),
+  direction: z.enum(["up", "down", "left", "right"]).default("down"),
+  amount: z.number().finite().min(1).max(100_000).default(600),
+  ...PageInput,
+}).strict();
+export const ScrollToBottomRequestSchema = z.object({
+  maxScrolls: z.number().int().min(1).max(50).optional(),
+  timeoutMs: z.number().int().min(100).max(120_000).optional(),
+  restoreTop: z.boolean().optional(),
+  ...PageInput,
+}).strict();
 export const ExtractRequestSchema = z.object({ selector: BoundedString(2_000).optional(), query: BoundedString(4_000).optional(), includeLinks: z.boolean().optional(), offset: z.number().int().min(0).max(1_000_000).optional(), maxChars: z.number().int().min(100).max(8_000).optional(), ...PageInput }).strict().superRefine((input, context) => {
   if (input.selector !== undefined && input.query !== undefined) {
     context.addIssue({ code: "custom", message: "Provide selector or query, not both." });
   }
 });
 export const HtmlRequestSchema = z.object({ selector: BoundedString(2_000).optional(), maxChars: z.number().int().min(1_000).max(8_000).optional(), ...PageInput }).strict();
-export const ScreenshotRequestSchema = z.object({ fullPage: z.boolean().optional(), full_page: z.boolean().optional(), full: z.boolean().optional(), maxBytes: z.number().int().min(100_000).max(20_000_000).optional(), max_bytes: z.number().int().min(100_000).max(20_000_000).optional(), maxDimension: z.number().int().min(1).max(20_000).optional(), max_dim: z.number().int().min(1).max(20_000).optional(), format: z.enum(["png", "jpeg"]).optional(), quality: z.number().int().min(30).max(100).optional(), ...PageInput }).strict().superRefine((input, context) => {
-  if ([input.fullPage, input.full_page, input.full].filter((value) => value !== undefined).length > 1) {
-    context.addIssue({ code: "custom", message: "Provide only one of fullPage, full_page, or full." });
-  }
-  if (input.maxBytes !== undefined && input.max_bytes !== undefined) {
-    context.addIssue({ code: "custom", message: "Provide maxBytes or max_bytes, not both." });
-  }
-  if (input.maxDimension !== undefined && input.max_dim !== undefined) {
-    context.addIssue({ code: "custom", message: "Provide maxDimension or max_dim, not both." });
-  }
-});
+export const ScreenshotRequestSchema = z.object({
+  fullPage: z.boolean().optional(),
+  maxBytes: z.number().int().min(100_000).max(20_000_000).optional(),
+  maxDimension: z.number().int().min(1).max(20_000).optional(),
+  format: z.enum(["png", "jpeg"]).optional(),
+  quality: z.number().int().min(30).max(100).optional(),
+  ...PageInput,
+}).strict();
 export const PdfRequestSchema = z.object({ outputPath: BoundedString(4_000), ...PageInput }).strict();
 export const UploadRequestSchema = z.object({
   target: BoundedString(2_000).optional(),
@@ -856,18 +753,13 @@ export const UploadRequestSchema = z.object({
   }
 });
 export const EvaluateRequestSchema = z.object({
-  code: z.string().trim().min(1).max(40_000).optional(),
-  expression: z.string().trim().min(1).max(40_000).optional(),
+  code: z.string().trim().min(1).max(40_000),
   ...PageInput,
-}).strict().superRefine((input, context) => {
-  if (input.code !== undefined && input.expression !== undefined) {
-    context.addIssue({ code: "custom", message: "Provide code or expression, not both." });
-  }
-  if (input.code === undefined && input.expression === undefined) {
-    context.addIssue({ code: "custom", message: "Provide code or expression." });
-  }
-});
-export const NetworkLogRequestSchema = z.object({ operation: z.enum(["enable", "disable", "read", "clear", "read_and_clear"]), ...PageInput }).strict();
+}).strict();
+export const NetworkLogRequestSchema = z.object({
+  operation: z.enum(["enable", "disable", "read", "clear", "read_and_clear"]),
+  pageId: BoundedString(200).optional(),
+}).strict();
 export const NetworkSearchRequestSchema = z.object({
   query: BoundedString(4_000).optional(),
   requestId: BoundedString(256).optional(),

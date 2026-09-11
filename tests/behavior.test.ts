@@ -1,29 +1,25 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Page } from "puppeteer-core";
 
 import {
   humanMouseMove,
-  humanScroll,
   humanType,
   randomRange,
-  thinkTime,
 } from "@/server/browser/behavior";
 
 vi.mock("ghost-cursor", () => {
   const ctorCalls: Array<[unknown, unknown]> = [];
   const moveTo = vi.fn().mockResolvedValue(undefined);
-  const scrollTo = vi.fn().mockResolvedValue(undefined);
   const click = vi.fn().mockResolvedValue(undefined);
   class GhostCursor {
     moveTo = moveTo;
-    scrollTo = scrollTo;
     click = click;
     constructor(page: unknown, opts?: unknown) {
       ctorCalls.push([page, opts]);
     }
   }
-  return { GhostCursor, ctorCalls, moveTo, scrollTo, click };
+  return { GhostCursor, ctorCalls, moveTo, click };
 });
 
 import * as ghostCursor from "ghost-cursor";
@@ -32,7 +28,6 @@ interface MockedGhostCursor {
   GhostCursor: unknown;
   ctorCalls: Array<[unknown, unknown]>;
   moveTo: ReturnType<typeof vi.fn>;
-  scrollTo: ReturnType<typeof vi.fn>;
   click: ReturnType<typeof vi.fn>;
 }
 
@@ -41,7 +36,6 @@ const gc = vi.mocked(ghostCursor as unknown as MockedGhostCursor);
 beforeEach(() => {
   gc.ctorCalls.length = 0;
   gc.moveTo.mockClear();
-  gc.scrollTo.mockClear();
 });
 
 function fakeKeyboard() {
@@ -82,31 +76,6 @@ describe("randomRange", () => {
   });
 });
 
-describe("thinkTime", () => {
-  beforeEach(() => {
-    vi.useFakeTimers();
-  });
-
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
-  it("returns a Promise that resolves at the sampled delay within [min, max]", async () => {
-    let resolved = false;
-    const p = thinkTime(100, 200, () => 0.5).then(() => {
-      resolved = true;
-    });
-    expect(p).toBeInstanceOf(Promise);
-
-    await vi.advanceTimersByTimeAsync(149);
-    expect(resolved).toBe(false);
-
-    await vi.advanceTimersByTimeAsync(1);
-    await p;
-    expect(resolved).toBe(true);
-  });
-});
-
 describe("humanMouseMove", () => {
   it("constructs GhostCursor with the start point and delegates the move", async () => {
     await humanMouseMove(fakePage, 0, 0, 100, 200, 300, {});
@@ -129,15 +98,6 @@ describe("humanMouseMove", () => {
       { x: 10, y: 10 },
       expect.objectContaining({ moveDelay: 40 }),
     );
-  });
-});
-
-describe("humanScroll", () => {
-  it("delegates to GhostCursor.scrollTo", async () => {
-    await humanScroll(fakePage, "bottom", {});
-    expect(gc.ctorCalls.length).toBe(1);
-    expect(gc.ctorCalls[0]?.[0]).toBe(fakePage);
-    expect(gc.scrollTo).toHaveBeenCalledWith("bottom", expect.any(Object));
   });
 });
 
@@ -193,6 +153,33 @@ describe("humanType", () => {
     expect(kb.down).toHaveBeenCalledWith("Space");
     expect(kb.up).toHaveBeenCalledWith("Space");
     expect(kb.calls.map((c) => c.action)).toEqual(["type", "down", "up", "type"]);
+  });
+
+  it("rejects immediately when the signal is already aborted", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const page = { keyboard: fakeKeyboard() } as unknown as Page;
+    await expect(humanType(page, "hi", {
+      thinkPauseChance: 0,
+      rng: () => 0.5,
+      signal: controller.signal,
+    })).rejects.toThrow(/aborted/i);
+  });
+
+  it("aborts while waiting between keystrokes", async () => {
+    const controller = new AbortController();
+    const kb = fakeKeyboard();
+    kb.type.mockImplementationOnce(() => {
+      setTimeout(() => controller.abort(), 5);
+    });
+    const page = { keyboard: kb } as unknown as Page;
+    await expect(humanType(page, "hi", {
+      minDelayMs: 40,
+      maxDelayMs: 40,
+      thinkPauseChance: 0,
+      rng: () => 0.5,
+      signal: controller.signal,
+    })).rejects.toThrow(/aborted/i);
   });
 
   it("stops before the next key when cancellation arrives", async () => {

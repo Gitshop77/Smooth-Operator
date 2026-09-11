@@ -17,8 +17,6 @@ interface FileSystem {
   accessSync(path: string, mode?: number): void;
 }
 
-interface ChromeExecutableCandidate extends ChromeExecutable {}
-
 /** Every Chromium-based browser the server can drive, in preference order:
  * Google Chrome channels first (widest compatibility), then other installed
  * Chromium browsers. Any CDP-compatible executable can also be set manually
@@ -88,11 +86,11 @@ export function chromeExecutableSearchPaths(): string[] {
 }
 
 function dedupeCandidates(
-  candidates: readonly ChromeExecutableCandidate[],
+  candidates: readonly ChromeExecutable[],
   platformName: NodeJS.Platform = process.platform,
-): ChromeExecutableCandidate[] {
+): ChromeExecutable[] {
   const seen = new Set<string>();
-  const unique: ChromeExecutableCandidate[] = [];
+  const unique: ChromeExecutable[] = [];
   for (const candidate of candidates) {
     // Windows paths are case-insensitive. Lower-casing only for the key keeps
     // the original spelling available to callers while avoiding duplicate
@@ -105,7 +103,7 @@ function dedupeCandidates(
   return unique;
 }
 
-function chromeExecutableCandidates(): ChromeExecutableCandidate[] {
+function chromeExecutableCandidates(): ChromeExecutable[] {
   return [
     ...macOsCandidates(),
     ...windowsCandidates(),
@@ -113,7 +111,7 @@ function chromeExecutableCandidates(): ChromeExecutableCandidate[] {
   ];
 }
 
-function macOsCandidates(): ChromeExecutableCandidate[] {
+function macOsCandidates(): ChromeExecutable[] {
   const applicationDirectories = ["/Applications", join(homedir(), "Applications")];
   return [
     ...applicationBundleCandidates(applicationDirectories, "Google Chrome", "Google Chrome", "Google Chrome", "stable"),
@@ -135,7 +133,7 @@ function applicationBundleCandidates(
   executableName: string,
   label: string,
   channel: ChromeChannel,
-): ChromeExecutableCandidate[] {
+): ChromeExecutable[] {
   return applicationDirectories.map((applicationDirectory) => ({
     path: join(applicationDirectory, `${bundleName}.app`, "Contents", "MacOS", executableName),
     channel,
@@ -143,7 +141,7 @@ function applicationBundleCandidates(
   }));
 }
 
-function windowsCandidates(): ChromeExecutableCandidate[] {
+function windowsCandidates(): ChromeExecutable[] {
   const directories = [
     env.PROGRAMFILES ?? "C:\\Program Files",
     env["PROGRAMFILES(X86)"] ?? "C:\\Program Files (x86)",
@@ -161,7 +159,7 @@ function windowsCandidates(): ChromeExecutableCandidate[] {
   ];
 }
 
-function windowsChannelCandidates(directories: readonly string[], directoryParts: readonly string[], executable: string, label: string, channel: ChromeChannel): ChromeExecutableCandidate[] {
+function windowsChannelCandidates(directories: readonly string[], directoryParts: readonly string[], executable: string, label: string, channel: ChromeChannel): ChromeExecutable[] {
   return directories.map((baseDirectory) => ({
     path: win32.join(baseDirectory, ...directoryParts, "Application", executable),
     channel,
@@ -169,7 +167,7 @@ function windowsChannelCandidates(directories: readonly string[], directoryParts
   }));
 }
 
-function linuxCandidates(): ChromeExecutableCandidate[] {
+function linuxCandidates(): ChromeExecutable[] {
   const searchDirectories = (env.PATH ?? "").split(delimiter).filter(Boolean);
   const commands: readonly [string, string, ChromeChannel][] = [
     ["google-chrome", "Google Chrome", "stable"],

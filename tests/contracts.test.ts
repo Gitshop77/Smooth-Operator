@@ -1,19 +1,19 @@
 import { describe, expect, it } from "vitest";
 
-import { BatchRequestSchema, BrowserActionInputSchema, BrowserActionPlanSchema, BrowserActionSchema, ClickRequestSchema, CookieRequestSchema, EvaluateRequestSchema, ExtractRequestSchema, HtmlRequestSchema, InspectElementRequestSchema, InputRequestSchema, NavigateRequestSchema, NetworkSearchRequestSchema, ResearchRequestSchema, ResourceBlockingRequestSchema, ScreenshotRequestSchema, SnapshotRequestSchema, SolveChallengeRequestSchema, StorageRequestSchema, TargetRequestSchema, UploadRequestSchema } from "@/server/contracts";
+import { BatchRequestSchema, BrowserActionInputSchema, BrowserActionPlanSchema, BrowserActionSchema, ClickRequestSchema, CookieRequestSchema, EvaluateRequestSchema, ExtractRequestSchema, HtmlRequestSchema, InspectElementRequestSchema, InputRequestSchema, NavigateRequestSchema, NetworkLogRequestSchema, NetworkSearchRequestSchema, ResearchRequestSchema, ResourceBlockingRequestSchema, ScreenshotRequestSchema, ScrollRequestSchema, ScrollToBottomRequestSchema, SnapshotRequestSchema, SolveChallengeRequestSchema, StorageRequestSchema, TargetRequestSchema, UploadRequestSchema, WaitForElementRequestSchema, WaitForHumanRequestSchema, WaitRequestSchema } from "@/server/contracts";
 
 describe("MCP contracts", () => {
   it("accepts browser-use indexed and coordinate click forms", () => {
     expect(ClickRequestSchema.safeParse({ index: 0 }).success).toBe(true);
-    expect(ClickRequestSchema.safeParse({ index: 0, new_tab: true }).success).toBe(true);
+    expect(ClickRequestSchema.safeParse({ index: 0, newTab: true }).success).toBe(true);
     expect(ClickRequestSchema.safeParse({ selector: "#submit" }).success).toBe(true);
     expect(ClickRequestSchema.safeParse({ ref: "e5" }).success).toBe(true);
     expect(ClickRequestSchema.safeParse({ ref: "ref:e5" }).success).toBe(true);
-    expect(ClickRequestSchema.safeParse({ coordinate_x: 10, coordinate_y: 20 }).success).toBe(true);
+    expect(ClickRequestSchema.safeParse({ coordinateX: 10, coordinateY: 20 }).success).toBe(true);
     expect(BrowserActionSchema.safeParse({ action: "click", coordinateX: 10, coordinateY: 20 }).success).toBe(true);
     expect(BrowserActionSchema.safeParse({ action: "click", ref: "e5" }).success).toBe(true);
     expect(BrowserActionSchema.safeParse({ action: "input", ref: "e5", text: "hello" }).success).toBe(true);
-    expect(NavigateRequestSchema.safeParse({ url: "https://example.com", new_tab: true }).success).toBe(true);
+    expect(NavigateRequestSchema.safeParse({ url: "https://example.com", newTab: true }).success).toBe(true);
     expect(InputRequestSchema.safeParse({ ref: "e5", text: "hello" }).success).toBe(true);
     expect(InputRequestSchema.safeParse({ ref: "ref:e5", text: "hello" }).success).toBe(true);
   });
@@ -48,35 +48,25 @@ describe("MCP contracts", () => {
     expect(EvaluateRequestSchema.safeParse({ code: "  1 + 1  " }).success).toBe(true);
   });
 
-  it("accepts the expression alias for evaluate exactly like batch actions", () => {
-    expect(EvaluateRequestSchema.safeParse({ expression: "1 + 1" }).success).toBe(true);
+  it("keeps expression as an unlisted batch alias, not a listed evaluate field", () => {
+    expect(EvaluateRequestSchema.safeParse({ expression: "1 + 1" }).success).toBe(false);
     expect(EvaluateRequestSchema.safeParse({ code: "1", expression: "2" }).success).toBe(false);
-    expect(EvaluateRequestSchema.safeParse({ expression: "   " }).success).toBe(false);
+    expect(BrowserActionSchema.safeParse({ action: "evaluate", expression: "1 + 1" }).success).toBe(false);
+    const batchExpression = BrowserActionInputSchema.safeParse({ action: "evaluate", expression: "1 + 1" });
+    expect(batchExpression.success).toBe(true);
+    expect(batchExpression.success && batchExpression.data).toMatchObject({ action: "evaluate", code: "1 + 1" });
+    expect(batchExpression.success && batchExpression.data).not.toHaveProperty("expression");
   });
 
   it("reports distinct evaluate guidance for missing versus duplicated arguments", () => {
-    const standaloneMissing = EvaluateRequestSchema.safeParse({});
-    expect(standaloneMissing.success).toBe(false);
-    if (!standaloneMissing.success) {
-      expect(standaloneMissing.error.issues.map((issue) => issue.message)).toContain("Provide code or expression.");
-      expect(standaloneMissing.error.issues.map((issue) => issue.message)).not.toContain("Provide code or expression, not both.");
-    }
-    const standaloneBoth = EvaluateRequestSchema.safeParse({ code: "1", expression: "2" });
-    expect(standaloneBoth.success).toBe(false);
-    if (!standaloneBoth.success) {
-      expect(standaloneBoth.error.issues.map((issue) => issue.message)).toContain("Provide code or expression, not both.");
-      expect(standaloneBoth.error.issues.map((issue) => issue.message)).not.toContain("Provide code or expression.");
-    }
+    expect(EvaluateRequestSchema.safeParse({}).success).toBe(false);
     const batchMissing = BrowserActionSchema.safeParse({ action: "evaluate" });
     expect(batchMissing.success).toBe(false);
     if (!batchMissing.success) {
-      expect(batchMissing.error.issues.map((issue) => issue.message)).toContain("Provide code or expression.");
+      expect(batchMissing.error.issues.map((issue) => issue.message)).toContain("Evaluate requires code.");
     }
-    const batchBoth = BrowserActionSchema.safeParse({ action: "evaluate", code: "1", expression: "2" });
-    expect(batchBoth.success).toBe(false);
-    if (!batchBoth.success) {
-      expect(batchBoth.error.issues.map((issue) => issue.message)).toContain("Provide code or expression, not both.");
-    }
+    expect(BrowserActionSchema.safeParse({ action: "evaluate", code: "1", expression: "2" }).success).toBe(false);
+    expect(BrowserActionInputSchema.safeParse({ action: "evaluate", code: "1", expression: "2" }).success).toBe(false);
   });
 
   it("supports snapshot-aware frame actions and guarded storage clearing", () => {
@@ -122,6 +112,10 @@ describe("MCP contracts", () => {
 
   it("accepts bounded network journal search filters", () => {
     expect(NetworkSearchRequestSchema.safeParse({ query: "checkout", requestId: "req-1", url: "https://example.test", method: "post", status: 200, resourceType: "Fetch", offset: 0, limit: 20, pageId: "page-1" }).success).toBe(true);
+    expect(NetworkLogRequestSchema.safeParse({ operation: "read" }).success).toBe(true);
+    expect(NetworkLogRequestSchema.safeParse({ operation: "clear" }).success).toBe(true);
+    expect(NetworkLogRequestSchema.safeParse({ operation: "search" }).success).toBe(false);
+    expect(NetworkLogRequestSchema.safeParse({ operation: "read", query: "x" }).success).toBe(false);
     expect(NetworkSearchRequestSchema.safeParse({ limit: 0 }).success).toBe(false);
     expect(NetworkSearchRequestSchema.safeParse({ limit: 201 }).success).toBe(false);
     expect(NetworkSearchRequestSchema.safeParse({ status: 1_000 }).success).toBe(false);
@@ -129,33 +123,85 @@ describe("MCP contracts", () => {
     expect(NetworkSearchRequestSchema.safeParse({ headers: {} }).success).toBe(false);
   });
 
-  it("accepts browser-use CLI screenshot aliases with bounded downscaling", () => {
-    expect(ScreenshotRequestSchema.safeParse({ full: true, max_dim: 1_200 }).success).toBe(true);
-    expect(ScreenshotRequestSchema.safeParse({ max_dim: 99 }).success).toBe(true);
-    expect(ScreenshotRequestSchema.safeParse({ max_dim: 1 }).success).toBe(true);
-    expect(ScreenshotRequestSchema.safeParse({ full: true, fullPage: false }).success).toBe(false);
+  it("keeps wait, scroll, and challenge as one-job schemas", () => {
+    expect(WaitRequestSchema.safeParse({ milliseconds: 0 }).success).toBe(true);
+    expect(WaitRequestSchema.safeParse({ operation: "element", selector: "#x" }).success).toBe(false);
+    expect(WaitForElementRequestSchema.safeParse({ selector: "#x" }).success).toBe(true);
+    expect(WaitForElementRequestSchema.safeParse({}).success).toBe(false);
+    expect(ScrollRequestSchema.safeParse({}).success).toBe(true);
+    expect(ScrollRequestSchema.safeParse({ to: "bottom" }).success).toBe(false);
+    expect(ScrollToBottomRequestSchema.safeParse({ maxScrolls: 4 }).success).toBe(true);
+    expect(WaitForHumanRequestSchema.safeParse({ timeoutMs: 500 }).success).toBe(true);
+    expect(SolveChallengeRequestSchema.safeParse({ includeScreenshot: true }).success).toBe(true);
+    expect(SolveChallengeRequestSchema.safeParse({ pollMs: 250 }).success).toBe(false);
+  });
+
+  it("keeps public screenshot and snapshot schemas on one canonical field set", () => {
+    expect(ScreenshotRequestSchema.safeParse({ fullPage: true, maxDimension: 1_200 }).success).toBe(true);
+    expect(ScreenshotRequestSchema.safeParse({ maxDimension: 1 }).success).toBe(true);
+    expect(ScreenshotRequestSchema.safeParse({ full: true, max_dim: 1_200 }).success).toBe(false);
     expect(ScreenshotRequestSchema.safeParse({ maxBytes: 100_000, max_bytes: 100_000 }).success).toBe(false);
-  });
-
-  it("accepts the browser-use snapshot full_page alias and rejects conflicts like screenshots", () => {
-    expect(SnapshotRequestSchema.safeParse({ full_page: true }).success).toBe(true);
-    expect(SnapshotRequestSchema.safeParse({ fullPage: false, full: true }).success).toBe(false);
-    expect(SnapshotRequestSchema.safeParse({ full_page: false, full: true }).success).toBe(false);
-    expect(SnapshotRequestSchema.safeParse({ fullPage: true, full_page: false, full: true }).success).toBe(false);
-  });
-
-  it("rejects conflicting aliases before transforms choose a winner", () => {
-    expect(SnapshotRequestSchema.safeParse({ includeScreenshot: true, include_screenshot: false }).success).toBe(false);
-    expect(SnapshotRequestSchema.safeParse({ fullPage: true, full: false }).success).toBe(false);
-    expect(NavigateRequestSchema.safeParse({ url: "https://example.com", newTab: true, new_tab: false }).success).toBe(false);
+    expect(SnapshotRequestSchema.safeParse({ fullPage: true, includeScreenshot: true }).success).toBe(true);
+    expect(SnapshotRequestSchema.safeParse({ full_page: true }).success).toBe(false);
+    expect(SnapshotRequestSchema.safeParse({ include_screenshot: true }).success).toBe(false);
+    expect(NavigateRequestSchema.safeParse({ url: "https://example.com", new_tab: false }).success).toBe(false);
+    expect(ClickRequestSchema.safeParse({ coordinate_x: 10, coordinate_y: 20 }).success).toBe(false);
     expect(BrowserActionSchema.safeParse({ action: "screenshot", full: true, fullPage: false }).success).toBe(false);
+    expect(BrowserActionSchema.safeParse({ action: "screenshot", full_page: true }).success).toBe(false);
+    expect(BrowserActionSchema.safeParse({ action: "screenshot", max_dim: 1_200 }).success).toBe(false);
+    expect(BrowserActionSchema.safeParse({ action: "screenshot", max_bytes: 100_000 }).success).toBe(false);
   });
 
-  it("rejects mixed coordinate naming when a pair is incomplete", () => {
+  it("rejects snake_case aliases on canonical schemas and maps them in preprocess", () => {
+    expect(BrowserActionSchema.safeParse({ action: "click", coordinate_x: 10, coordinate_y: 20 }).success).toBe(false);
     expect(BrowserActionSchema.safeParse({ action: "click", coordinateX: 10, coordinate_y: 20 }).success).toBe(false);
     expect(BrowserActionSchema.safeParse({ action: "move", coordinateX: 10, coordinate_y: 20 }).success).toBe(false);
     expect(BrowserActionSchema.safeParse({ action: "press_and_hold", target: "#drag", startCoordinateX: 10, start_coordinate_y: 20 }).success).toBe(false);
     expect(BrowserActionSchema.safeParse({ action: "press_and_hold", target: "#drag", endCoordinateX: 10, end_coordinate_y: 20 }).success).toBe(false);
+    expect(BrowserActionSchema.safeParse({ action: "navigate", url: "https://example.com", new_tab: true }).success).toBe(false);
+    expect(BrowserActionSchema.safeParse({ action: "solve_challenge", include_screenshot: true }).success).toBe(false);
+
+    const click = BrowserActionInputSchema.safeParse({ action: "click", coordinate_x: 10, coordinate_y: 20 });
+    expect(click.success).toBe(true);
+    expect(click.success && click.data).toMatchObject({ action: "click", coordinateX: 10, coordinateY: 20 });
+    expect(click.success && click.data).not.toHaveProperty("coordinate_x");
+
+    const mixed = BrowserActionInputSchema.safeParse({ action: "click", coordinateX: 10, coordinate_y: 20 });
+    expect(mixed.success).toBe(true);
+    expect(mixed.success && mixed.data).toMatchObject({ coordinateX: 10, coordinateY: 20 });
+
+    const navigate = BrowserActionInputSchema.safeParse({ action: "navigate", url: "https://example.com", new_tab: true });
+    expect(navigate.success).toBe(true);
+    expect(navigate.success && navigate.data).toMatchObject({ newTab: true });
+    expect(navigate.success && navigate.data).not.toHaveProperty("new_tab");
+
+    const screenshot = BrowserActionInputSchema.safeParse({ action: "screenshot", full: true, max_dim: 1_200, max_bytes: 100_000 });
+    expect(screenshot.success).toBe(true);
+    expect(screenshot.success && screenshot.data).toMatchObject({ fullPage: true, maxDimension: 1_200, maxBytes: 100_000 });
+
+    const hold = BrowserActionInputSchema.safeParse({
+      action: "press_and_hold",
+      target: "#drag",
+      start_coordinate_x: 1,
+      start_coordinate_y: 2,
+      end_coordinate_x: 3,
+      end_coordinate_y: 4,
+    });
+    expect(hold.success).toBe(true);
+    expect(hold.success && hold.data).toMatchObject({
+      startCoordinateX: 1,
+      startCoordinateY: 2,
+      endCoordinateX: 3,
+      endCoordinateY: 4,
+    });
+
+    const solve = BrowserActionInputSchema.safeParse({ action: "solve_challenge", include_screenshot: true, full_page: true });
+    expect(solve.success).toBe(true);
+    expect(solve.success && solve.data).toMatchObject({ includeScreenshot: true, fullPage: true });
+
+    expect(BrowserActionInputSchema.safeParse({ action: "click", coordinateX: 10, coordinate_x: 10, coordinateY: 20 }).success).toBe(false);
+    expect(BrowserActionInputSchema.safeParse({ action: "screenshot", fullPage: true, full: true }).success).toBe(false);
+    expect(BrowserActionInputSchema.safeParse({ action: "screenshot", full_page: true, full: true }).success).toBe(false);
   });
 
   it("accepts only absolute HTTP(S) navigation URLs", () => {
@@ -318,13 +364,11 @@ describe("MCP contracts", () => {
       maxChars: 8_000,
       maxAttempts: 32,
     }).success).toBe(true);
-    expect(SolveChallengeRequestSchema.safeParse({ pageId: "p1", full_page: true, max_dim: 1_200, include_screenshot: false }).success).toBe(true);
     expect(BrowserActionSchema.safeParse({ action: "solve_challenge" }).success).toBe(true);
     expect(BrowserActionSchema.safeParse({ action: "solve_challenge", pageId: "p1", provider: "capsolver" }).success).toBe(false);
     expect(BrowserActionSchema.safeParse({ action: "solve_challenge", pageId: "p1", sitekey: "external" }).success).toBe(false);
     expect(BrowserActionSchema.safeParse({ action: "solve_challenge", pageId: "p1", proxyUrl: "https://proxy.example" }).success).toBe(false);
-    expect(SolveChallengeRequestSchema.safeParse({ includeScreenshot: true, include_screenshot: false }).success).toBe(false);
-    expect(SolveChallengeRequestSchema.safeParse({ fullPage: true, full: false }).success).toBe(false);
+    expect(SolveChallengeRequestSchema.safeParse({ include_screenshot: false }).success).toBe(false);
     expect(SolveChallengeRequestSchema.safeParse({ maxDimension: 20_001 }).success).toBe(false);
     expect(SolveChallengeRequestSchema.safeParse({ maxChars: 8_001 }).success).toBe(false);
     expect(SolveChallengeRequestSchema.safeParse({ __smooth_operator_invalid_field__: true }).success).toBe(false);

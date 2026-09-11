@@ -602,6 +602,21 @@ describe("security policy", () => {
     dnsLookup.mockReset();
   });
 
+  it("skips DNS when requested but still applies the synchronous domain block", async () => {
+    dnsLookup.mockReset();
+    dnsLookup.mockResolvedValue([{ address: "93.184.216.34" }]);
+    const policy = new SecurityPolicy(testConfig({ security: { ...testConfig().security, blockedDomains: ["blocked.example"] } }));
+    await expect(policy.assertNavigationAllowedAsync("https://public.example/style.css", { skipDns: true })).resolves.toBeInstanceOf(URL);
+    expect(dnsLookup).not.toHaveBeenCalled();
+    await expect(policy.assertNavigationAllowedAsync("https://blocked.example/tracker.js", { skipDns: true })).rejects.toMatchObject({ code: "DOMAIN_BLOCKED" });
+    expect(dnsLookup).not.toHaveBeenCalled();
+    await expect(policy.assertNavigationAllowedAsync("http://192.168.1.10/pixel.png", { skipDns: true })).rejects.toThrow(/Private-network/);
+    expect(dnsLookup).not.toHaveBeenCalled();
+    await policy.assertNavigationAllowedAsync("https://public.example/nav");
+    expect(dnsLookup).toHaveBeenCalledTimes(1);
+    dnsLookup.mockReset();
+  });
+
   it("deduplicates concurrent DNS lookups without caching the public decision", async () => {
     dnsLookup.mockReset();
     let release!: (addresses: Array<{ address: string }>) => void;
@@ -703,6 +718,25 @@ describe("security policy", () => {
     const outside = join(dirname(root), "smooth-operator-outside", "file.txt");
     expect(policy.assertFilePath(inside)).toBe(inside);
     expect(() => policy.assertFilePath(outside)).toThrowError(/file roots/);
+  });
+
+  it("uses the same eval gate at the policy edge and the browser service", () => {
+    const denied = new SecurityPolicy(testConfig({ security: { ...testConfig().security, allowEval: false } }));
+    const allowed = new SecurityPolicy(testConfig({ security: { ...testConfig().security, allowEval: true } }));
+    expect(() => denied.assertEvalAllowed()).toThrowError(/Page JavaScript execution is disabled/);
+    try {
+      denied.assertEvalAllowed();
+    } catch (error) {
+      expect(error).toBeInstanceOf(AppError);
+      expect((error as AppError).code).toBe("EVALUATE_DISABLED");
+    }
+    expect(() => allowed.assertEvalAllowed()).not.toThrow();
+  });
+
+  it("fails closed on private-network navigation at the shared policy", () => {
+    const policy = new SecurityPolicy(testConfig());
+    expect(() => policy.assertNavigationAllowed("http://10.0.0.1/")).toThrowError(/Private-network/);
+    expect(() => policy.assertNavigationAllowed("http://127.0.0.1/")).not.toThrow();
   });
 
   it("reports canonical allowed roots without exposing a rejected candidate", async () => {

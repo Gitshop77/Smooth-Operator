@@ -2443,12 +2443,98 @@ describe("browser service", () => {
       abort: async () => undefined,
     };
     await internal.handleRequest(state, request);
-    expect(state.policyVerifiedUrls.size).toBe(0);
+    expect(state.policyVerifiedUrls).toEqual(new Set([new URL("https://example.test/redirect").toString()]));
 
     state.policyVerifiedUrls.add(new URL(currentUrl).toString());
     internal.beginNavigation(state);
     expect(state.policyVerifiedUrls).toContain(new URL(currentUrl).toString());
     await service.close();
+  });
+
+  it("skips DNS for same-origin subresources of an admitted document", async () => {
+    const config = testConfig({
+      browser: { ...testConfig().browser, mode: "connect", url: "http://127.0.0.1:9222" },
+      security: { ...testConfig().security, blockedDomains: ["blocked.example"] },
+    });
+    const lookups: string[] = [];
+    const policy = {
+      assertNavigationAllowed(url: string) {
+        const parsed = new URL(url);
+        if (parsed.hostname === "blocked.example") {
+          throw new AppError("DOMAIN_BLOCKED", `Navigation to '${parsed.hostname}' is blocked by policy.`);
+        }
+        if (parsed.username || parsed.password) {
+          throw new AppError("URL_BLOCKED", "URLs containing credentials are not allowed.");
+        }
+        return parsed;
+      },
+      async assertNavigationAllowedAsync(url: string, options?: { skipDns?: boolean }) {
+        const parsed = this.assertNavigationAllowed(url);
+        if (!options?.skipDns) {
+          lookups.push(url);
+        }
+        return parsed;
+      },
+    };
+    const service = new BrowserService(config, policy as unknown as SecurityPolicy, new Logger("error", {}, () => undefined));
+    const frame = {};
+    const page = new EventEmitter() as EventEmitter & { mainFrame(): object };
+    page.mainFrame = () => frame;
+    const internal = service as unknown as {
+      stateFor(page: unknown): { policyVerifiedUrls: Set<string> };
+      handleRequest(state: unknown, request: unknown): Promise<void>;
+    };
+    const state = internal.stateFor(page);
+    const requestFor = (url: string, navigation = false) => {
+      let continued = false;
+      let aborted = false;
+      const request = {
+        isInterceptResolutionHandled: () => false,
+        isNavigationRequest: () => navigation,
+        frame: () => navigation ? frame : null,
+        url: () => url,
+        continue: async () => { continued = true; },
+        abort: async () => { aborted = true; },
+      };
+      return { request, wasContinued: () => continued, wasAborted: () => aborted };
+    };
+
+    try {
+      const navigation = requestFor("https://example.test/page", true);
+      await internal.handleRequest(state, navigation.request);
+      expect(navigation.wasContinued()).toBe(true);
+      expect(lookups).toEqual(["https://example.test/page"]);
+      expect(state.policyVerifiedUrls).toContain(new URL("https://example.test/page").toString());
+
+      lookups.length = 0;
+      const image = requestFor("https://example.test/logo.png");
+      await internal.handleRequest(state, image.request);
+      expect(image.wasContinued()).toBe(true);
+      expect(lookups).toEqual([]);
+
+      const font = requestFor("https://cdn.example.test/font.woff2");
+      await internal.handleRequest(state, font.request);
+      expect(font.wasContinued()).toBe(true);
+      expect(lookups).toEqual(["https://cdn.example.test/font.woff2"]);
+
+      lookups.length = 0;
+      const blocked = requestFor("https://blocked.example/tracker.js");
+      await internal.handleRequest(state, blocked.request);
+      expect(blocked.wasAborted()).toBe(true);
+      expect(lookups).toEqual([]);
+
+      const credentialed = requestFor("https://user:pass@example.test/pixel.png");
+      await internal.handleRequest(state, credentialed.request);
+      expect(credentialed.wasAborted()).toBe(true);
+      expect(lookups).toEqual([]);
+
+      const socket = requestFor("wss://example.test/socket");
+      await internal.handleRequest(state, socket.request);
+      expect(socket.wasContinued()).toBe(true);
+      expect(lookups).toEqual(["https://example.test/socket"]);
+    } finally {
+      await service.close();
+    }
   });
 
   it("normalizes browser visibility failures from click operations", async () => {

@@ -26,10 +26,9 @@ import { humanMouseMove, humanType } from "./behavior";
 import { classifyChallenge } from "./challenges";
 import { nativeBrowserLaunchArgs } from "./compatibility";
 import { chromeExecutableSearchPaths, findChromeExecutable, isExecutableReady } from "./discovery";
-import { buildFingerprintProfile } from "./fingerprints";
-import { buildStealthInitScript } from "./stealth";
 import { globMatches, sanitizeUrl as safeUrl } from "./utils";
 import { NetworkJournal } from "./network";
+import { BrowserOperationQueue, combineSignals, throwIfAborted } from "./queue";
 
 interface BrowserTab {
   id: string;
@@ -199,7 +198,6 @@ interface PageState {
   downloadConfigured: boolean;
   downloadConfigurationError?: AppError;
   navigationGuardInstalled: boolean;
-  stealthInjected: boolean;
   networkRequestListener?: (request: HTTPRequest) => void;
   networkResponseListener?: (response: HTTPResponse) => void;
   consoleListener?: (message: ConsoleMessage) => void;
@@ -312,11 +310,6 @@ export interface BrowserShutdownOutcome {
 }
 
 const MAX_LOG_ENTRIES = 500;
-// Keep a finite admission bound for hostile/unbounded clients, while leaving
-// enough headroom for legitimate concurrent read bursts. The read lane still
-// limits actual Chromium work separately.
-const MAX_QUEUED_OPERATIONS = 64;
-const MAX_PARALLEL_READ_OPERATIONS = 8;
 // Popup observation is bounded by the enclosing action signal. This short
 // post-click grace period catches targetcreated/page events that are delivered
 // just after Puppeteer resolves the click without making a click with no popup
@@ -411,7 +404,6 @@ const PARALLEL_READ_ACTIONS = new Set<BrowserAction["action"]>([
 
 export class BrowserService {
   private readonly sessionId = randomUUID();
-  private lastActivityAt = Date.now();
   private browser: Browser | undefined;
   private ownsBrowser = false;
   private shuttingDown = false;
@@ -427,13 +419,12 @@ export class BrowserService {
   private recoveryRequired = false;
   private recoveryPromise: Promise<void> | undefined;
   private readonly shutdownController = new AbortController();
-  private readonly activeOperationControllers = new Set<AbortController>();
-  private activeReadOperations = 0;
-  private readonly readPermitWaiters: Array<() => void> = [];
-  private readDrainPromise = Promise.resolve();
-  private readDrainRelease: (() => void) | undefined;
+  private readonly queue = new BrowserOperationQueue({
+    shutdownSignal: () => this.shutdownController.signal,
+    recoverAfterAbort: (operation) => this.recoverAfterAbort(operation),
+    normalizeError: (error, signal) => normalizeBrowserOperationError(error, signal),
+  });
   private currentPageId: string | undefined;
-  private sessionGeneration = 0;
   private readonly states = new Map<string, PageState>();
   private readonly networkJournal = new NetworkJournal();
   private readonly configuredDownloadContexts = new WeakSet<object>();
@@ -449,7 +440,6 @@ export class BrowserService {
   private readonly unguardedTargetSessions = new Set<string>();
   private readonly handledTargetGuardSessions = new Set<string>();
   private readonly pendingTargetGuardSessions = new Map<string, CDPSession>();
-  private readonly pendingTargetGuardInfos = new Map<string, { targetId: string; targetType: string }>();
   private targetGuardUnavailable = false;
   private targetGuardConnection: TargetGuardConnection | undefined;
   private targetGuardConnectionListener: ((value: unknown) => void) | undefined;
@@ -458,8 +448,6 @@ export class BrowserService {
   private targetGuardReadinessPromise: Promise<void> | undefined;
   private targetGuardOriginalEmit: ((event: string, value: unknown) => boolean) | undefined;
   private targetGuardWrappedEmit: ((event: string, value: unknown) => boolean) | undefined;
-  private operationTail = Promise.resolve();
-  private queuedOperations = 0;
   private readonly benchmarkCounters: BenchmarkCounters | undefined = process.env.SMOOTH_OPERATOR_BENCHMARK_COUNTERS === "true"
     ? { browserOperations: 0, pageLookups: 0, pageEnumerations: 0, pageEvaluations: 0, cdpCommands: 0 }
     : undefined;
@@ -474,6 +462,67 @@ export class BrowserService {
     private readonly dependencies: BrowserServiceDependencies = {},
   ) {
     this.startIdleSweep();
+  }
+
+  /** Exclusive/read lane. Tests and internal callers share this entry. */
+  async withOperationLock<T>(
+    signal: AbortSignal | undefined,
+    operation: (operationSignal: AbortSignal) => Promise<T>,
+    queueTimeoutMs = this.config.browser.actionTimeoutMs,
+    operationTimeoutMs?: number,
+    mode: "exclusive" | "read" = "exclusive",
+    touchActivity = true,
+    operationTimeoutDetails?: () => object,
+  ): Promise<T> {
+    return this.queue.run(signal, operation, queueTimeoutMs, operationTimeoutMs, mode, touchActivity, operationTimeoutDetails);
+  }
+
+  private get lastActivityAt(): number {
+    return this.queue.lastActivityAt;
+  }
+
+  private set lastActivityAt(value: number) {
+    this.queue.lastActivityAt = value;
+  }
+
+  private get activeOperationControllers(): Set<AbortController> {
+    return this.queue.activeOperationControllers;
+  }
+
+  private get queuedOperations(): number {
+    return this.queue.queuedOperations;
+  }
+
+  private set queuedOperations(value: number) {
+    this.queue.queuedOperations = value;
+  }
+
+  get operationTail(): Promise<void> {
+    return this.queue.operationTail;
+  }
+
+  set operationTail(value: Promise<void>) {
+    this.queue.operationTail = value;
+  }
+
+  get readDrainPromise(): Promise<void> {
+    return this.queue.readDrainPromise;
+  }
+
+  set readDrainPromise(value: Promise<void>) {
+    this.queue.readDrainPromise = value;
+  }
+
+  get readPermitWaiters(): Array<() => void> {
+    return this.queue.readPermitWaiters;
+  }
+
+  get activeReadOperations(): number {
+    return this.queue.activeReadOperations;
+  }
+
+  set activeReadOperations(value: number) {
+    this.queue.activeReadOperations = value;
   }
 
   private startIdleSweep(): void {
@@ -644,9 +693,7 @@ export class BrowserService {
     this.shuttingDown = true;
     this.lifecycleGeneration += 1;
     this.shutdownController.abort();
-    for (const controller of this.activeOperationControllers) {
-      controller.abort();
-    }
+    this.queue.abortAll();
     // Shutdown must be able to interrupt a long wait or dialog-blocked action;
     // waiting behind the operation queue could leave SIGTERM stuck for the
     // entire action timeout.
@@ -722,12 +769,10 @@ export class BrowserService {
     // Invalidate requests that were queued before this control-plane close.
     // New requests are allowed to establish a fresh browser connection after
     // the close has completed, but stale queued work must never run against it.
-    this.sessionGeneration += 1;
+    this.queue.bumpSession();
     // Session close is a control-plane operation. It must be able to cancel a
     // queued/long-running browser action instead of waiting behind it forever.
-    for (const controller of this.activeOperationControllers) {
-      controller.abort();
-    }
+    this.queue.abortAll();
     if (this.connectionSettlementPromise) {
       const settlement = this.connectionSettlementPromise;
       const settled = await settlesWithinTimeout(settlement, SHUTDOWN_CONNECTION_SETTLE_TIMEOUT_MS);
@@ -1373,8 +1418,8 @@ export class BrowserService {
     if (!isDialogAction(action) && action.action !== "list_tabs" && action.action !== "close_browser") {
       this.assertNoPendingDialog(action.pageId);
     }
-    if (action.action === "evaluate" && !this.config.security.allowEval) {
-      throw new AppError("EVALUATE_DISABLED", "Page JavaScript execution is disabled by server configuration.");
+    if (action.action === "evaluate") {
+      this.policy.assertEvalAllowed();
     }
     throwIfAborted(signal);
     if (isDialogAction(action)) {
@@ -1399,7 +1444,7 @@ export class BrowserService {
   private async executeOnPage(action: BrowserAction, signal?: AbortSignal): Promise<unknown> {
     if (action.action === "navigate") {
       const targetUrl = requireField(action.url, "url");
-      const newTab = action.newTab ?? action.new_tab;
+      const newTab = action.newTab;
       if (newTab && action.pageId) {
         throw new AppError("INVALID_ACTION", "newTab navigation cannot also target an existing pageId.");
       }
@@ -1455,9 +1500,9 @@ export class BrowserService {
         const navigationGeneration = this.beginNavigation(state);
         try {
         let monitor: ClickMonitorResult = { navigated: false, urlChanged: false };
-        const coordinateX = action.coordinateX ?? action.coordinate_x;
-        const coordinateY = action.coordinateY ?? action.coordinate_y;
-        const clickInNewTab = action.newTab ?? action.new_tab;
+        const coordinateX = action.coordinateX;
+        const coordinateY = action.coordinateY;
+        const clickInNewTab = action.newTab;
         const pointerType = action.pointerType ?? "mouse";
         if (pointerType === "touch" && (action.button ?? "left") !== "left") {
           throw new AppError("INVALID_ACTION", "Touch clicks support only the left button.");
@@ -2575,9 +2620,9 @@ export class BrowserService {
         }
       }
       case "screenshot": {
-        const requestedMaxBytes = action.maxBytes ?? action.max_bytes ?? this.config.browser.maxScreenshotBytes;
+        const requestedMaxBytes = action.maxBytes ?? this.config.browser.maxScreenshotBytes;
         const format = action.format ?? "png";
-        const screenshot = await this.screenshotBase64(page, action.fullPage ?? action.full_page ?? action.full ?? false, Math.min(requestedMaxBytes, this.config.browser.maxScreenshotBytes), format, action.quality, action.maxDimension ?? action.max_dim);
+        const screenshot = await this.screenshotBase64(page, action.fullPage ?? false, Math.min(requestedMaxBytes, this.config.browser.maxScreenshotBytes), format, action.quality, action.maxDimension);
         return { pageId: state.id, url: safeUrl(page.url()), screenshotBase64: screenshot.screenshotBase64, screenshot: screenshot.metadata, mimeType: format === "jpeg" ? "image/jpeg" : "image/png", quality: format === "jpeg" ? action.quality ?? 80 : undefined };
       }
       case "save_as_pdf": {
@@ -3189,7 +3234,7 @@ export class BrowserService {
           return { pageId: state.id, url: safeUrl(page.url()), title: wrapUntrustedText("page_title", redactSecretPlaceholders(title.slice(0, 1_000)), 1_000), viewport: page.viewport(), dimensions };
         }
       case "evaluate": {
-        const code = requireField(action.code ?? action.expression, "code");
+        const code = requireField(action.code, "code");
         const value = await frame.evaluate((source) => (0, eval)(source), code);
         return sanitizeEvaluateResult(value);
       }
@@ -3197,8 +3242,8 @@ export class BrowserService {
         if (action.frameId && action.frameId !== "main") {
           throw new AppError("FRAME_ACTION_UNSUPPORTED", "Coordinate moves target the top-level viewport; use a selector for a child frame.");
         }
-        const coordinateX = action.coordinateX ?? action.coordinate_x;
-        const coordinateY = action.coordinateY ?? action.coordinate_y;
+        const coordinateX = action.coordinateX;
+        const coordinateY = action.coordinateY;
         if (coordinateX === undefined || coordinateY === undefined) {
           throw new AppError("INVALID_ACTION", "coordinateX and coordinateY must be provided together.");
         }
@@ -3216,10 +3261,10 @@ export class BrowserService {
         const selector = await this.selectorFor(state, targetForAction(action, "target"), action.frameId, frame);
         const targetHandle = await frame.$(selector);
         let mouseButtonMayBeDown = false;
-        const startCoordinateX = action.startCoordinateX ?? action.start_coordinate_x;
-        const startCoordinateY = action.startCoordinateY ?? action.start_coordinate_y;
-        const endCoordinateX = action.endCoordinateX ?? action.end_coordinate_x;
-        const endCoordinateY = action.endCoordinateY ?? action.end_coordinate_y;
+        const startCoordinateX = action.startCoordinateX;
+        const startCoordinateY = action.startCoordinateY;
+        const endCoordinateX = action.endCoordinateX;
+        const endCoordinateY = action.endCoordinateY;
         const path = action.path;
         if ((startCoordinateX === undefined) !== (startCoordinateY === undefined)) {
           await targetHandle?.dispose().catch(() => undefined);
@@ -3643,14 +3688,13 @@ export class BrowserService {
     return browser;
   }
 
-  // The optional `stealth` section is absent unless enabled; use safe defaults.
   private stealthSettings(): { enabled: boolean; profile: "balanced" | "max"; gpu: boolean; behaviorEnabled: boolean } {
-    const s = this.config.stealth;
+    const stealth = this.config.stealth;
     return {
-      enabled: s?.enabled ?? false,
-      profile: s?.profile ?? "balanced",
-      gpu: s?.gpu ?? false,
-      behaviorEnabled: s?.behaviorEnabled ?? s?.enabled ?? false,
+      enabled: stealth.enabled,
+      profile: stealth.profile,
+      gpu: stealth.gpu,
+      behaviorEnabled: stealth.behaviorEnabled,
     };
   }
 
@@ -3680,13 +3724,13 @@ export class BrowserService {
             throw new AppError("BROWSER_NOT_CONFIGURED", `Managed browser mode could not find Chrome. Checked: ${chromeExecutableSearchPaths().join(", ")}. Install Chrome or set SMOOTH_OPERATOR_BROWSER_EXECUTABLE.`);
           }
           this.assertExecutableReady(executablePath);
+          const stealth = this.stealthSettings();
           connection = this.launch({
             headless: this.config.browser.headless,
             executablePath,
             userDataDir: this.config.browser.userDataDir,
             args: nativeBrowserLaunchArgs({
-              enabled: this.stealthSettings().enabled,
-              gpu: this.stealthSettings().gpu,
+              gpu: stealth.gpu,
               viewport: this.config.browser.viewport,
             }),
             timeout: this.config.browser.connectTimeoutMs,
@@ -3699,13 +3743,13 @@ export class BrowserService {
         }
         this.assertExecutableReady(this.config.browser.executablePath);
         ownsBrowser = true;
+        const stealth = this.stealthSettings();
         connection = this.launch({
           headless: this.config.browser.headless,
           executablePath: this.config.browser.executablePath,
           userDataDir: this.config.browser.userDataDir,
           args: nativeBrowserLaunchArgs({
-            enabled: this.stealthSettings().enabled,
-            gpu: this.stealthSettings().gpu,
+            gpu: stealth.gpu,
             viewport: this.config.browser.viewport,
           }),
           timeout: this.config.browser.connectTimeoutMs,
@@ -4064,7 +4108,6 @@ export class BrowserService {
         const oldest = this.pendingTargetGuardSessions.keys().next().value;
         if (oldest !== undefined) {
           this.pendingTargetGuardSessions.delete(oldest);
-          this.pendingTargetGuardInfos.delete(oldest);
         }
       }
       this.pendingTargetGuardSessions.set(sessionId, value);
@@ -4087,7 +4130,6 @@ export class BrowserService {
       const session = this.pendingTargetGuardSessions.get(event.sessionId)
         ?? getCdpSession(targetConnection, event.sessionId);
       this.pendingTargetGuardSessions.delete(event.sessionId);
-      this.pendingTargetGuardInfos.delete(event.sessionId);
       if (!isGuardableTarget(event.targetInfo)) {
         return;
       }
@@ -4143,7 +4185,6 @@ export class BrowserService {
         this.targetGuardSessions.delete(value.sessionId);
       }
       this.pendingTargetGuardSessions.delete(value.sessionId);
-      this.pendingTargetGuardInfos.delete(value.sessionId);
       this.handledTargetGuardSessions.delete(value.sessionId);
     };
     targetConnection.on("sessionattached", sessionListener);
@@ -4246,7 +4287,6 @@ export class BrowserService {
     this.targetGuardWrappedEmit = undefined;
     this.targetGuardUnavailable = false;
     this.pendingTargetGuardSessions.clear();
-    this.pendingTargetGuardInfos.clear();
     this.handledTargetGuardSessions.clear();
     for (const guard of this.targetGuardSessions.values()) {
       guard.released = true;
@@ -4839,25 +4879,6 @@ export class BrowserService {
         throw new AppError("BROWSER_GUARD_FAILED", "The browser navigation policy could not be installed.", { retryable: true, cause: error });
       }
     }
-    // Browser compatibility script: inject once per page behind a one-shot guard,
-    // mirroring the navigation-guard block above. `evaluateOnNewDocument` runs
-    // in the main world before page scripts, so a single CDP call covers every
-    // document/iframe the page creates. It only applies an explicit viewport;
-    // browser identity and native automation signals remain untouched.
-    const stealth = this.stealthSettings();
-    if (stealth.enabled && !state.stealthInjected) {
-      try {
-        const source = buildStealthInitScript(
-          buildFingerprintProfile({ profile: stealth.profile, viewport: this.config.browser.viewport }),
-          { max: stealth.profile === "max", applyViewport: this.config.browser.viewport !== undefined },
-        );
-        await state.page.evaluateOnNewDocument(source);
-        state.stealthInjected = true;
-      } catch (error) {
-        throwIfAborted(signal);
-        throw new AppError("STEALTH_INITIALIZATION_FAILED", "The browser compatibility script could not be injected.", { retryable: true, cause: error });
-      }
-    }
     // Pages that existed before the browser connection was fully wired do not
     // receive a targetcreated callback. Release their initial CDP pause only
     // after page-level request interception is ready, just as for new pages.
@@ -4904,7 +4925,7 @@ export class BrowserService {
       const isFrameNavigation = navigationRequest && requestFrame !== null;
       mainFrameNavigation = isFrameNavigation && requestFrame === state.page.mainFrame();
       navigationGeneration = mainFrameNavigation ? state.activeNavigationGeneration : undefined;
-      if (mainFrameNavigation && navigationGeneration !== undefined) {
+      if (mainFrameNavigation) {
         // Keep the exact-document admission cache for ordinary clicks that do
         // not navigate. Once a real main-frame request starts, the document
         // identity is changing and all frame URL admissions must be rebuilt.
@@ -4952,7 +4973,13 @@ export class BrowserService {
       // policy to every HTTP(S) request, not only top-level navigations. This
       // prevents an allowed page from using fetch/XHR/WebSocket-like browser
       // requests to reach a private service behind the MCP boundary.
-      await this.policy.assertNavigationAllowedAsync(requestUrl);
+      // Same-origin HTTP(S) subresources of an already-admitted document skip
+      // the public DNS lookup; navigations, websockets, and other hosts do not.
+      const skipDns = this.shouldSkipSubresourceDns(state, requestUrl, navigationRequest);
+      const admitted = await this.policy.assertNavigationAllowedAsync(requestUrl, skipDns ? { skipDns: true } : undefined);
+      if (mainFrameNavigation) {
+        this.rememberPolicyVerifiedUrl(state, admitted.toString());
+      }
       await request.continue();
     } catch (error) {
       const normalized = error instanceof AppError ? error : new AppError("NAVIGATION_BLOCKED", "The browser navigation was blocked by policy.", { cause: error });
@@ -5023,7 +5050,7 @@ export class BrowserService {
       }
       this.ids.delete(page);
     }
-    const state: PageState = { id: randomUUID(), page, lifecycleGeneration: this.lifecycleGeneration, disposed: false, refs: new Map(), domRevision: 0, networkEnabled: false, consoleEnabled: false, network: [], console: [], dialogs: [], listenersInstalled: false, timeoutsConfigured: false, viewportConfigured: false, downloadConfigured: false, navigationGuardInstalled: false, stealthInjected: false, navigationGeneration: 0, policyVerifiedUrls: new Set(), blockedResourceTypes: new Set() };
+    const state: PageState = { id: randomUUID(), page, lifecycleGeneration: this.lifecycleGeneration, disposed: false, refs: new Map(), domRevision: 0, networkEnabled: false, consoleEnabled: false, network: [], console: [], dialogs: [], listenersInstalled: false, timeoutsConfigured: false, viewportConfigured: false, downloadConfigured: false, navigationGuardInstalled: false, navigationGeneration: 0, policyVerifiedUrls: new Set(), blockedResourceTypes: new Set() };
     this.ids.set(page, state.id);
     this.states.set(state.id, state);
     this.installListeners(state);
@@ -5126,10 +5153,9 @@ export class BrowserService {
       if (state.disposed) {
         return;
       }
-      // A same-origin reload or child-frame navigation can keep the host
-      // unchanged while replacing the document. Re-run the DNS admission for
-      // the new frame URL rather than carrying the old document's cache.
-      state.policyVerifiedUrls?.clear();
+      // Snapshot and challenge evidence is document-scoped. Host admissions
+      // stay until the next main-frame request so same-origin subresources
+      // can skip public DNS for the rest of this navigation generation.
       state.domRevision += 1;
       state.snapshotId = undefined;
       state.refs.clear();
@@ -5153,7 +5179,6 @@ export class BrowserService {
       if (state.disposed) {
         return;
       }
-      state.policyVerifiedUrls?.clear();
       state.domRevision += 1;
       state.snapshotId = undefined;
       state.refs.clear();
@@ -5165,7 +5190,6 @@ export class BrowserService {
       if (state.disposed) {
         return;
       }
-      state.policyVerifiedUrls?.clear();
       state.domRevision += 1;
       state.snapshotId = undefined;
       state.refs.clear();
@@ -6377,11 +6401,45 @@ export class BrowserService {
       return;
     }
     const normalized = this.policy.assertNavigationAllowed(rawUrl).toString();
-    state.policyVerifiedUrls ??= new Set();
-    if (state.policyVerifiedUrls.has(normalized)) {
+    if (state.policyVerifiedUrls?.has(normalized)) {
       return;
     }
     await this.policy.assertNavigationAllowedAsync(normalized);
+    this.rememberPolicyVerifiedUrl(state, normalized);
+  }
+
+  /**
+   * Same-origin HTTP(S) subresources of a document already admitted this
+   * navigation generation skip public DNS. Navigations, unparsable URLs, and
+   * any other host still take the full async path.
+   */
+  private shouldSkipSubresourceDns(state: PageState, requestUrl: string, navigationRequest: boolean): boolean {
+    if (navigationRequest || !state.policyVerifiedUrls || state.policyVerifiedUrls.size === 0) {
+      return false;
+    }
+    let requestHost: string;
+    try {
+      requestHost = new URL(requestUrl).hostname;
+    } catch {
+      return false;
+    }
+    if (!requestHost) {
+      return false;
+    }
+    for (const verified of state.policyVerifiedUrls) {
+      try {
+        if (new URL(verified).hostname === requestHost) {
+          return true;
+        }
+      } catch {
+        // Ignore malformed cache entries and keep scanning.
+      }
+    }
+    return false;
+  }
+
+  private rememberPolicyVerifiedUrl(state: PageState, normalized: string): void {
+    state.policyVerifiedUrls ??= new Set();
     state.policyVerifiedUrls.add(normalized);
     if (state.policyVerifiedUrls.size > MAX_POLICY_VERIFIED_URLS) {
       const oldest = state.policyVerifiedUrls.values().next().value;
@@ -7050,8 +7108,8 @@ export class BrowserService {
     // A present challenge is an AI handoff. Capture exactly one fresh bounded
     // snapshot so refs, viewport, frame, and revision all describe the same
     // document as the screenshot.
-    const includeScreenshot = action.includeScreenshot ?? action.include_screenshot ?? true;
-    const requestedMaxDimension = action.maxDimension ?? action.max_dim;
+    const includeScreenshot = action.includeScreenshot ?? true;
+    const requestedMaxDimension = action.maxDimension;
     const maxDimension = Number.isFinite(requestedMaxDimension)
       ? Math.min(1_600, Math.max(100, Math.floor(requestedMaxDimension as number)))
       : 1_600;
@@ -7063,7 +7121,7 @@ export class BrowserService {
       pageId: state.id,
       frameId: action.frameId,
       includeScreenshot,
-      fullPage: action.fullPage ?? action.full_page ?? action.full ?? false,
+      fullPage: action.fullPage ?? false,
       maxDimension,
       maxChars,
       signal,
@@ -7329,217 +7387,6 @@ export class BrowserService {
       }
     }).catch(() => undefined);
     return recovery;
-  }
-
-  private async withOperationLock<T>(signal: AbortSignal | undefined, operation: (operationSignal: AbortSignal) => Promise<T>, queueTimeoutMs = this.config.browser.actionTimeoutMs, operationTimeoutMs?: number, mode: "exclusive" | "read" = "exclusive", touchActivity = true, operationTimeoutDetails?: () => object): Promise<T> {
-    if (this.queuedOperations >= MAX_QUEUED_OPERATIONS) {
-      throw new AppError("BROWSER_QUEUE_FULL", "The browser action queue is full; wait for an active operation to finish and retry.", { retryable: true, details: { hint: "Wait for the active browser operation to finish, then retry." } });
-    }
-    this.queuedOperations += 1;
-    const readMode = mode === "read";
-    const requestSessionGeneration = this.sessionGeneration;
-    const requestStartedAt = Date.now();
-    const queueDeadline = requestStartedAt + Math.max(1, Math.floor(queueTimeoutMs));
-    const previous = this.operationTail;
-    const readDrain = this.readDrainPromise;
-    let release!: () => void;
-    if (!readMode) {
-      this.operationTail = new Promise<void>((resolvePromise) => {
-        release = resolvePromise;
-      });
-    }
-    const queueSignal = combineSignals(signal, this.shutdownController.signal);
-    let acquired = false;
-    let deferRelease = false;
-    let operationPromise: Promise<T> | undefined;
-    try {
-      if (readMode) {
-        while (true) {
-          const readTurn = this.operationTail;
-          await waitForTurn(readTurn, queueSignal, remainingQueueBudget(queueDeadline, queueTimeoutMs, queueSignal), queueTimeoutMs);
-          ensureQueueBudget(queueDeadline, queueTimeoutMs, queueSignal);
-          if (readTurn !== this.operationTail) {
-            continue;
-          }
-          await this.acquireReadPermit(queueSignal, remainingQueueBudget(queueDeadline, queueTimeoutMs, queueSignal), queueTimeoutMs);
-          try {
-            ensureQueueBudget(queueDeadline, queueTimeoutMs, queueSignal);
-          } catch (error) {
-            this.endReadOperation();
-            throw error;
-          }
-          // A writer may publish a queue node while this read waits for a
-          // permit. Do not let that reader overtake the writer; hand the
-          // permit back and re-enter behind the writer instead.
-          if (readTurn !== this.operationTail) {
-            this.endReadOperation();
-            continue;
-          }
-          break;
-        }
-      } else {
-        await waitForTurn(previous, queueSignal, remainingQueueBudget(queueDeadline, queueTimeoutMs, queueSignal), queueTimeoutMs);
-        await waitForTurn(readDrain, queueSignal, remainingQueueBudget(queueDeadline, queueTimeoutMs, queueSignal), queueTimeoutMs);
-        ensureQueueBudget(queueDeadline, queueTimeoutMs, queueSignal);
-      }
-      acquired = true;
-      throwIfAborted(queueSignal);
-      if (requestSessionGeneration !== this.sessionGeneration) {
-        throw new AppError("SESSION_CLOSED", "The browser session was closed before this operation started.", { retryable: true });
-      }
-      const operationController = new AbortController();
-      this.activeOperationControllers.add(operationController);
-      const operationSignal = combineSignals(queueSignal, operationController.signal) ?? operationController.signal;
-      let operationTimedOut = false;
-      let abortRequested = false;
-      let recoveryAfterAbort: Promise<void> | undefined;
-      const operationBudgetMs = operationTimeoutMs === undefined
-        ? undefined
-        : Math.max(1, Math.floor(operationTimeoutMs) - Math.max(0, Date.now() - requestStartedAt));
-      let removeAbortListener: (() => void) | undefined;
-      let rejectAbort!: (error: unknown) => void;
-      const abortPromise = new Promise<never>((_, reject) => {
-        rejectAbort = reject;
-        const onAbort = (): void => {
-          if (abortRequested) {
-            return;
-          }
-          abortRequested = true;
-          const timedOut = operationTimedOut;
-          operationController.abort();
-          reject(timedOut
-            ? new AppError("BROWSER_TIMEOUT", `The browser operation exceeded its ${Math.max(1, Math.floor(operationTimeoutMs ?? 0))}ms action deadline.`, { retryable: true, details: { phase: "action", timeoutMs: Math.max(1, Math.floor(operationTimeoutMs ?? 0)) } })
-            : new AppError("CANCELLED", "The browser action was cancelled."));
-        };
-        if (queueSignal?.aborted) {
-          onAbort();
-          return;
-        }
-        queueSignal?.addEventListener("abort", onAbort, { once: true });
-        removeAbortListener = (): void => queueSignal?.removeEventListener("abort", onAbort);
-      });
-      const deadlineTimer = operationTimeoutMs === undefined ? undefined : setTimeout(() => {
-        if (!queueSignal?.aborted) {
-          operationTimedOut = true;
-          if (!abortRequested) {
-            abortRequested = true;
-            operationController.abort();
-            rejectAbort(new AppError("BROWSER_TIMEOUT", `The browser operation exceeded its ${Math.max(1, Math.floor(operationTimeoutMs ?? 0))}ms action deadline.`, { retryable: true, details: { phase: "action", timeoutMs: Math.max(1, Math.floor(operationTimeoutMs ?? 0)) } }));
-          }
-        }
-      }, operationBudgetMs);
-      if (touchActivity) {
-        this.lastActivityAt = Date.now();
-      }
-      operationPromise = Promise.resolve().then(() => operation(operationSignal));
-      void operationPromise.catch(() => undefined);
-      if (abortRequested) {
-        recoveryAfterAbort = this.recoverAfterAbort(operationPromise);
-      }
-      try {
-        const result = await Promise.race([operationPromise, abortPromise]);
-        throwIfAborted(operationSignal);
-        return result;
-      } catch (error) {
-        const normalized = normalizeBrowserOperationError(error, operationSignal);
-        if (operationTimedOut && !queueSignal?.aborted) {
-          const normalizedError = asAppError(normalized);
-          throw new AppError("BROWSER_TIMEOUT", `The browser operation exceeded its ${Math.max(1, Math.floor(operationTimeoutMs ?? 0))}ms action deadline.`, {
-            retryable: true,
-            details: { ...normalizedError.details, ...operationTimeoutDetails?.(), phase: "action", timeoutMs: Math.max(1, Math.floor(operationTimeoutMs ?? 0)) },
-            cause: error,
-          });
-        }
-        throw normalized;
-      } finally {
-        if (deadlineTimer) {
-          clearTimeout(deadlineTimer);
-        }
-        removeAbortListener?.();
-        this.activeOperationControllers.delete(operationController);
-        if (abortRequested && operationPromise) {
-          deferRelease = true;
-          recoveryAfterAbort ??= this.recoverAfterAbort(operationPromise);
-          await recoveryAfterAbort;
-          deferRelease = false;
-        }
-      }
-    } finally {
-      this.queuedOperations -= 1;
-      // A cancelled waiter must not resolve its queue node early: doing so
-      // would let a later request run concurrently with the predecessor that
-      // still owns the browser. Keep the node behind its predecessor even
-      // when this request has already been cancelled.
-      if (readMode) {
-        if (acquired) {
-          this.endReadOperation();
-        }
-      } else {
-        if (acquired) {
-          if (!deferRelease) {
-            release();
-          }
-        } else {
-          void Promise.all([previous, readDrain]).then(release, release);
-        }
-      }
-    }
-  }
-
-  private beginReadOperation(): void {
-    if (this.activeReadOperations === 0) {
-      this.readDrainPromise = new Promise<void>((resolvePromise) => {
-        this.readDrainRelease = resolvePromise;
-      });
-    }
-    this.activeReadOperations += 1;
-  }
-
-  private endReadOperation(): void {
-    this.activeReadOperations = Math.max(0, this.activeReadOperations - 1);
-    const next = this.readPermitWaiters.shift();
-    if (next) {
-      next();
-    } else if (this.activeReadOperations === 0) {
-      this.readDrainRelease?.();
-      this.readDrainRelease = undefined;
-    }
-  }
-
-  private async acquireReadPermit(signal: AbortSignal | undefined, timeoutMs: number, queueTimeoutMs: number): Promise<void> {
-    if (this.activeReadOperations < MAX_PARALLEL_READ_OPERATIONS && this.readPermitWaiters.length === 0) {
-      this.beginReadOperation();
-      return;
-    }
-    await new Promise<void>((resolvePromise, reject) => {
-      let settled = false;
-      const waiter = (): void => finish(resolvePromise);
-      const removeWaiter = (): void => {
-        const index = this.readPermitWaiters.indexOf(waiter);
-        if (index >= 0) {
-          this.readPermitWaiters.splice(index, 1);
-        }
-      };
-      const finish = (callback: () => void): void => {
-        if (settled) {
-          return;
-        }
-        settled = true;
-        clearTimeout(timer);
-        signal?.removeEventListener("abort", onAbort);
-        removeWaiter();
-        callback();
-      };
-      const onAbort = (): void => finish(() => reject(new AppError("CANCELLED", "The browser action was cancelled.")));
-      const timer = setTimeout(() => finish(() => reject(queueTimeoutError(queueTimeoutMs))), Math.max(1, Math.floor(timeoutMs)));
-      this.readPermitWaiters.push(waiter);
-      if (signal?.aborted) {
-        onAbort();
-      } else {
-        signal?.addEventListener("abort", onAbort, { once: true });
-      }
-    });
-    this.beginReadOperation();
   }
 }
 
@@ -8119,78 +7966,6 @@ function isInterestingAxNode(node: Record<string, unknown>): boolean {
 function normalizeKeyInput(rawKey: string): KeyInput {
   const candidate = rawKey.length === 1 ? rawKey : rawKey.trim();
   return COMMON_KEY_ALIASES[candidate.toUpperCase()] ?? candidate as KeyInput;
-}
-
-function throwIfAborted(signal?: AbortSignal): void {
-  if (signal?.aborted) {
-    throw new AppError("CANCELLED", "The browser action was cancelled.");
-  }
-}
-
-function combineSignals(...signals: Array<AbortSignal | undefined>): AbortSignal | undefined {
-  const active = signals.filter((signal): signal is AbortSignal => signal !== undefined);
-  if (active.length === 0) {
-    return undefined;
-  }
-  if (active.length === 1) {
-    return active[0];
-  }
-  return AbortSignal.any(active);
-}
-
-function queueTimeoutError(timeoutMs: number): AppError {
-  return new AppError("BROWSER_QUEUE_TIMEOUT", `The browser operation waited more than ${timeoutMs}ms in the browser action queue.`, { retryable: true, details: { phase: "queue", timeoutMs } });
-}
-
-function remainingQueueBudget(deadline: number, timeoutMs: number, signal?: AbortSignal): number {
-  throwIfAborted(signal);
-  const remaining = deadline - Date.now();
-  if (remaining <= 0) {
-    throw queueTimeoutError(timeoutMs);
-  }
-  return remaining;
-}
-
-function ensureQueueBudget(deadline: number, timeoutMs: number, signal?: AbortSignal): void {
-  throwIfAborted(signal);
-  if (deadline - Date.now() <= 0) {
-    throw queueTimeoutError(timeoutMs);
-  }
-}
-
-async function waitForTurn(previous: Promise<void>, signal: AbortSignal | undefined, timeoutMs: number, queueTimeoutMs: number): Promise<void> {
-  if (signal?.aborted) {
-    throw new AppError("CANCELLED", "The browser action was cancelled.");
-  }
-  await new Promise<void>((resolvePromise, reject) => {
-    let settled = false;
-    const timeout = setTimeout(() => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      signal?.removeEventListener("abort", onAbort);
-      reject(queueTimeoutError(queueTimeoutMs));
-    }, Math.max(1, Math.floor(timeoutMs)));
-    const settle = (callback: () => void): void => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      clearTimeout(timeout);
-      signal?.removeEventListener("abort", onAbort);
-      callback();
-    };
-    const onAbort = (): void => {
-      settle(() => reject(new AppError("CANCELLED", "The browser action was cancelled.")));
-    };
-    signal?.addEventListener("abort", onAbort, { once: true });
-    previous.then(() => {
-      settle(resolvePromise);
-    }, () => {
-      settle(resolvePromise);
-    });
-  });
 }
 
 async function awaitWithAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {

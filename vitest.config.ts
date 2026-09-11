@@ -14,12 +14,13 @@ export default defineConfig({
       include: ["src/server/**/*.ts"],
       exclude: [
         "src/server/main.ts",
+        "src/server/http.ts",
       ],
       thresholds: {
-        lines: 60,
-        statements: 60,
-        functions: 60,
-        branches: 50,
+        lines: 72.7,
+        statements: 70.7,
+        functions: 77.2,
+        branches: 64.7,
       },
     },
   },

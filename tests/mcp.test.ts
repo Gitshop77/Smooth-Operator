@@ -10,11 +10,8 @@ import { testConfig } from "./helpers";
 const EXPECTED_READ_ONLY_TOOLS = new Set([
   "browser_snapshot",
   "browser_tabs",
-  "browser_list_tabs",
   "browser_list_sessions",
-  "browser_get_state",
   "browser_get_html",
-  "browser_extract_content",
   "browser_wait",
   "browser_wait_for_element",
   "browser_wait_for_text",
@@ -68,6 +65,17 @@ describe("native MCP registry", () => {
       expect(JSON.stringify(click)).toContain("coordinateX and coordinateY");
       expect(JSON.stringify(input)).toContain("target, ref, selector, or index");
       expect(JSON.stringify(click)).not.toBe("Invalid input");
+      const missingTab = await client.callTool({ name: "browser_switch_tab", arguments: {} });
+      expect(missingTab.isError).toBe(true);
+      expect(JSON.stringify(missingTab)).toContain("pageId");
+      const halfMove = await client.callTool({ name: "browser_move", arguments: { coordinateX: 1 } });
+      expect(halfMove.isError).toBe(true);
+      const pathAndEnd = await client.callTool({ name: "browser_press_and_hold", arguments: { target: "#x", path: [{ x: 1, y: 1 }, { x: 2, y: 2 }], endCoordinateX: 3, endCoordinateY: 4 } });
+      expect(pathAndEnd.isError).toBe(true);
+      const unpairedEnd = await client.callTool({ name: "browser_press_and_hold", arguments: { target: "#x", endCoordinateX: 1 } });
+      expect(unpairedEnd.isError).toBe(true);
+      const unpairedStart = await client.callTool({ name: "browser_press_and_hold", arguments: { target: "#x", startCoordinateX: 1 } });
+      expect(unpairedStart.isError).toBe(true);
     } finally {
       await client.close().catch(() => undefined);
       await server.close().catch(() => undefined);
@@ -75,7 +83,7 @@ describe("native MCP registry", () => {
     }
   });
 
-  it("labels compatibility aliases and forwards all canonical element target forms", async () => {
+  it("omits compatibility aliases from tools/list and forwards canonical element target forms", async () => {
     const runtime = await ServerRuntime.create(testConfig());
     const run = vi.spyOn(runtime, "run").mockResolvedValue({ ok: true });
     const server = createMcpServer(runtime);
@@ -84,11 +92,11 @@ describe("native MCP registry", () => {
     try {
       await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
       const tools = await client.listTools();
+      expect(tools.tools.length).toBeLessThan(64);
       for (const alias of ["browser_list_tabs", "browser_get_state", "browser_type", "browser_extract_content", "browser_go_back", "browser_close_all", "browser_exec"]) {
-        const tool = tools.tools.find((candidate) => candidate.name === alias);
-        expect(tool?.title).toContain("Compatibility alias");
-        expect(tool?.description).toContain("Compatibility alias");
+        expect(tools.tools.some((tool) => tool.name === alias)).toBe(false);
       }
+      expect(tools.tools.some((tool) => (tool.title ?? "").includes("Compatibility alias") || (tool.description ?? "").includes("Compatibility alias"))).toBe(false);
       await client.callTool({ name: "browser_select", arguments: { ref: "e5", optionValue: "one" } });
       await client.callTool({ name: "browser_upload", arguments: { index: 2, filePath: "/tmp/file.txt" } });
       await client.callTool({ name: "browser_dropdown_options", arguments: { ref: "e5" } });
@@ -118,6 +126,60 @@ describe("native MCP registry", () => {
       expect(result.isError).toBe(true);
       expect(result.structuredContent).toMatchObject({ ok: false, error: { code: "STALE_REFERENCE", recovery: { tool: "browser_snapshot" } } });
       expect(parseTextContent(result)).toEqual(result.structuredContent);
+    } finally {
+      await client.close().catch(() => undefined);
+      await server.close().catch(() => undefined);
+      await runtime.close();
+    }
+  });
+
+  it("dispatches one-job wait, log, challenge, and scroll tools to canonical actions", async () => {
+    const runtime = await ServerRuntime.create(testConfig());
+    const run = vi.spyOn(runtime, "run").mockResolvedValue({ ok: true });
+    const server = createMcpServer(runtime);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "one-job-dispatch-test", version: "1.0.0" });
+    try {
+      await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+      const tools = await client.listTools();
+      for (const name of ["browser_wait", "browser_wait_for_element", "browser_network_log", "browser_challenge", "browser_scroll"]) {
+        const schema = tools.tools.find((tool) => tool.name === name)?.inputSchema as { properties?: Record<string, { enum?: string[] }> };
+        if (name === "browser_network_log") {
+          expect(schema.properties?.operation?.enum).toEqual(["enable", "disable", "read", "clear", "read_and_clear"]);
+        } else {
+          expect(schema.properties?.operation?.enum ?? []).not.toEqual(expect.arrayContaining(["element", "solve", "search"]));
+          expect(schema.properties?.to).toBeUndefined();
+          expect(schema.properties?.source).toBeUndefined();
+        }
+      }
+      await client.callTool({ name: "browser_wait", arguments: { milliseconds: 0 } });
+      await client.callTool({ name: "browser_wait_for_element", arguments: { selector: "#x", state: "visible" } });
+      await client.callTool({ name: "browser_wait_for_text", arguments: { text: "ready" } });
+      await client.callTool({ name: "browser_wait_for_url", arguments: { url: "*" } });
+      await client.callTool({ name: "browser_wait_for_network_idle", arguments: {} });
+      await client.callTool({ name: "browser_network_log", arguments: { operation: "enable" } });
+      await client.callTool({ name: "browser_search_network_log", arguments: { query: "checkout" } });
+      await client.callTool({ name: "browser_console_log", arguments: { operation: "read_and_clear" } });
+      await client.callTool({ name: "browser_challenge", arguments: {} });
+      await client.callTool({ name: "browser_solve_challenge", arguments: { includeScreenshot: true } });
+      await client.callTool({ name: "browser_wait_for_human", arguments: { timeoutMs: 500 } });
+      await client.callTool({ name: "browser_scroll", arguments: {} });
+      await client.callTool({ name: "browser_scroll_to_bottom", arguments: { maxScrolls: 3, restoreTop: true } });
+      expect(run.mock.calls.map(([action]) => action)).toEqual([
+        expect.objectContaining({ action: "wait", milliseconds: 0 }),
+        expect.objectContaining({ action: "wait_for_element", selector: "#x", state: "visible" }),
+        expect.objectContaining({ action: "wait_for_text", text: "ready" }),
+        expect.objectContaining({ action: "wait_for_url", url: "*" }),
+        expect.objectContaining({ action: "wait_for_network_idle" }),
+        expect.objectContaining({ action: "enable_network_log" }),
+        expect.objectContaining({ action: "search_network_log", query: "checkout" }),
+        expect.objectContaining({ action: "getclear_console_log" }),
+        expect.objectContaining({ action: "detect_challenge" }),
+        expect.objectContaining({ action: "solve_challenge", includeScreenshot: true }),
+        expect.objectContaining({ action: "wait_for_human", timeoutMs: 500 }),
+        expect.objectContaining({ action: "scroll", direction: "down", amount: 600 }),
+        expect.objectContaining({ action: "scroll_to_bottom", maxScrolls: 3, restoreTop: true }),
+      ]);
     } finally {
       await client.close().catch(() => undefined);
       await server.close().catch(() => undefined);
@@ -157,28 +219,28 @@ describe("native MCP registry", () => {
     const resourceTemplates = await client.listResourceTemplates();
     const prompts = await client.listPrompts();
 
-    expect(tools.tools).toHaveLength(64);
+    expect(tools.tools.length).toBeLessThan(64);
+    expect(tools.tools).toHaveLength(57);
     expect(resources.resources).toHaveLength(6);
     expect(resourceTemplates.resourceTemplates).toHaveLength(1);
     expect(prompts.prompts).toHaveLength(4);
 
     const toolNames = new Set(tools.tools.map((tool) => tool.name));
     for (const name of [
-      "browser_navigate", "browser_click", "browser_type", "browser_get_state",
-      "browser_extract_content", "browser_get_html", "browser_screenshot", "browser_scroll",
-      "browser_go_back", "browser_list_tabs", "browser_switch_tab", "browser_close_tab",
-      "browser_list_sessions", "browser_close_session", "browser_close_all",
-      "browser_exec",
+      "browser_navigate", "browser_click", "browser_input", "browser_snapshot",
+      "browser_extract", "browser_get_html", "browser_screenshot", "browser_scroll",
+      "browser_back", "browser_tabs", "browser_switch_tab", "browser_close_tab",
+      "browser_list_sessions", "browser_close_session", "browser_close",
+      "browser_batch", "browser_wait", "browser_network_log", "browser_challenge", "browser_solve_challenge",
     ]) {
-      expect(toolNames.has(name), `${name} must remain in the browser-use parity surface`).toBe(true);
+      expect(toolNames.has(name), `${name} must remain in the canonical surface`).toBe(true);
     }
     expect(toolNames.has("browser_snapshot")).toBe(true);
-    expect(tools.tools.some((tool) => tool.name === "browser_get_state")).toBe(true);
     expect(tools.tools.some((tool) => tool.name === "browser_get_html")).toBe(true);
-    expect(tools.tools.some((tool) => tool.name === "browser_extract_content")).toBe(true);
     expect(tools.tools.some((tool) => tool.name === "browser_close")).toBe(true);
     expect(tools.tools.some((tool) => tool.name === "browser_evaluate")).toBe(true);
-    expect(tools.tools.some((tool) => tool.name === "browser_exec")).toBe(true);
+    expect(tools.tools.some((tool) => tool.name === "browser_exec")).toBe(false);
+    expect(tools.tools.some((tool) => tool.name === "browser_type")).toBe(false);
     expect(tools.tools.some((tool) => tool.name === "retry_with_browser_use_agent")).toBe(false);
     expect(tools.tools.some((tool) => tool.name === "browser_frames")).toBe(true);
     expect(tools.tools.some((tool) => tool.name === "browser_accessibility_snapshot")).toBe(true);
@@ -223,17 +285,31 @@ describe("native MCP registry", () => {
     expect(toolByName.get("browser_click")?.inputSchema).not.toHaveProperty("anyOf");
     expect(toolByName.get("browser_click")?.inputSchema).toHaveProperty("properties.target");
     expect(toolByName.get("browser_click")?.inputSchema).toHaveProperty("properties.coordinateX");
+    expect(toolByName.get("browser_click")?.inputSchema).not.toHaveProperty("properties.coordinate_x");
     expect(toolByName.get("browser_input")?.inputSchema).toHaveProperty("properties.selector");
     expect(toolByName.get("browser_switch_tab")?.inputSchema).toHaveProperty("properties.pageId");
-    expect(toolByName.get("browser_switch_tab")?.inputSchema).toHaveProperty("properties.tab_id");
+    expect(toolByName.get("browser_switch_tab")?.inputSchema).not.toHaveProperty("properties.tab_id");
+    expect(toolByName.get("browser_navigate")?.inputSchema).toHaveProperty("properties.newTab");
+    expect(toolByName.get("browser_navigate")?.inputSchema).not.toHaveProperty("properties.new_tab");
+    expect(toolByName.get("browser_close_session")?.inputSchema).toHaveProperty("properties.session_id");
+    expect(toolByName.get("browser_close_session")?.inputSchema).not.toHaveProperty("properties.sessionId");
+    const batchSchemaText = JSON.stringify(toolByName.get("browser_batch")?.inputSchema);
+    expect(batchSchemaText).toContain("coordinateX");
+    expect(batchSchemaText).not.toContain("coordinate_x");
+    expect(batchSchemaText).not.toContain("new_tab");
+    expect(batchSchemaText).not.toContain("include_screenshot");
+    expect(batchSchemaText).not.toContain("full_page");
+    expect(batchSchemaText).not.toContain("max_dim");
+    expect(batchSchemaText).not.toContain("max_bytes");
+    expect(batchSchemaText).not.toContain("\"expression\"");
     expect(JSON.stringify(toolByName.get("browser_press_and_hold")?.inputSchema)).toContain("durationMs");
     expect(toolByName.get("browser_press_and_hold")?.description).toContain("endCoordinateX");
     expect(toolByName.get("browser_press_and_hold")?.description).toContain("path");
     expect(toolByName.has("browser_move")).toBe(true);
-    expect(toolByName.get("browser_get_state")?.annotations?.readOnlyHint).toBe(true);
-    expect(toolByName.get("browser_get_state")?.annotations?.openWorldHint).toBe(true);
-    expect(toolByName.get("browser_get_state")?.annotations?.idempotentHint).toBeUndefined();
-    expect(toolByName.get("browser_get_state")?.annotations?.destructiveHint).toBeUndefined();
+    expect(toolByName.get("browser_snapshot")?.annotations?.readOnlyHint).toBe(true);
+    expect(toolByName.get("browser_snapshot")?.annotations?.openWorldHint).toBe(true);
+    expect(toolByName.get("browser_snapshot")?.annotations?.idempotentHint).toBeUndefined();
+    expect(toolByName.get("browser_snapshot")?.annotations?.destructiveHint).toBeUndefined();
     expect(toolByName.get("browser_get_html")?.annotations?.readOnlyHint).toBe(true);
     expect(toolByName.get("browser_get_html")?.annotations?.openWorldHint).toBe(true);
     expect(toolByName.get("browser_get_html")?.description).toContain("bounded sanitized HTML projection");
@@ -247,12 +323,14 @@ describe("native MCP registry", () => {
     expect(toolByName.get("browser_find_text")?.annotations?.readOnlyHint).toBe(false);
     expect(toolByName.get("browser_find_text")?.annotations?.destructiveHint).toBe(false);
     expect(toolByName.get("browser_find_text")?.annotations?.openWorldHint).toBe(true);
-    expect(toolByName.get("browser_type")?.annotations?.readOnlyHint).not.toBe(true);
-    expect(toolByName.get("browser_type")?.annotations?.openWorldHint).toBe(true);
+    expect(toolByName.get("browser_input")?.annotations?.readOnlyHint).not.toBe(true);
+    expect(toolByName.get("browser_input")?.annotations?.openWorldHint).toBe(true);
+    expect(toolByName.get("browser_challenge")?.annotations?.readOnlyHint).toBe(true);
+    expect(toolByName.get("browser_challenge")?.annotations?.openWorldHint).toBe(true);
     expect(toolByName.get("browser_solve_challenge")?.annotations?.readOnlyHint).toBe(false);
     expect(toolByName.get("browser_solve_challenge")?.annotations?.openWorldHint).toBe(true);
     expect(toolByName.get("web_search")?.annotations?.openWorldHint).toBe(true);
-    for (const name of ["browser_network_log", "browser_console_log", "browser_cookies", "browser_storage", "browser_evaluate", "browser_batch", "browser_exec"]) {
+    for (const name of ["browser_network_log", "browser_console_log", "browser_cookies", "browser_storage", "browser_evaluate", "browser_batch"]) {
       expect(toolByName.get(name)?.annotations?.destructiveHint, `${name} must advertise destructive capability`).toBe(true);
       expect(toolByName.get(name)?.annotations?.openWorldHint, `${name} must advertise external scope`).toBe(true);
     }
@@ -277,6 +355,18 @@ describe("native MCP registry", () => {
     const solverStrict = await client.callTool({ name: "browser_solve_challenge", arguments: { pageId: "x", __smooth_operator_invalid_field__: true } });
     expect(solverStrict.isError).toBe(true);
     expect(JSON.stringify(solverStrict)).toContain("Unrecognized key");
+    const clickAlias = await client.callTool({ name: "browser_click", arguments: { coordinate_x: 1, coordinate_y: 1 } });
+    expect(clickAlias.isError).toBe(true);
+    expect(JSON.stringify(clickAlias)).toContain("Unrecognized key");
+    const navigateAlias = await client.callTool({ name: "browser_navigate", arguments: { url: "http://127.0.0.1/", new_tab: true } });
+    expect(navigateAlias.isError).toBe(true);
+    expect(JSON.stringify(navigateAlias)).toContain("Unrecognized key");
+    const tabAlias = await client.callTool({ name: "browser_switch_tab", arguments: { tab_id: "missing" } });
+    expect(tabAlias.isError).toBe(true);
+    expect(JSON.stringify(tabAlias)).toContain("Unrecognized key");
+    const sessionAlias = await client.callTool({ name: "browser_close_session", arguments: { sessionId: "missing" } });
+    expect(sessionAlias.isError).toBe(true);
+    expect(JSON.stringify(sessionAlias)).toContain("Unrecognized key");
     const denied = await client.callTool({ name: "browser_evaluate", arguments: { code: "1 + 1" } });
     expect(denied.isError).toBe(true);
     expect(JSON.stringify(denied)).toContain("EVALUATE_DISABLED");
@@ -289,12 +379,10 @@ describe("native MCP registry", () => {
     expect(unexpectedDialogText.isError).toBe(true);
     expect(JSON.stringify(unexpectedDialogText)).toContain("does not accept text");
 
-    const invalidProgram = await client.callTool({ name: "browser_exec", arguments: { code: "not-json" } });
+    const invalidProgram = await client.callTool({ name: "browser_batch", arguments: { actions: "not-json" as unknown as [] } });
     expect(invalidProgram.isError).toBe(true);
-    expect(JSON.stringify(invalidProgram)).toContain("JSON array");
-    const arbitraryProgram = await client.callTool({ name: "browser_exec", arguments: { code: "print('not allowed')" } });
+    const arbitraryProgram = await client.callTool({ name: "browser_batch", arguments: { actions: [{ action: "not-a-browser-action" }] } });
     expect(arbitraryProgram.isError).toBe(true);
-    expect(JSON.stringify(arbitraryProgram)).toContain("JSON array");
     for (const arguments_ of [
       { operation: "send_keys" },
       { operation: "get_text", text: "unexpected" },
@@ -308,7 +396,7 @@ describe("native MCP registry", () => {
     const unconfirmedEvaluationPlan = await client.callTool({ name: "browser_batch", arguments: { actions: [{ action: "evaluate", code: "1 + 1" }] } });
     expect(unconfirmedEvaluationPlan.isError).toBe(true);
     expect(JSON.stringify(unconfirmedEvaluationPlan)).toContain("confirmDestructive");
-    const unconfirmedExecPlan = await client.callTool({ name: "browser_exec", arguments: { code: JSON.stringify([{ action: "evaluate", code: "1 + 1" }]) } });
+    const unconfirmedExecPlan = await client.callTool({ name: "browser_batch", arguments: { actions: [{ action: "evaluate", code: "1 + 1" }] } });
     expect(unconfirmedExecPlan.isError).toBe(true);
     expect(JSON.stringify(unconfirmedExecPlan)).toContain("confirmDestructive");
     const capabilityResource = await client.readResource({ uri: "smooth-operator://server/capabilities" });
@@ -319,19 +407,19 @@ describe("native MCP registry", () => {
     // in this fixture, so browser calls fail closed without launching Chrome;
     // the purpose here is registry/schema/annotation/serialization coverage.
     const calls: Array<[string, Record<string, unknown>]> = [
-      ["browser_snapshot", {}], ["browser_tabs", {}], ["browser_list_tabs", {}], ["browser_get_state", {}], ["browser_doctor", {}],
+      ["browser_snapshot", {}], ["browser_tabs", {}], ["browser_doctor", {}],
       ["browser_list_sessions", {}], ["browser_close_session", { session_id: "missing" }],
-      ["browser_type", { index: 0, text: "x" }], ["browser_get_html", {}], ["browser_extract_content", { query: "body" }],
+      ["browser_input", { index: 0, text: "x" }], ["browser_get_html", {}],
       ["browser_navigate", { url: "http://127.0.0.1" }], ["browser_click", { target: "#x" }],
       ["browser_input", { target: "#x", text: "x" }], ["browser_select", { selector: "select", optionValue: "x" }],
       ["browser_scroll", {}], ["browser_scroll_to_bottom", {}], ["browser_key", { keys: ["Enter"] }],
       ["browser_switch_tab", { pageId: "missing" }], ["browser_close_tab", { pageId: "missing" }],
-      ["browser_back", {}], ["browser_go_back", {}], ["browser_forward", {}], ["browser_reload", {}], ["browser_close", {}], ["browser_close_all", {}],
+      ["browser_back", {}], ["browser_forward", {}], ["browser_reload", {}], ["browser_close", {}],
       ["browser_wait", { milliseconds: 0 }], ["browser_wait_for_element", { selector: "#x" }],
       ["browser_wait_for_text", { text: "x" }], ["browser_wait_for_url", { url: "*" }], ["browser_wait_for_network_idle", {}],
       ["browser_network_log", { operation: "read" }], ["browser_search_network_log", { query: "fixture", limit: 10 }], ["browser_console_log", { operation: "read" }],
       ["browser_resource_blocking", { operation: "get" }],
-      ["browser_find_text", { query: "x" }], ["browser_extract", {}], ["browser_extract_content", { query: "body", extract_links: true }],
+      ["browser_find_text", { query: "x" }], ["browser_extract", {}], ["browser_extract", { query: "body", includeLinks: true }],
       ["browser_upload", { selector: "input[type=file]", filePath: "/tmp/smooth-operator-test/file.txt" }],
       ["browser_screenshot", {}], ["browser_pdf", { outputPath: "/tmp/smooth-operator-test/page.pdf" }], ["browser_downloads", {}],
       ["browser_dropdown_options", { selector: "select" }], ["browser_page_next", {}], ["browser_search_page", { query: "x" }],
@@ -342,7 +430,6 @@ describe("native MCP registry", () => {
       ["browser_challenge", { pageId: "missing" }], ["browser_evaluate", { code: "1 + 1" }],
       ["browser_wait_for_human", { timeoutMs: 500 }],
       ["browser_solve_challenge", { pageId: "missing" }],
-      ["browser_exec", { code: JSON.stringify([{ action: "wait", milliseconds: 0 }]) }],
       ["browser_batch", { actions: [{ action: "wait", milliseconds: 0 }] }],
       ["browser_dialog", { operation: "get_text" }], ["browser_cookies", { operation: "get" }], ["browser_storage", { operation: "get" }],
       ["web_search", { query: "MCP", maxResults: 1, maxChars: 500 }],
@@ -380,6 +467,33 @@ describe("native MCP registry", () => {
     await client.close();
     await server.close();
     await runtime.close();
+  });
+
+  it("enforces navigation policy at the MCP edge before the browser service", async () => {
+    const runtime = await ServerRuntime.create(testConfig());
+    const run = vi.spyOn(runtime, "run");
+    const server = createMcpServer(runtime);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "edge-policy-test", version: "1.0.0" });
+    try {
+      await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+      const blocked = await client.callTool({ name: "browser_navigate", arguments: { url: "http://10.0.0.1/" } });
+      expect(blocked.isError).toBe(true);
+      expect(JSON.stringify(blocked)).toContain("PRIVATE_NETWORK_BLOCKED");
+      expect(run).not.toHaveBeenCalled();
+      const allowedLoopback = await client.callTool({ name: "browser_navigate", arguments: { url: "http://127.0.0.1/" } });
+      expect(allowedLoopback.isError).toBe(true);
+      expect(JSON.stringify(allowedLoopback)).toContain("BROWSER_DISABLED");
+      expect(run).toHaveBeenCalledTimes(1);
+      const evalDenied = await client.callTool({ name: "browser_evaluate", arguments: { code: "1+1" } });
+      expect(evalDenied.isError).toBe(true);
+      expect(JSON.stringify(evalDenied)).toContain("EVALUATE_DISABLED");
+      expect(run).toHaveBeenCalledTimes(1);
+    } finally {
+      await client.close().catch(() => undefined);
+      await server.close().catch(() => undefined);
+      await runtime.close();
+    }
   });
 
   it("forwards the MCP request signal to live resource operations", async () => {
@@ -423,7 +537,7 @@ describe("native MCP registry", () => {
     }
   });
 
-  it("accepts the camelCase session identifier alias without changing the wire result", async () => {
+  it("accepts the session identifier without changing the wire result", async () => {
     const runtime = await ServerRuntime.create(testConfig());
     const closeSession = vi.spyOn(runtime, "closeSession").mockResolvedValue({ closed: true, session_id: "session" });
     const server = createMcpServer(runtime);
@@ -431,7 +545,7 @@ describe("native MCP registry", () => {
     const client = new Client({ name: "session-alias-test", version: "1.0.0" });
     try {
       await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
-      const result = await client.callTool({ name: "browser_close_session", arguments: { sessionId: "session" } });
+      const result = await client.callTool({ name: "browser_close_session", arguments: { session_id: "session" } });
       expect(result.isError).not.toBe(true);
       expect(closeSession).toHaveBeenCalledWith("session", expect.any(AbortSignal));
       expect(result.structuredContent).toEqual({ closed: true, session_id: "session" });
@@ -498,7 +612,7 @@ describe("native MCP registry", () => {
       await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
       const result = await client.callTool({
         name: "browser_solve_challenge",
-        arguments: { pageId: "page-1", include_screenshot: true, full_page: true, max_dim: 900, maxChars: 4_000 },
+        arguments: { pageId: "page-1", includeScreenshot: true, fullPage: true, maxDimension: 900, maxChars: 4_000 },
       });
       expect(result.isError).not.toBe(true);
       expect(result.content).toEqual(expect.arrayContaining([
@@ -562,18 +676,18 @@ describe("native MCP registry", () => {
       expect(indexed.isError).not.toBe(true);
       expect(run.mock.calls[2]?.[0]).toMatchObject({ action: "click", index: 4 });
 
-      const coordinates = await client.callTool({ name: "browser_click", arguments: { coordinate_x: 10, coordinate_y: 20 } });
+      const coordinates = await client.callTool({ name: "browser_click", arguments: { coordinateX: 10, coordinateY: 20 } });
       expect(coordinates.isError).not.toBe(true);
       expect(run.mock.calls[3]?.[0]).toMatchObject({ action: "click", coordinateX: 10, coordinateY: 20 });
 
-      const typed = await client.callTool({ name: "browser_type", arguments: { index: 2, text: "hello" } });
+      const typed = await client.callTool({ name: "browser_input", arguments: { index: 2, text: "hello" } });
       expect(typed.isError).not.toBe(true);
       expect(run.mock.calls[4]?.[0]).toMatchObject({ action: "input", index: 2, text: "hello" });
 
-      await client.callTool({ name: "browser_switch_tab", arguments: { tab_id: "tab-2" } });
+      await client.callTool({ name: "browser_switch_tab", arguments: { pageId: "tab-2" } });
       expect(run.mock.calls[5]?.[0]).toEqual({ action: "switch_tab", pageId: "tab-2" });
 
-      await client.callTool({ name: "browser_close_tab", arguments: { tab_id: "tab-2" } });
+      await client.callTool({ name: "browser_close_tab", arguments: { pageId: "tab-2" } });
       expect(run.mock.calls[6]?.[0]).toEqual({ action: "close_tab", pageId: "tab-2" });
     } finally {
       await client.close().catch(() => undefined);
@@ -603,7 +717,7 @@ describe("native MCP registry", () => {
     }
   });
 
-  it("validates browser_exec plans once at execution and preserves canonical aliases", async () => {
+  it("validates browser_batch plans once at execution and preserves canonical aliases", async () => {
     const runtime = await ServerRuntime.create(testConfig());
     const runBatch = vi.spyOn(runtime, "runBatch").mockResolvedValue({ results: [{ sent: true }] });
     const server = createMcpServer(runtime);
@@ -612,13 +726,13 @@ describe("native MCP registry", () => {
     try {
       await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
       const result = await client.callTool({
-        name: "browser_exec",
-        arguments: { code: JSON.stringify([{ action: "key", keys: ["Enter"] }]) },
+        name: "browser_batch",
+        arguments: { actions: [{ action: "key", keys: ["Enter"] }] },
       });
       expect(result.isError).not.toBe(true);
       expect(runBatch).toHaveBeenCalledWith(
         [{ action: "send_keys", keys: ["Enter"] }],
-        { confirmDestructive: undefined },
+        expect.objectContaining({ confirmDestructive: undefined }),
         expect.any(AbortSignal),
       );
     } finally {

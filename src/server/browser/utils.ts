@@ -55,7 +55,7 @@ export function globMatches(value: string, glob: string): boolean {
     return false;
   }
   const cached = globPatternCache.get(glob);
-  if (cached !== undefined || globPatternCache.has(glob)) {
+  if (cached !== undefined) {
     if (!cached) return false;
     // Promote hot patterns so a burst of one-off waits cannot evict a pattern
     // used by a long-lived URL wait loop.

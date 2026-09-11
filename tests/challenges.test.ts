@@ -20,6 +20,12 @@ describe("challenge classification", () => {
   it("recognizes a rate limit from HTTP evidence", () => {
     const result = classifyChallenge({ status: 429 });
     expect(result.matches).toEqual([{ kind: "rate-limited", confidence: "high", indicators: ["http-status-429"] }]);
+    const mixed = classifyChallenge({
+      status: 429,
+      title: "Verification",
+      text: "Please verify you are human to continue.",
+    });
+    expect(mixed.matches.map((match) => match.kind)).toEqual(expect.arrayContaining(["generic-challenge", "rate-limited"]));
   });
 
   it("does not classify ordinary page content", () => {
@@ -80,6 +86,17 @@ describe("challenge classification", () => {
 });
 
 describe("classifyChallenge evidence", () => {
+  it("skips non-string marker entries without changing classification", () => {
+    const result = classifyChallenge({
+      title: "Verification",
+      text: "Please verify you are human to continue.",
+      visibleMarkers: [123 as unknown as string, "DIV cf-turnstile"],
+      frameSources: [null as unknown as string, "https://challenges.cloudflare.com/turnstile"],
+    });
+    expect(result.detected).toBe(true);
+    expect(result.matches.map((match) => match.kind)).toEqual(expect.arrayContaining(["cloudflare-turnstile"]));
+  });
+
   it("returns a bounded classification without solver state", () => {
     const result = classifyChallenge({ title: "Verification", text: "Please verify you are human to continue." });
     expect(result).not.toHaveProperty("bypassAttempted");

@@ -8,8 +8,14 @@
  * these wrappers at all.
  */
 
-import { GhostCursor } from "ghost-cursor";
 import type { Page } from "puppeteer-core";
+
+type GhostCursorCtor = typeof import("ghost-cursor").GhostCursor;
+
+async function createCursor(page: Page, start?: { x: number; y: number }): Promise<InstanceType<GhostCursorCtor>> {
+  const { GhostCursor } = await import("ghost-cursor");
+  return start ? new GhostCursor(page, { start }) : new GhostCursor(page);
+}
 
 /** Subset of ghost-cursor's `MoveToOptions` exposed by `humanMouseMove`. */
 export interface MoveOptions {
@@ -22,17 +28,6 @@ export interface MoveOptions {
   /** Override the generated path spread. */
   spreadOverride?: number;
 }
-
-/** Subset of ghost-cursor's `ScrollOptions` exposed by `humanScroll`. */
-export interface ScrollOptions {
-  /** ghost-cursor `scrollSpeed` (0–100, 100 instant). */
-  scrollSpeed?: number;
-  /** ghost-cursor `scrollDelay`. */
-  scrollDelay?: number;
-}
-
-/** ghost-cursor `ScrollToDestination`. */
-export type ScrollDestination = Partial<{ x: number; y: number }> | "top" | "bottom" | "left" | "right";
 
 /** Options for the manual typing loop. */
 export interface TypeOptions {
@@ -64,23 +59,11 @@ const DEFAULT_TYPE: Required<Omit<TypeOptions, "rng" | "signal">> & { rng: () =>
   rng: Math.random,
 };
 
-const DEFAULT_SCROLL: Required<ScrollOptions> = {
-  scrollSpeed: 90,
-  scrollDelay: 20,
-};
-
 /** Uniform sample in `[min, max)` from an injected random source. */
 export function randomRange(min: number, max: number, rand: () => number = Math.random): number {
   const sample = rand();
   const boundedSample = Number.isFinite(sample) ? Math.min(1, Math.max(0, sample)) : 0;
   return min + boundedSample * (max - min);
-}
-
-/** Resolve after a randomized delay within `[minMs, maxMs]`. */
-export function thinkTime(minMs = 20, maxMs = 120, rand: () => number = Math.random): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, Math.max(0, Math.floor(randomRange(minMs, maxMs, rand))));
-  });
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -120,7 +103,7 @@ export async function humanMouseMove(
   durationMs = 80,
   options: MoveOptions = {},
 ): Promise<void> {
-  const cursor = new GhostCursor(page, { start: { x: x1, y: y1 } });
+  const cursor = await createCursor(page, { x: x1, y: y1 });
   const configuredDuration = options.durationMs ?? durationMs;
   const moveDelay = Number.isFinite(configuredDuration) ? Math.max(0, Math.floor(configuredDuration)) : 0;
   await cursor.moveTo({ x: x2, y: y2 }, {
@@ -156,14 +139,4 @@ export async function humanType(page: Page, text: string, options: TypeOptions =
       await sleep(randomRange(cfg.thinkPauseMinMs, cfg.thinkPauseMaxMs, cfg.rng), cfg.signal);
     }
   }
-}
-
-/** Human-like scroll to a destination via ghost-cursor. */
-export async function humanScroll(page: Page, to: ScrollDestination, options: ScrollOptions = {}): Promise<void> {
-  const cursor = new GhostCursor(page);
-  const cfg = { ...DEFAULT_SCROLL, ...options };
-  await cursor.scrollTo(to, {
-    scrollSpeed: cfg.scrollSpeed,
-    scrollDelay: cfg.scrollDelay,
-  });
 }

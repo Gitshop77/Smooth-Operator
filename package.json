@@ -14,6 +14,10 @@
     "docs/mcp-server.md",
     "docs/harnesses.md",
     "docs/STEALTH-GUIDE.md",
+    "docs/architecture.md",
+    "docs/security.md",
+    "docs/tools.md",
+    "docs/config.md",
     "README.md",
     "LICENSE",
     ".env.example"
@@ -28,13 +32,13 @@
     "postbuild": "node scripts/set-executable.mjs dist/smooth-operator.mjs",
     "lint": "eslint . --ignore-pattern scripts/benchmark-network-journal.ts",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
+    "test": "vitest run --exclude tests/browser-live.test.ts",
     "test:unit": "vitest run --exclude tests/browser-live.test.ts",
     "benchmark:network": "tsx scripts/benchmark-network-journal.ts",
     "test:browser:live": "node scripts/test-browser-live.mjs",
-    "test:watch": "vitest",
-    "test:coverage": "vitest run --coverage",
-    "verify": "npm run lint && npm run typecheck && npm test && npm run dead-code && npm run package:smoke",
+    "test:watch": "vitest --exclude tests/browser-live.test.ts",
+    "test:coverage": "vitest run --coverage --exclude tests/browser-live.test.ts",
+    "verify": "npm run lint && npm run typecheck && npm run test:coverage && npm run dead-code && npm run package:smoke",
     "dead-code": "knip --include files,exports,dependencies,unlisted --no-progress",
     "mcp:stdio": "npm run start -- --transport stdio",
     "mcp:http": "npm run start -- --transport http",
@@ -49,7 +53,7 @@
     "@modelcontextprotocol/server": "2.0.0",
     "ghost-cursor": "1.4.2",
     "puppeteer-core": "25.10.0",
-    "zod": "4.5.4"
+    "zod": "4.6.2"
   },
   "devDependencies": {
     "@modelcontextprotocol/client": "^2.0.0",

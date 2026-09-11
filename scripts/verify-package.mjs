@@ -22,6 +22,10 @@ const REQUIRED_PACKAGED_FILES = new Set([
   "docs/mcp-server.md",
   "docs/harnesses.md",
   "docs/STEALTH-GUIDE.md",
+  "docs/architecture.md",
+  "docs/security.md",
+  "docs/tools.md",
+  "docs/config.md",
   DIST_ENTRY,
   DIST_MAP,
 ]);
@@ -145,7 +149,7 @@ async function verifySourceMetadata(packageJson) {
     throw new Error("package.json name must remain smooth-operator-mcp.");
   }
   const declaredFiles = new Set(Array.isArray(packageJson.files) ? packageJson.files : []);
-  const expectedFiles = new Set(["dist", "docs/mcp-server.md", "docs/harnesses.md", "docs/STEALTH-GUIDE.md", "README.md", "LICENSE", ".env.example"]);
+  const expectedFiles = new Set(["dist", "docs/mcp-server.md", "docs/harnesses.md", "docs/STEALTH-GUIDE.md", "docs/architecture.md", "docs/security.md", "docs/tools.md", "docs/config.md", "README.md", "LICENSE", ".env.example"]);
   if (declaredFiles.size !== expectedFiles.size || [...expectedFiles].some((file) => !declaredFiles.has(file))) {
     throw new Error(`package.json files must intentionally allowlist: ${[...expectedFiles].join(", ")}.`);
   }
@@ -167,7 +171,7 @@ async function verifySourceMetadata(packageJson) {
   if (!match || match[1] !== packageJson.version) {
     throw new Error(`Version drift: package.json=${packageJson.version}; src/server/version.ts=${match?.[1] ?? "missing"}.`);
   }
-  for (const file of ["README.md", "docs/mcp-server.md", "docs/harnesses.md", "docs/STEALTH-GUIDE.md"]) {
+  for (const file of ["README.md", "docs/mcp-server.md", "docs/harnesses.md", "docs/STEALTH-GUIDE.md", "docs/architecture.md", "docs/security.md", "docs/tools.md", "docs/config.md"]) {
     const path = join(root, file);
     await access(path);
     const source = await readFile(path, "utf8");
@@ -189,6 +193,11 @@ const SOURCE_HYGIENE_ROOTS = [
   "docs/mcp-server.md",
   "docs/harnesses.md",
   "docs/STEALTH-GUIDE.md",
+  "docs/architecture.md",
+  "docs/security.md",
+  "docs/tools.md",
+  "docs/config.md",
+  "docs/contributing.md",
   ".env.example",
 ];
 const SOURCE_HYGIENE_EXCLUSIONS = new Set([

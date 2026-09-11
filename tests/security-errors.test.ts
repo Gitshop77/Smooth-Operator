@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { AppError, safeErrorPayload, toolError, toolResult } from "@/server/errors";
+import { AppError, safeErrorPayload, toolError } from "@/server/errors";
+import { callTool } from "@/server/envelope";
 import { Logger, redactValue } from "@/server/logger";
 import { containsPromptInjection, normalizeUntrustedText, redactSecretPlaceholders, wrapUntrustedText } from "@/server/security";
 
@@ -175,9 +176,14 @@ describe("MCP error boundary", () => {
     expect(failed.content).toHaveLength(1);
     expect(failed.content[0]).toMatchObject({ type: "text" });
     expect(failed.content[0]?.type === "text" ? failed.content[0].text : "").not.toContain("secret");
-    expect(toolResult({ ok: true }).isError).toBeUndefined();
-    expect(toolResult(["a"]).structuredContent).toEqual({ value: ["a"] });
-    const jsonSafe = toolResult({ missing: undefined, infinite: Number.POSITIVE_INFINITY, callback: () => undefined });
+  });
+
+  it("wraps non-object success values and JSON-unsafe fields through the envelope", async () => {
+    const ok = await callTool(async () => ({ ok: true }));
+    expect(ok.isError).toBeUndefined();
+    const arrayValue = await callTool(async () => ["a"]);
+    expect(arrayValue.structuredContent).toEqual({ value: ["a"] });
+    const jsonSafe = await callTool(async () => ({ missing: undefined, infinite: Number.POSITIVE_INFINITY, callback: () => undefined }));
     expect(jsonSafe.content[0]).toMatchObject({ type: "text", text: '{"missing":null,"infinite":null,"callback":null}' });
     expect(jsonSafe.structuredContent).toEqual({ missing: null, infinite: null, callback: null });
   });

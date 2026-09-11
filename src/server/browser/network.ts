@@ -55,8 +55,6 @@ export interface NetworkJournalQuery extends NetworkJournalFilter {
   limit?: number;
 }
 
-export interface NetworkJournalSearchOptions extends NetworkJournalQuery {}
-
 /** A deterministic bounded page of journal results. */
 export interface NetworkJournalPage {
   entries: NetworkJournalEntry[];
@@ -96,7 +94,7 @@ const MAX_RESOURCE_TYPE_CHARS = 64;
 
 interface StoredEntry {
   entry: NetworkJournalEntry;
-  searchText: string;
+  searchText?: string;
   requestIdLower: string;
   urlLower: string;
   resourceTypeLower?: string;
@@ -150,7 +148,7 @@ export class NetworkJournal {
     };
     page.entries.set(requestId, this.stored(entry));
     this.enforcePageCapacity(page);
-    return cloneEntry(page.entries.get(requestId)?.entry ?? entry);
+    return page.entries.get(requestId)?.entry ?? entry;
   }
 
   /** Record or update response metadata and correlate it to its request. */
@@ -183,7 +181,7 @@ export class NetworkJournal {
       };
     page.entries.set(requestId, this.stored(entry));
     this.enforcePageCapacity(page);
-    return cloneEntry(page.entries.get(requestId)?.entry ?? entry);
+    return page.entries.get(requestId)?.entry ?? entry;
   }
 
   /** Query retained records using deterministic metadata filters and paging. */
@@ -193,10 +191,10 @@ export class NetworkJournal {
   }
 
   /** Search all safe metadata fields using one bounded case-insensitive scan. */
-  search(searchText: string, options: NetworkJournalSearchOptions = {}): NetworkJournalPage {
+  search(searchText: string, options: NetworkJournalQuery = {}): NetworkJournalPage {
     const query = normalizeSearchText(searchText);
     const normalized = normalizeQuery(options);
-    return this.scan(normalized, (stored) => stored.searchText.includes(query) && matchesFilter(stored, normalized));
+    return this.scan(normalized, (stored) => this.searchHaystack(stored).includes(query) && matchesFilter(stored, normalized));
   }
 
   /** Remove all records, or only records associated with one page. */
@@ -295,18 +293,27 @@ export class NetworkJournal {
   }
 
   private stored(entry: NetworkJournalEntry): StoredEntry {
-    const requestIdLower = entry.requestId.toLocaleLowerCase("en-US");
-    const urlLower = entry.url.toLocaleLowerCase("en-US");
-    const resourceTypeLower = entry.resourceType?.toLocaleLowerCase("en-US");
-    const searchParts = [
-      entry.pageId.toLocaleLowerCase("en-US"),
-      requestIdLower,
-      urlLower,
-      entry.method.toLocaleLowerCase("en-US"),
-      resourceTypeLower ?? "",
-      entry.status === undefined ? "" : String(entry.status),
-    ];
-    return { entry, requestIdLower, urlLower, resourceTypeLower, searchText: searchParts.join(" ") };
+    return {
+      entry,
+      requestIdLower: entry.requestId.toLocaleLowerCase("en-US"),
+      urlLower: entry.url.toLocaleLowerCase("en-US"),
+      ...(entry.resourceType ? { resourceTypeLower: entry.resourceType.toLocaleLowerCase("en-US") } : {}),
+    };
+  }
+
+  private searchHaystack(stored: StoredEntry): string {
+    if (stored.searchText !== undefined) {
+      return stored.searchText;
+    }
+    stored.searchText = [
+      stored.entry.pageId.toLocaleLowerCase("en-US"),
+      stored.requestIdLower,
+      stored.urlLower,
+      stored.entry.method.toLocaleLowerCase("en-US"),
+      stored.resourceTypeLower ?? "",
+      stored.entry.status === undefined ? "" : String(stored.entry.status),
+    ].join(" ");
+    return stored.searchText;
   }
 
   private enforcePageCapacity(page: PageJournal): void {

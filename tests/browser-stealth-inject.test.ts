@@ -1,28 +1,71 @@
-import { describe, expect, it } from "vitest";
+import { EventEmitter } from "node:events";
 
-import { buildFingerprintProfile } from "@/server/browser/fingerprints";
-import { buildStealthInitScript } from "@/server/browser/stealth";
+import { describe, expect, it, vi } from "vitest";
 
-// `new Function` compiles the source without running it, so a throw here is a
-// pure syntax error — proving the init script is well-formed page-JS.
-function compiles(source: string) {
-  expect(() => new Function(source)).not.toThrow();
-}
+import { nativeBrowserLaunchArgs } from "@/server/browser/compatibility";
+import { BrowserService } from "@/server/browser/service";
+import { Logger } from "@/server/logger";
+import { SecurityPolicy } from "@/server/policy";
 
-// Verifies the exact composition service.ts wires in `configurePageUnlocked`.
-// The `evaluateOnNewDocument` call needs a live page; here we prove the source
-// it injects is well-formed.
-describe("stealth init-script composition (service wiring)", () => {
-  it("balanced profile yields a non-empty, well-formed init script", () => {
-    const source = buildStealthInitScript(buildFingerprintProfile({ profile: "balanced" }), { max: false });
-    expect(source.length).toBeGreaterThan(0);
-    expect(source.trimStart().startsWith("(function (")).toBe(true);
-    compiles(source);
+import { testConfig } from "./helpers";
+
+const IDENTITY_LEAKS = [
+  "webdriver",
+  "userAgent",
+  "HeadlessChrome",
+  "WebGL",
+  "canvas",
+  "clientHint",
+  "navigator.platform",
+  "AutomationControlled",
+];
+
+describe("native identity (no page init-script injection)", () => {
+  it("does not inject a viewport or identity page script when stealth is enabled", async () => {
+    const config = testConfig({
+      stealth: { enabled: true, profile: "max", gpu: false, behaviorEnabled: false },
+      browser: { ...testConfig().browser, viewport: { width: 1366, height: 768 } },
+    });
+    const service = new BrowserService(config, new SecurityPolicy(config), new Logger("error", {}, () => undefined));
+    const evaluateOnNewDocument = vi.fn(async () => undefined);
+    const page = new EventEmitter() as EventEmitter & {
+      isClosed(): boolean;
+      setDefaultTimeout(timeout: number): void;
+      setDefaultNavigationTimeout(timeout: number): void;
+      setRequestInterception(enabled: boolean): Promise<void>;
+      setViewport(viewport: unknown): Promise<void>;
+      createCDPSession(): Promise<{ send(method: string, params?: unknown): Promise<unknown>; detach(): Promise<void> }>;
+      evaluateOnNewDocument(source: string): Promise<void>;
+    };
+    page.isClosed = () => false;
+    page.setDefaultTimeout = () => undefined;
+    page.setDefaultNavigationTimeout = () => undefined;
+    page.setRequestInterception = async () => undefined;
+    page.setViewport = async () => undefined;
+    page.createCDPSession = async () => ({ send: async () => undefined, detach: async () => undefined });
+    page.evaluateOnNewDocument = evaluateOnNewDocument;
+    const internal = service as unknown as {
+      stateFor(page: unknown): { downloadConfigured: boolean };
+      configurePage(state: unknown, signal?: AbortSignal): Promise<void>;
+    };
+    const state = internal.stateFor(page);
+    state.downloadConfigured = true;
+
+    await internal.configurePage(state);
+
+    expect(evaluateOnNewDocument).not.toHaveBeenCalled();
+    await service.close();
   });
 
-  it("max profile yields a non-empty, well-formed init script", () => {
-    const source = buildStealthInitScript(buildFingerprintProfile({ profile: "max" }), { max: true });
-    expect(source.length).toBeGreaterThan(0);
-    compiles(source);
+  it("keeps balanced and max launch identity identical and unpatched", () => {
+    const balanced = nativeBrowserLaunchArgs({ gpu: true, viewport: { width: 800, height: 600 } });
+    const max = nativeBrowserLaunchArgs({ gpu: true, viewport: { width: 800, height: 600 } });
+    expect(balanced).toEqual(max);
+    const joined = balanced.join(" ");
+    for (const leak of IDENTITY_LEAKS) {
+      expect(joined.toLowerCase()).not.toContain(leak.toLowerCase());
+    }
+    expect(joined).not.toMatch(/webdriver\s*=\s*false/);
+    expect(joined).not.toContain("--disable-blink-features=AutomationControlled");
   });
 });

@@ -145,9 +145,14 @@ export function classifyChallenge(
   // Reuse bounded marker text and cached regular expressions for every rule.
   const markerInMarkup = new Set<string>();
   const visibleMarkerInMarkup = new Set<string>();
+  const needlePresent = new Set<string>();
   for (const rule of RULES) {
     for (const needle of rule.needles) {
-      if (markerHaystack.includes(needle)) {
+      const inMarkers = markerHaystack.includes(needle);
+      if (inMarkers || haystack.includes(needle)) {
+        needlePresent.add(needle);
+      }
+      if (inMarkers) {
         markerInMarkup.add(needle);
       }
       if (visibleMarkerHaystack.includes(needle)) {
@@ -166,7 +171,7 @@ export function classifyChallenge(
   }
   const matches: ChallengeMatch[] = [];
   for (const rule of RULES) {
-    const indicators = rule.needles.filter((needle) => haystack.includes(needle) || markerHaystack.includes(needle));
+    const indicators = rule.needles.filter((needle) => needlePresent.has(needle));
     const widgetOnly = WIDGET_ONLY_KINDS.has(rule.kind);
     const genericChallenge = rule.kind === "generic-challenge";
     const authWall = rule.kind === "auth-wall";

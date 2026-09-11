@@ -38,11 +38,12 @@ describe("public MCP contract snapshot", () => {
         generatedPrompts,
       };
       const fingerprint = createHash("sha256").update(JSON.stringify(manifest)).digest("hex");
-      expect(fingerprint).toBe("dbdd31386d498b8c2fdf3c94543861f5f2d00e879acb175f2818ab34dd4dbf6f");
+      expect(fingerprint).toBe("975e746dc4793b5716e643b8a4f4faa40767dc293f24d084eb41c9dfd6c61780");
 
       const metadata = manifest.tools.map(({ name, description, inputSchema }) => ({ name, description, inputSchema }));
       const metadataBytes = new TextEncoder().encode(JSON.stringify(metadata)).byteLength;
       expect(metadataBytes).toBeLessThanOrEqual(48_000);
+      expect(metadataBytes).toBeLessThan(45_772);
       const click = metadata.find((tool) => tool.name === "browser_click");
       expect(new TextEncoder().encode(JSON.stringify(click)).byteLength).toBeLessThanOrEqual(3_000);
       expect(new TextEncoder().encode(MCP_INSTRUCTIONS).byteLength).toBeLessThanOrEqual(2_300);

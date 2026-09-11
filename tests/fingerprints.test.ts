@@ -1,24 +1,26 @@
 import { describe, expect, it } from "vitest";
 
-import { buildFingerprintProfile } from "@/server/browser/fingerprints";
+import { nativeBrowserLaunchArgs } from "@/server/browser/compatibility";
 
 describe("browser compatibility dimensions", () => {
-  it("is deterministic and uses a bounded default viewport", () => {
-    expect(buildFingerprintProfile()).toEqual(buildFingerprintProfile());
-    expect(buildFingerprintProfile().viewport).toEqual({ width: 1_920, height: 1_080 });
+  it("does not invent a default identity window size", () => {
+    expect(nativeBrowserLaunchArgs().some((flag) => flag.startsWith("--window-size"))).toBe(false);
+    expect(nativeBrowserLaunchArgs({ viewport: { width: 1_366, height: 768 } })).toContain("--window-size=1366,768");
   });
 
-  it("honors a valid explicit viewport", () => {
-    expect(buildFingerprintProfile({ viewport: { width: 1_366.9, height: 768.2 } }).viewport).toEqual({ width: 1_366, height: 768 });
-  });
-
-  it("falls back safely for invalid dimensions", () => {
-    expect(buildFingerprintProfile({ viewport: { width: 0, height: Number.NaN } }).viewport).toEqual({ width: 1_920, height: 1_080 });
+  it("ignores invalid viewport dimensions instead of fabricating identity", () => {
+    expect(nativeBrowserLaunchArgs({ viewport: { width: 0, height: Number.NaN } }).some((flag) => flag.startsWith("--window-size"))).toBe(false);
+    expect(nativeBrowserLaunchArgs({ viewport: { width: 1_366.9, height: 768.2 } }).some((flag) => flag.startsWith("--window-size"))).toBe(false);
   });
 
   it("does not expose replacement identity or hardware claims", () => {
-    const profile = buildFingerprintProfile({ profile: "max" });
-    expect(Object.keys(profile)).toEqual(["viewport"]);
-    expect(JSON.stringify(profile)).not.toMatch(/userAgent|platform|hardwareConcurrency|deviceMemory|languages|client/i);
+    const args = nativeBrowserLaunchArgs({ gpu: true, viewport: { width: 800, height: 600 } });
+    expect(JSON.stringify(args)).not.toMatch(/userAgent|platform|hardwareConcurrency|deviceMemory|languages|client/i);
+    expect(JSON.stringify(args)).not.toMatch(/Mozilla|Win32|WebGL|canvas|webdriver/i);
+  });
+
+  it("does not change launch identity between balanced and max profiles", () => {
+    expect(nativeBrowserLaunchArgs({ gpu: false })).toEqual(nativeBrowserLaunchArgs({ gpu: false }));
+    expect(nativeBrowserLaunchArgs()).not.toEqual(expect.arrayContaining(["--lang=en-US"]));
   });
 });

@@ -401,6 +401,13 @@ export class SecurityPolicy {
     return this.allowedFileRootMetadata.map((root) => ({ ...root }));
   }
 
+  /** Same eval gate used at the MCP edge and again inside BrowserService. */
+  assertEvalAllowed(): void {
+    if (!this.config.security.allowEval) {
+      throw new AppError("EVALUATE_DISABLED", "Page JavaScript execution is disabled by server configuration.");
+    }
+  }
+
   assertNavigationAllowed(rawUrl: string): URL {
     let url: URL;
     try {
@@ -437,8 +444,11 @@ export class SecurityPolicy {
     return url;
   }
 
-  async assertNavigationAllowedAsync(rawUrl: string): Promise<URL> {
+  async assertNavigationAllowedAsync(rawUrl: string, options?: { skipDns?: boolean }): Promise<URL> {
     const url = this.assertNavigationAllowed(rawUrl);
+    if (options?.skipDns) {
+      return url;
+    }
     const host = normalizeHost(url.hostname);
     if (this.config.security.allowPrivateNetwork || isLoopbackHostNormalized(host) || isIP(host)) {
       return url;

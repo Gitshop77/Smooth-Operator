@@ -117,18 +117,6 @@ export function toolError(error: unknown): CallToolResult {
   };
 }
 
-export function toolResult<T>(value: T): CallToolResult {
-  const safeValue = redactValue(value);
-  // MCP structuredContent is object-shaped on the wire. Preserve the direct
-  // JSON text fallback for arrays/primitives while giving clients a valid,
-  // predictable object for structured consumption.
-  const structuredContent = isRecord(safeValue) ? safeValue : { value: safeValue };
-  return {
-    content: [{ type: "text", text: JSON.stringify(safeValue) }],
-    structuredContent,
-  };
-}
-
 export function requireField<T>(value: T | undefined, field: string): T {
   if (value === undefined || value === null || value === "") {
     throw new AppError("INVALID_ACTION", `The '${field}' field is required.`);
