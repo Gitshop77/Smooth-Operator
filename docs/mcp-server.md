@@ -25,11 +25,15 @@ MCP client
             └─ Logger and safe error boundary
 ```
 
-`src/server/main.ts` owns transport startup, authentication, signal handling,
-and graceful shutdown. `src/server/mcp.ts` registers the public protocol
-surface. `src/server/runtime.ts` owns dependency lifecycle. Browser operations
-are in `src/server/browser/service.ts`; policy and configuration are in
-`src/server/policy.ts` and `src/server/config.ts`.
+`src/server/main.ts` owns CLI dispatch (`server`, `install`, `doctor`).
+`src/server/http.ts` owns Streamable HTTP, `healthz`, and shutdown bounds.
+`src/server/catalog.ts` is the locked public surface; `src/server/mcp.ts`
+registers it. `src/server/envelope.ts` serializes one result envelope.
+`src/server/runtime.ts` owns dependency lifecycle and the profile lease.
+Browser operations are in `src/server/browser/service.ts` with the exclusive
+queue in `src/server/browser/queue.ts`. Policy and configuration are in
+`src/server/policy.ts` and `src/server/config.ts`. See
+[architecture.md](architecture.md) for the module table.
 
 ## Install and start
 
@@ -326,8 +330,8 @@ variables include:
 | `SMOOTH_OPERATOR_ALLOWED_FILE_ROOTS` | data `files`, `downloads` | Explicit roots replace defaults |
 | `SMOOTH_OPERATOR_ALLOW_PRIVATE_NETWORK` | `false` | Allows non-loopback private targets when true |
 | `SMOOTH_OPERATOR_ALLOW_EVAL` | `true` | Set `false` to disable page JavaScript |
-| `SMOOTH_OPERATOR_STEALTH_ENABLED` | `true` | Native-identity viewport compatibility script |
-| `SMOOTH_OPERATOR_STEALTH_PROFILE` | `balanced` | `balanced` or `max` compatibility label |
+| `SMOOTH_OPERATOR_STEALTH_ENABLED` | `true` | Compatibility label; identity stays native |
+| `SMOOTH_OPERATOR_STEALTH_PROFILE` | `balanced` | `balanced` or `max`; no patch-set difference |
 | `SMOOTH_OPERATOR_STEALTH_GPU` | `false` | Adds opt-in GPU launch flags |
 | `SMOOTH_OPERATOR_BEHAVIOR_ENABLED` | `false` | Opt-in timing wrappers |
 | `SMOOTH_OPERATOR_HTTP_HOST` | `127.0.0.1` | HTTP bind host |
@@ -359,8 +363,9 @@ loop is introduced.
 Raw MCP/tool-call speed is not the main bot-detection vector. Sites can score
 network and browser identity, IP reputation, session history, and interaction
 timing independently. A faster call does not bypass a challenge or make an
-automated session legitimate; use the internal AI workflow or human handoff
-only where the target permits automation.
+automated session legitimate. The connected harness loops
+`browser_solve_challenge` / `browser_wait_for_human` only where the target
+permits automation.
 
 ## Security enforcement layers
 
@@ -395,9 +400,10 @@ are always applied, with explicit opt-ins where documented:
 - Page text, HTML, titles, attributes, search snippets, cookies, and logs are
   treated as untrusted data, normalized, bounded, and redacted before output.
 - Challenge and anti-bot markers are reported from bounded evidence. The server
-  does not rotate identities or silently bypass challenges. The connected-AI
-  challenge loop collects fresh classification and visual/state evidence,
-  allows ordinary browser actions, and verifies with a subsequent call.
+  does not rotate identities or silently bypass challenges. The connected harness
+  loops `browser_solve_challenge` / `browser_wait_for_human`: each solve call
+  collects fresh classification and visual/state evidence, allows ordinary
+  browser actions, and verifies with a subsequent call.
 
 Run the server with a dedicated browser profile and the smallest domain and
 file-root allowlists that fit the task. Browser automation can still perform
@@ -408,32 +414,37 @@ for confirming destructive calls.
 
 ### Tools
 
-The registry exposes 64 public tools in these groups. Every input is schema-validated;
-individual descriptions and limits are returned by `tools/list`.
+The registry exposes 57 public tools in these groups. Every input is schema-validated;
+individual descriptions and limits are returned by `tools/list`. Each listed
+name does one job. Cookies: `get`/`set`/`delete`. Storage and resource-blocking:
+`get`/`set`/`clear`. Network and console logs:
+`enable`/`disable`/`read`/`clear`/`read_and_clear`. Dialogs:
+`get_text`/`accept`/`dismiss`/`send_keys`.
 
 **Observation and extraction:** `browser_snapshot`, `browser_tabs`,
-`browser_list_tabs`, `browser_list_sessions`, `browser_get_state`,
+`browser_list_sessions`,
 `browser_page_info`, `browser_interactive`, `browser_frames`,
-`browser_accessibility_snapshot`, `browser_extract`, `browser_extract_content`,
+`browser_accessibility_snapshot`, `browser_extract`,
 `browser_find_text`, `browser_search_page`, `browser_find_elements`,
 `browser_dropdown_options`, `browser_computed_style`, `browser_page_next`,
 `browser_get_html`, `browser_search_network_log`, `browser_inspect_element`,
 `browser_challenge`, `browser_doctor`, and `server_health`.
 
 **Navigation and interaction:** `browser_navigate`, `browser_back`,
-`browser_go_back`, `browser_forward`, `browser_reload`, `browser_switch_tab`,
+`browser_forward`, `browser_reload`, `browser_switch_tab`,
 `browser_close_tab`, `browser_click`, `browser_input`, `browser_select`,
 `browser_scroll`, `browser_scroll_to_bottom`, `browser_key`,
-`browser_wait`, `browser_wait_for_element`, `browser_wait_for_text`, `browser_wait_for_url`,
-`browser_wait_for_network_idle`, `browser_hover`, `browser_move`, `browser_press_and_hold`,
-`browser_type`, `browser_close`, and `browser_close_all`.
+`browser_wait`, `browser_wait_for_element`, `browser_wait_for_text`,
+`browser_wait_for_url`, `browser_wait_for_network_idle`,
+`browser_hover`, `browser_move`, `browser_press_and_hold`,
+and `browser_close`.
 
 **Available local capabilities:** `browser_screenshot`, `browser_pdf`,
 `browser_upload`, `browser_downloads`, `browser_network_log`,
-`browser_search_network_log`, `browser_resource_blocking`, `browser_console_log`,
+`browser_console_log`, `browser_resource_blocking`,
 `browser_dialog`, `browser_cookies`, `browser_storage`,
-`browser_batch`, `browser_exec`, `browser_wait_for_human`,
-`browser_solve_challenge`, and all other browser tools are available by default.
+`browser_batch`, `browser_solve_challenge`, `browser_wait_for_human`,
+and all other browser tools are available by default.
 `browser_close_session` remains a local lifecycle control and does not change
 browser permissions. Page evaluation is available by default and can be
 disabled explicitly with `SMOOTH_OPERATOR_ALLOW_EVAL=false`.
@@ -448,19 +459,20 @@ acquire a profile lease; the next browser operation retries acquisition.
 `ready` reports readiness based on the runtime's current ownership state.
 
 `browser_evaluate` is page JavaScript and is available by default (set
-`SMOOTH_OPERATOR_ALLOW_EVAL=false` when it is not wanted). `browser_exec`
-accepts only a JSON array of validated browser actions; it is not a shell,
+`SMOOTH_OPERATOR_ALLOW_EVAL=false` when it is not wanted). `browser_batch`
+accepts only a validated array of browser actions; it is not a shell,
 Python, or arbitrary code runner. Its explicit `evaluate` action still follows
-the page-evaluation policy, and its optional `timeoutMs` is the same whole-batch
-deadline as `browser_batch` (120,000 ms default, 600,000 ms maximum).
+the page-evaluation policy, and its optional `timeoutMs` is the whole-batch
+deadline (120,000 ms default, 600,000 ms maximum).
 Destructive batch actions require explicit confirmation. There is no generic
 arbitrary CDP command or host-code execution
 tool. `browser_wait_for_human` pauses for an operator to complete a
-visible sign-in or challenge. `browser_solve_challenge` is an internal
-connected-AI observe/act/verify loop: it returns bounded evidence and is
-successful only when a fresh final classification explicitly reports the
-challenge absent; present and exhausted cycles report the remaining attempt
-budget and `automation_exhausted` is the final non-success state.
+visible sign-in or challenge. The connected harness loops
+`browser_solve_challenge` (one evidence cycle per call) and, after
+exhaustion, `browser_wait_for_human`. Success requires a fresh final
+classification that reports the challenge absent; present and exhausted
+cycles report the remaining attempt budget and `automation_exhausted` is
+the final non-success state.
 `browser_close_session`
 closes the one native browser session by its explicit session identifier.
 
@@ -473,14 +485,19 @@ accepts the same option at the top level and captures only one snapshot after
 the final action.
 
 Element-targeting tools accept exactly one of `target`, `ref` (`e5` or
-`ref:e5`), CSS `selector`, or zero-based `index`, plus the operation fields.
+`ref:e5`), CSS `selector`, or zero-based `index`. They do not take
+`operation`. `browser_click`, `browser_move`, and `browser_press_and_hold`
+also accept `coordinateX`/`coordinateY`; hold also accepts start/end
+coordinates or a path. `browser_challenge` is detect-only; solve is
+`browser_solve_challenge`.
 `browser_select` additionally requires exactly one of `optionValue` or
 `optionValues`; `browser_upload` requires exactly one target form and exactly
 one of `filePath` or `filePaths`. Snapshot refs and indexes are invalidated by
 navigation and DOM-changing actions, so refresh the snapshot before reuse.
 Prefer canonical tools (`browser_tabs`, `browser_snapshot`, `browser_input`,
-`browser_back`, `browser_close`, `browser_extract`); browser-use compatibility
-aliases are retained and labeled in `tools/list`.
+`browser_back`, `browser_close`, `browser_extract`). Compatibility aliases
+and retired `browser_logs` are unlisted catalog maps; `tools/list` is exactly
+the 57 names.
 
 The current-page observation tools `browser_interactive`, `browser_frames`,
 `browser_page_info`, and `browser_challenge` accept an optional `pageId`; omit
@@ -550,7 +567,8 @@ page. `browser_search_network_log` scans once, retains only the requested result
 page, and filters metadata by request ID, URL, method, status, and resource
 type. Headers, cookies, request
 bodies, and response bodies are not returned; search terms and URLs are treated
-as untrusted data and secret query values are redacted.
+as untrusted data and secret query values are redacted. `browser_console_log` is
+the bounded console journal.
 
 `browser_resource_blocking` is page-scoped with strict `get`, `set`, and
 `clear` operations. Its only selectable types are `image`, `stylesheet`,

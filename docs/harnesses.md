@@ -58,7 +58,7 @@ npm install -g .
 smooth-operator install --help
 ```
 
-After installation, restart the harness and confirm the 64-tool registry is
+After installation, restart the harness and confirm the 57-tool registry is
 visible. `server_health` reports the active capabilities; `browser_doctor`
 reports whether the configured or discovered executable is launch-ready and
 whether a managed DevTools endpoint is live. Optional idle cleanup is disabled

@@ -10,27 +10,32 @@ deterministic input.
 
 The installer asks exactly three questions: browser profile ownership, browser
 display, and the Chromium executable. Managed mode owns one private persistent
-profile below `SMOOTH_OPERATOR_DATA_DIR`; connected mode launches and attaches
-to a dedicated debugging profile and does not claim ownership of an operator's
-daily browser. A profile is not a privacy boundary from the websites it visits,
-so use a dedicated profile and the narrowest policy that fits the task.
+profile below `SMOOTH_OPERATOR_DATA_DIR`. Wizard Personal Chrome launches a
+dedicated debugging profile and does not take over daily Chrome. A profile is
+not a privacy boundary from the websites it visits, so use a dedicated profile
+and the narrowest policy that fits the task.
 
 ## Optional controls
 
-`SMOOTH_OPERATOR_STEALTH_ENABLED=true` is retained as a compatibility setting.
-It applies only an explicitly configured viewport and never hides automation
-signals or fabricates a user agent, platform, browser version, language, client
-hints, WebGL, canvas, TLS, or operating-system identity. Set it to `false` to
-skip that viewport script entirely.
+`SMOOTH_OPERATOR_STEALTH_ENABLED=true` is retained as a compatibility label.
+It does not hide automation signals, inject a page script, or fabricate a user
+agent, platform, browser version, language, client hints, WebGL, canvas, TLS,
+or operating-system identity. An explicit viewport is applied through launch
+`--window-size` and `page.setViewport`, independent of this flag.
 
 `SMOOTH_OPERATOR_STEALTH_PROFILE=balanced` or `max` are accepted compatibility
-labels for the same supported patch set. `SMOOTH_OPERATOR_STEALTH_GPU=true`
+labels with no patch-set difference. `SMOOTH_OPERATOR_STEALTH_GPU=true`
 adds GPU launch flags but is not an identity or coherence guarantee.
 
-`SMOOTH_OPERATOR_BEHAVIOR_ENABLED` controls optional pointer, typing, and
-scrolling timing wrappers. It defaults off for the fastest raw interaction
+`SMOOTH_OPERATOR_BEHAVIOR_ENABLED` controls optional pointer and typing
+timing wrappers. It defaults off for the fastest raw interaction
 path. If enabled, timings are short, bounded, and cancellable; this is a
 workflow choice, not a guarantee of human identity or site access.
+
+Connect mode attaches to the configured `browserURL` / `wsEndpoint`. The
+installer Personal Chrome helper uses a dedicated debugging profile
+(`~/.smooth-operator/personal-chrome`) and does not take over daily Chrome.
+Advanced `chrome://inspect` attach is documented in `mcp-server.md`.
 
 ## Bounded browser controls
 
@@ -51,24 +56,27 @@ are never captured by that journal.
 animations, safe attributes, and shallow structure. It omits scripts, event
 handler source, form values, password content, and arbitrary data attributes.
 
-## Connected-AI challenge loop
+## Connected-harness challenge loop
 
 `browser_challenge` is an evidence-only detector and is available by default.
 Title, text, HTML, frame-source, and visible-marker inputs have independent
 limits so one oversized evidence category cannot hide later challenge markers.
-`browser_solve_challenge` is an internal connected-AI loop: each call is one
-bounded verification cycle. It collects a fresh challenge classification and
-bounded visual/state evidence, including `attemptsRemaining`; the connected AI
-uses normal browser actions and calls it again until the final classification
-explicitly reports the challenge absent or `automation_exhausted`. The tool
-returns screenshot data as MCP image content when requested. `present`,
-`unknown`, or a failed probe is never success, and human handoff is only an
+`browser_solve_challenge` is one evidence cycle for the connected harness.
+Each call collects a fresh challenge classification and bounded visual/state
+evidence, including `attemptsRemaining`. The connected harness uses normal
+browser actions and calls it again until the final classification explicitly
+reports the challenge absent or `automation_exhausted`. The tool returns
+screenshot data as MCP image content when requested. `present`, `unknown`,
+or a failed probe is never success, and `browser_wait_for_human` is only an
 explicit option after exhaustion.
 
 `browser_wait_for_human` is an optional handoff for a person to complete a
 visible challenge or sign-in step. It does not claim success without a fresh
 final classification. The server does not rotate identities or open network,
-file, or authentication permissions for challenge handling.
+file, or authentication permissions for challenge handling. Launch args stay
+native-identity: they do not set `navigator.webdriver` to false, invent
+UA/platform/client-hint/WebGL/canvas strings, or advertise `HeadlessChrome` on
+the headed path.
 
 ## Boundaries and responsible use
 
